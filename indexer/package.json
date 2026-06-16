@@ -8,7 +8,7 @@
     "test": "node --test test/**/*.test.js"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "12.3.0",
+    "@stellar/stellar-sdk": "16.0.0",
     "dotenv": "16.4.5",
     "express": "^4.22.2",
     "node-cron": "^3.0.3",
