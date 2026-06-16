@@ -67,7 +67,7 @@ jobs:
       indexer_digest: ${{ steps.build-indexer.outputs.digest }}
       frontend_digest: ${{ steps.build-frontend.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: docker/setup-qemu-action@v3
 
@@ -155,7 +155,7 @@ jobs:
     needs: [resolve-env, build-images]
     environment: ${{ needs.resolve-env.outputs.environment }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
@@ -187,7 +187,7 @@ jobs:
       name: dev
       url: ${{ vars.APP_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Health check (baseline)
         run: curl -sf "${{ vars.APP_URL }}/api/health" || true
@@ -216,7 +216,7 @@ jobs:
       name: staging
       url: ${{ vars.APP_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Health check (baseline blue)
         run: curl -sf "${{ vars.APP_URL }}/api/health"
@@ -247,7 +247,7 @@ jobs:
       name: production
       url: ${{ vars.APP_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Health check (baseline)
         run: curl -sf "${{ vars.APP_URL }}/api/health"
@@ -347,7 +347,7 @@ jobs:
     if: failure() && needs.smoke-tests.result == 'failure'
     environment: ${{ needs.resolve-env.outputs.environment }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Roll back Docker containers
         run: |
@@ -388,7 +388,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
