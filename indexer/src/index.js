@@ -30,6 +30,10 @@ import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics } from ".
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
 import { startAuditPartitionCron } from "./audit/auditLogger.js";
 import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
+import { logger } from "./logger.js";
+import * as alertManager from "./alertManager.js";
+import { initDeadLetterQueue, processRetries as dlqProcessRetries } from "./deadLetterQueue.js";
+import { recordLedger as gapRecordLedger } from "./predictiveGapDetector.js";
 
 const RPC_URL = config.SOROBAN_RPC_URL;
 const START_LEDGER = config.START_LEDGER;
@@ -212,10 +216,11 @@ let shutdown = false;
 
 async function run() {
   await db.init();
+  await initDeadLetterQueue();
   const server = startApi();
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
-  warmCache().catch((e) => console.warn("[daemon] cache warm failed:", e.message));
+  warmCache().catch((e) => logger.warn({ err: e.message }, "cache warm failed"));
   startAbiSync();
   startBurnDetector();
   startMetricsCollector(); // RPC latency probes
@@ -229,8 +234,13 @@ async function run() {
 
   // Bootstrap vault indexer: initial ratio snapshot for all registered vaults
   refreshAllVaults().catch(() => {});
-  // Periodic ratio refresh every 60s for vaults that accrue without emitting events
-  setInterval(() => refreshAllVaults().catch(() => {}), 60_000);
+  // Periodic ratio refresh + alert health checks every 60 s
+  setInterval(() => {
+    refreshAllVaults().catch(() => {});
+    alertManager.checkIndexerDown().catch(() => {});
+    alertManager.checkResourceConstraints().catch(() => {});
+    dlqProcessRetries(async () => {}).catch(() => {}); // retry transient failures
+  }, 60_000);
 
   // resume from the highest indexed ledger so no events are missed
   // after a restart. Fall back to START_LEDGER or (latest - 100) for first run.
@@ -238,34 +248,37 @@ async function run() {
   _cursor =
     dbMax > 0 ? dbMax + 1 : START_LEDGER || (await withRetry(() => multiNodeRpc.getLatestLedger())).sequence - 100;
 
-  console.log(`[daemon] starting from ledger ${_cursor}`);
+  logger.info({ ledger: _cursor }, "daemon starting");
 
   while (!shutdown) {
     try {
       const latest = await indexLedger(_cursor);
+      alertManager.recordPoll();
+      gapRecordLedger(_cursor);
       const lagSeconds = Math.floor((Date.now() - (_cursor * 5000)) / 1000); // approximate lag
       updateIndexerStatus(_cursor, lagSeconds);
       _cursor = latest + 1;
       await db.saveCursor(_cursor);
     } catch (err) {
-      console.error("[daemon] indexer error:", err.message);
+      logger.error({ err: err.message, ledger: _cursor }, "indexer error");
       rpcErrors.inc({ type: err.code ?? "unknown" });
+      await alertManager.checkRpcHealth(false);
     }
     if (!shutdown) await new Promise((r) => setTimeout(r, POLL_MS));
   }
 
-  console.log("[daemon] shutting down");
+  logger.info("daemon shutting down");
   server?.close();
   process.exit(0);
 }
 
 process.on("SIGTERM", () => {
   shutdown = true;
-  console.log("[daemon] SIGTERM received");
+  logger.info("SIGTERM received");
 });
 process.on("SIGINT", () => {
   shutdown = true;
-  console.log("[daemon] SIGINT received");
+  logger.info("SIGINT received");
 });
 
 run();

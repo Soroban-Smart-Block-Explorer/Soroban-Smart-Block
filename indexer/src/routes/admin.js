@@ -113,8 +113,6 @@ export default function registerAdminRoutes(app) {
   app.post('/api/setup/db-init', async (req, res) => {
     try {
       await db.init();
-      const { seed } = await import('../seed-lib.js');
-      await seed(process.env.DATABASE_URL);
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
