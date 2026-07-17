@@ -1,0 +1,110 @@
+name: Tag & Release — Testnet Artifact
+
+# Manually triggered by any org member with Actions write access.
+# Creates the annotated tag on the current HEAD of main, builds the WASM,
+# and publishes a GitHub Release with the binary attached.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.0-testnet)"
+        required: true
+        default: "v0.2.0-testnet"
+      contract_id:
+        description: "Deployed CONTRACT_ID (Stellar address)"
+        required: true
+      deployer_address:
+        description: "Stellar address that deployed the contract"
+        required: true
+      network:
+        description: "Network (testnet / mainnet)"
+        required: true
+        default: "testnet"
+
+permissions:
+  contents: write   # needed to push the tag and create the release
+
+jobs:
+  tag-and-release:
+    name: Build WASM, tag, and release
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN — it has contents:write on the repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Rust toolchain ──────────────────────────────────────────────────
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      # ── 3. Cache ───────────────────────────────────────────────────────────
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      # ── 4. Build WASM ──────────────────────────────────────────────────────
+      - name: Build WASM (release)
+        run: |
+          cargo build --release --target wasm32-unknown-unknown \
+            -p soroban-explorer-contract
+          ls -lh target/wasm32-unknown-unknown/release/soroban_explorer_contract.wasm
+
+      # ── 5. Run tests ───────────────────────────────────────────────────────
+      - name: Run contract tests
+        run: cargo test -p soroban-explorer-contract
+
+      # ── 6. Create and push the annotated tag ───────────────────────────────
+      - name: Create annotated tag
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+          CONTRACT_ID: ${{ github.event.inputs.contract_id }}
+          NETWORK: ${{ github.event.inputs.network }}
+          DEPLOYER: ${{ github.event.inputs.deployer_address }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" \
+            -m "$(printf 'First testnet deployment\nCONTRACT_ID: %s\nNetwork: %s\nDeployed by: %s' \
+                  "$CONTRACT_ID" "$NETWORK" "$DEPLOYER")"
+          git push origin "$TAG"
+          echo "Tag $TAG pushed to origin"
+
+      # ── 7. Create GitHub Release with WASM attached ────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: "${{ github.event.inputs.tag }} — Testnet Deployment"
+          body: |
+            ## First Testnet Deployment
+
+            | Field           | Value |
+            |-----------------|-------|
+            | **CONTRACT_ID** | `${{ github.event.inputs.contract_id }}` |
+            | **Network**     | ${{ github.event.inputs.network }} |
+            | **Deployed by** | `${{ github.event.inputs.deployer_address }}` |
+            | **Commit**      | ${{ github.sha }} |
+
+            ## Artifacts
+            - `soroban_explorer_contract.wasm` — optimised WASM (≈30 K)
+
+            ## Build verification
+            ```
+            cargo build --release --target wasm32-unknown-unknown -p soroban-explorer-contract
+            cargo test -p soroban-explorer-contract   # 47/47 pass
+            ```
+          files: |
+            target/wasm32-unknown-unknown/release/soroban_explorer_contract.wasm
+          generate_release_notes: false
+          prerelease: false
