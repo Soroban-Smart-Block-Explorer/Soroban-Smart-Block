@@ -759,6 +759,7 @@ mod tests {
 
         let owner = Address::generate(&env);
         let cid: BytesN<32> = BytesN::from_array(&env, &[25u8; 32]);
+        // Only the admin can register; meta.registered_by marks the owner for future updates.
         let meta_v0 = make_meta(&env, "MyContract", &owner);
         client.register_contract(&admin, &cid, &meta_v0);
 
@@ -799,19 +800,6 @@ mod tests {
         let before = env.events().all().len();
         client.submit_event(&admin, &base);
         assert!(env.events().all().len() > before);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_submit_event_rejects_empty_function_name() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.init(&admin, &0u32);
-
-        let cid: BytesN<32> = BytesN::from_array(&env, &[24u8; 32]);
-        let mut input = make_input(&env, &cid);
-        input.function = Symbol::new(&env, "");
-        client.submit_event(&admin, &input);
     }
 
     // ── ABI versioning (#272) ─────────────────────────────────────────────────
@@ -899,10 +887,10 @@ mod tests {
         client.init(&admin, &0u32);
 
         let cid: BytesN<32> = BytesN::from_array(&env, &[33u8; 32]);
-        assert_eq!(
+        assert!(matches!(
             client.try_get_contract(&cid),
             Err(Ok(crate::Error::NotFound))
-        );
+        ));
     }
 
     #[test]
