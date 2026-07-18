@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { pathToFileURL } from "node:url";
 import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import config from "./config.js";
 import { startApi } from "./api.js";
@@ -99,6 +100,121 @@ async function indexWasmUploads(txHashes, ledger) {
 }
 
 /**
+ * Load transaction-scoped enrichments shared by normal indexing and DLQ
+ * retries. RPC, parsing, and transaction-status failures remain non-critical,
+ * matching the original page-prefetch behavior.
+ *
+ * @param {string | null | undefined} txHash
+ * @param {object} adapters optional adapters for deterministic callers/tests
+ * @returns {Promise<{ feeBump: object | null, archivalInfo: object | null }>}
+ */
+export async function loadTransactionContext(
+  txHash,
+  {
+    fetchTransaction = (hash) => withRetry(() => rpc.getTransaction(hash)),
+    parseFeeBumpEnvelope = parseFeeBump,
+    parseRestoreEnvelope = parseAndDescribeRestore,
+    publishStatus = publishTransactionStatus,
+    extractFailure = async (txResult) => {
+      const { extractFailureReason } = await import("./diagnosticParser.js");
+      return extractFailureReason(txResult);
+    },
+  } = {},
+) {
+  const context = { feeBump: null, archivalInfo: null };
+  if (!txHash) return context;
+
+  try {
+    const txResult = await fetchTransaction(txHash);
+    if (txResult?.envelopeXdr) {
+      context.feeBump = parseFeeBumpEnvelope(txResult.envelopeXdr);
+      const restore = parseRestoreEnvelope(txResult.envelopeXdr, txResult.resultMetaXdr ?? null);
+      if (restore.isRestoreOp) context.archivalInfo = restore;
+    }
+
+    try {
+      const status =
+        txResult?.status === "SUCCESS" ? "success" : txResult?.status === "FAILED" ? "failed" : "pending";
+      publishStatus({
+        tx_hash: txHash,
+        status,
+        ledger: txResult?.ledger ?? null,
+        error: await extractFailure(txResult),
+      });
+    } catch {
+      /* non-fatal transaction-status enrichment */
+    }
+  } catch {
+    /* non-critical transaction lookup/enrichment failure */
+  }
+
+  return context;
+}
+
+/**
+ * Run one raw Soroban RPC event through the complete indexing pipeline.
+ *
+ * Transaction-level fee-bump and restore metadata is collected once per page
+ * by indexLedger and supplied here. A one-argument DLQ call loads the same
+ * transaction context before decoding and persisting the event.
+ *
+ * @param {object} rawSorobanEvent
+ * @param {{ feeBump: object | null, archivalInfo: object | null }} context
+ * @returns {Promise<object>} the decoded event that was persisted
+ */
+export async function processSingleEvent(rawSorobanEvent, context = undefined) {
+  const { feeBump, archivalInfo } = context ?? (await loadTransactionContext(rawSorobanEvent.txHash));
+  const decodeStart = Date.now();
+  const decoded = await decode(rawSorobanEvent);
+  decodeLatency.observe(Date.now() - decodeStart);
+  eventsIngested.inc({ function: decoded.function });
+  decoded.is_high_bloat_risk = isHighBloatRisk(rawSorobanEvent, rawSorobanEvent.contractId);
+  decoded.footprint_contention = rawSorobanEvent.footprint_contention ?? false;
+
+  const upgrade = detectUpgrade(rawSorobanEvent);
+  if (upgrade) {
+    console.log(
+      `[${rawSorobanEvent.ledger}] CONTRACT UPGRADE ${rawSorobanEvent.contractId}: ${upgrade.oldHash} → ${upgrade.newHash}`,
+    );
+    decoded.upgrade = upgrade;
+  }
+
+  decoded.storage_tiers = classifyStorageWrites(rawSorobanEvent);
+  decoded.fee_bump = feeBump;
+  decoded.archival_info = archivalInfo;
+  await db.upsertEventValidated(decoded);
+
+  // Persist per-key state diffs for the timeline.
+  const diffs = extractStateDiffs(rawSorobanEvent, decoded);
+  if (diffs.length) await db.insertStateDiffs(diffs).catch(() => {});
+
+  // Detect evicted ledger keys (TTL → 0) in this transaction.
+  const evictions = detectEvictions(rawSorobanEvent, rawSorobanEvent.ledger, rawSorobanEvent.txHash);
+  if (evictions.length) {
+    await db
+      .insertArchivalEvictions(evictions)
+      .catch((err) => console.error("[archivalEviction] insert failed:", err.message));
+    console.log(
+      `[${rawSorobanEvent.ledger}] EVICTED ${evictions.length} key(s) in tx ${rawSorobanEvent.txHash}`,
+    );
+  }
+
+  publish(decoded); // push to WS clients
+  handleVaultEvent(decoded); // vault ratio update (async, non-blocking)
+
+  // Process circuit breaker events.
+  const meta = await db.getContractMeta(rawSorobanEvent.contractId).catch(() => null);
+  if (meta) {
+    processCircuitBreakerEvent(decoded, meta).catch((err) =>
+      console.error("[circuitBreakerIndexer] Error:", err.message),
+    );
+  }
+
+  console.log(`[${rawSorobanEvent.ledger}] ${decoded.function}: ${decoded.description}`);
+  return decoded;
+}
+
+/**
  * Fetch and process ALL events for a given startLedger, handling pagination
  * boundaries when a ledger contains more than PAGE_LIMIT events
  *
@@ -122,87 +238,18 @@ async function indexLedger(ledger) {
     // Flag footprint contention across transactions in this page's events
     scanFootprintContention(res.events);
 
-    // Build a per-page txHash → feeBump cache to avoid redundant
-    // getTransaction calls when multiple events share the same transaction.
-    const feeBumpCache = new Map();
-    const restoreCache = new Map(); // txHash → archival_info
+    // Build a per-page transaction-context cache to avoid redundant RPC calls
+    // when multiple events share the same transaction.
+    const transactionContextCache = new Map();
     const uniqueTxHashes = [...new Set(res.events.map((e) => e.txHash).filter(Boolean))];
     await Promise.all(
       uniqueTxHashes.map(async (txHash) => {
-        try {
-          const txResult = await withRetry(() => rpc.getTransaction(txHash));
-          if (txResult?.envelopeXdr) {
-            feeBumpCache.set(txHash, parseFeeBump(txResult.envelopeXdr));
-            // parse RestoreFootprintOp if present
-            const restore = parseAndDescribeRestore(txResult.envelopeXdr, txResult.resultMetaXdr ?? null);
-            if (restore.isRestoreOp) restoreCache.set(txHash, restore);
-          }
-
-          // Publish a transaction status event for clients
-          try {
-            const status = txResult?.status === "SUCCESS" ? "success" : txResult?.status === "FAILED" ? "failed" : "pending";
-            const { extractFailureReason } = await import("./diagnosticParser.js");
-            const payload = {
-              tx_hash: txHash,
-              status,
-              ledger: txResult?.ledger ?? null,
-              error: extractFailureReason(txResult),
-            };
-            publishTransactionStatus(payload);
-          } catch (err) {
-            /* non-fatal */
-          }
-        } catch {
-          /* non-critical — skip fee-bump/restore for this tx */
-        }
+        transactionContextCache.set(txHash, await loadTransactionContext(txHash));
       }),
     );
 
     for (const ev of res.events) {
-      const decodeStart = Date.now();
-      const decoded = await decode(ev);
-      decodeLatency.observe(Date.now() - decodeStart);
-      eventsIngested.inc({ function: decoded.function });
-      decoded.is_high_bloat_risk = isHighBloatRisk(ev, ev.contractId);
-      decoded.footprint_contention = ev.footprint_contention ?? false;
-
-      const upgrade = detectUpgrade(ev);
-      if (upgrade) {
-        console.log(`[${ev.ledger}] CONTRACT UPGRADE ${ev.contractId}: ${upgrade.oldHash} → ${upgrade.newHash}`);
-        decoded.upgrade = upgrade;
-      }
-
-      decoded.storage_tiers = classifyStorageWrites(ev);
-      decoded.fee_bump = feeBumpCache.get(ev.txHash) ?? null;
-      // attach restoration info when this tx is a RestoreFootprintOp
-      decoded.archival_info = restoreCache.get(ev.txHash) ?? null;
-      await db.upsertEventValidated(decoded);
-
-      // persist per-key state diffs for the timeline
-      const diffs = extractStateDiffs(ev, decoded);
-      if (diffs.length) await db.insertStateDiffs(diffs).catch(() => {});
-
-      // detect evicted ledger keys (TTL → 0) in this transaction
-      const evictions = detectEvictions(ev, ev.ledger, ev.txHash);
-      if (evictions.length) {
-        await db
-          .insertArchivalEvictions(evictions)
-          .catch((err) => console.error("[archivalEviction] insert failed:", err.message));
-        console.log(`[${ev.ledger}] EVICTED ${evictions.length} key(s) in tx ${ev.txHash}`);
-      }
-
-      publish(decoded); // push to WS clients
-      handleVaultEvent(decoded); // vault ratio update (async, non-blocking)
-
-      // process circuit breaker events
-      const meta = await db.getContractMeta(ev.contractId).catch(() => null);
-      if (meta) {
-        processCircuitBreakerEvent(decoded, meta).catch((err) =>
-          console.error("[circuitBreakerIndexer] Error:", err.message),
-        );
-      }
-
-      console.log(`[${ev.ledger}] ${decoded.function}: ${decoded.description}`);
+      await processSingleEvent(ev, transactionContextCache.get(ev.txHash));
     }
 
     // Scan transactions for UploadContractWasm operations (non-blocking)
@@ -252,7 +299,7 @@ async function run() {
     refreshAllVaults().catch(() => {});
     alertManager.checkIndexerDown().catch(() => {});
     alertManager.checkResourceConstraints().catch(() => {});
-    dlqProcessRetries(async () => {}).catch(() => {}); // retry transient failures
+    dlqProcessRetries(processSingleEvent).catch(() => {}); // retry transient failures
   }, 60_000);
 
   // resume from the highest indexed ledger so no events are missed
@@ -286,13 +333,15 @@ async function run() {
   process.exit(0);
 }
 
-process.on("SIGTERM", () => {
-  shutdown = true;
-  logger.info("SIGTERM received");
-});
-process.on("SIGINT", () => {
-  shutdown = true;
-  logger.info("SIGINT received");
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.on("SIGTERM", () => {
+    shutdown = true;
+    logger.info("SIGTERM received");
+  });
+  process.on("SIGINT", () => {
+    shutdown = true;
+    logger.info("SIGINT received");
+  });
 
-run();
+  run();
+}
