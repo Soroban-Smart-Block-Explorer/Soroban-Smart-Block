@@ -7,42 +7,25 @@
  * the main indexer loop can re-index from there.
  */
 
-import pg from "pg";
-
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+import { db } from "./db.js";
+import * as alertManager from "./alertManager.js";
+import config from "./config.js";
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
-async function ensureLedgerHashTable() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS ledger_hashes (
-      ledger     BIGINT PRIMARY KEY,
-      hash       TEXT   NOT NULL,
-      indexed_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-}
-
 /** Persist the hash we observed for a ledger when we first indexed it. */
 export async function recordLedgerHash(ledger, hash) {
-  await pool.query(
-    `INSERT INTO ledger_hashes (ledger, hash)
-     VALUES ($1, $2)
-     ON CONFLICT (ledger) DO NOTHING`,
-    [ledger, hash],
-  );
+  await db.recordLedgerHash(ledger, hash);
 }
 
 /** Return the last N ledger rows we have on record, newest first. */
-async function getRecentLedgerHashes(limit = 20) {
-  const { rows } = await pool.query(`SELECT ledger, hash FROM ledger_hashes ORDER BY ledger DESC LIMIT $1`, [limit]);
-  return rows; // [{ ledger, hash }, …]
+async function getRecentLedgerHashes(limit = config.REORG_CHECK_INTERVAL + config.REORG_MAX_DEPTH) {
+  return db.getRecentLedgerHashes(limit);
 }
 
-/** Delete all events and ledger_hash records at or above forkLedger. */
-async function rollback(forkLedger) {
-  await pool.query(`DELETE FROM events        WHERE ledger     >= $1`, [forkLedger]);
-  await pool.query(`DELETE FROM ledger_hashes WHERE ledger     >= $1`, [forkLedger]);
+/** Delete orphaned rows and atomically persist the rewind cursor. */
+export async function rollback(forkLedger) {
+  await db.rollbackFromLedger(forkLedger);
   console.warn(`[reorg] Rolled back ledger ${forkLedger}+`);
 }
 
@@ -52,35 +35,67 @@ async function rollback(forkLedger) {
  * Compare our stored hashes against the network.
  *
  * @param {import("@stellar/stellar-sdk").SorobanRpc.Server} rpc
+ * A detected mismatch is rolled back atomically before the fork height is
+ * returned to the caller for its in-memory cursor rewind. Alert delivery is
+ * best-effort and cannot block that recovery path.
+ *
+ * @param {{
+ *   getStoredHashes?: (limit: number) => Promise<Array<{ledger: number|string, hash: string}>>,
+ *   rollbackFork?: (ledger: number) => Promise<void>,
+ *   alertReorg?: (ledger: number) => Promise<void>,
+ *   checkInterval?: number,
+ *   maxDepth?: number
+ * }} dependencies Optional test seams for external effects.
  * @returns {Promise<number|null>} fork ledger height, or null if no reorg
  */
-export async function checkForReorg(rpc) {
-  const stored = await getRecentLedgerHashes(20);
+export async function checkForReorg(rpc, dependencies = {}) {
+  const getStoredHashes = dependencies.getStoredHashes ?? getRecentLedgerHashes;
+  const rollbackFork = dependencies.rollbackFork ?? rollback;
+  const alertReorg = dependencies.alertReorg ?? alertManager.alertReorg;
+  const checkInterval = dependencies.checkInterval ?? config.REORG_CHECK_INTERVAL;
+  const maxDepth = dependencies.maxDepth ?? config.REORG_MAX_DEPTH;
+  // A polling pass records the RPC's latest-ledger hash; paginated pages
+  // conflict on that same ledger. A catch-up span therefore must not expand
+  // this SQL/RPC scan beyond the configured cadence plus supported depth.
+  const lookback = checkInterval + maxDepth;
+  const stored = await getStoredHashes(lookback);
   if (stored.length === 0) return null;
 
+  let earliestFork = null;
   for (const { ledger, hash } of stored) {
+    const ledgerNumber = Number(ledger);
     let networkHash;
     try {
       // getLedger is available on Soroban RPC; fall back gracefully if not.
-      const info = await rpc.getLedger(ledger).catch(() => null);
+      const info = await rpc.getLedger(ledgerNumber).catch(() => null);
       networkHash = info?.hash ?? null;
     } catch {
       continue; // RPC hiccup — skip this ledger
     }
 
     if (networkHash && networkHash !== hash) {
-      console.warn(`[reorg] Mismatch at ledger ${ledger}: stored=${hash} network=${networkHash}`);
-      return ledger;
+      console.warn(`[reorg] Mismatch at ledger ${ledgerNumber}: stored=${hash} network=${networkHash}`);
+      earliestFork = earliestFork === null ? ledgerNumber : Math.min(earliestFork, ledgerNumber);
     }
   }
 
-  return null; // all hashes match
+  if (earliestFork === null) return null;
+
+  await rollbackFork(earliestFork);
+  try {
+    await alertReorg(earliestFork);
+  } catch (err) {
+    console.error(`[reorg] Alert failed at ledger ${earliestFork}: ${err.message}`);
+  }
+  return earliestFork;
 }
 
 // ── Worker entry-point ────────────────────────────────────────────────────────
 
 /**
- * Start the periodic re-org check.
+ * Start a periodic re-org check for embedded callers.
+ * The main daemon intentionally calls checkForReorg() inline instead, keeping
+ * cursor ownership single-flight with ledger indexing.
  *
  * @param {import("@stellar/stellar-sdk").SorobanRpc.Server} rpc
  * @param {{ getCursor: () => number, setCursor: (n: number) => void }} cursorRef
@@ -93,7 +108,6 @@ export function startReorgWorker(rpc, cursorRef, intervalMs = 30_000) {
   let running = true;
 
   (async () => {
-    await ensureLedgerHashTable();
     console.log("[reorg] Worker started");
 
     while (running) {
@@ -103,7 +117,6 @@ export function startReorgWorker(rpc, cursorRef, intervalMs = 30_000) {
       try {
         const forkLedger = await checkForReorg(rpc);
         if (forkLedger !== null) {
-          await rollback(forkLedger);
           cursorRef.setCursor(forkLedger); // rewind main loop
           console.log(`[reorg] Cursor rewound to ${forkLedger}`);
         }

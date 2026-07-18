@@ -23,7 +23,7 @@ import { scanFootprintContention } from "./footprintContentionScanner.js";
 import { handleVaultEvent, refreshAllVaults } from "./vaultIndexer.js";
 import { processCircuitBreakerEvent } from "./circuitBreakerIndexer.js";
 import { startGasGuzzlersWorker } from "./gasGuzzlers.js";
-import { recordLedgerHash } from "./reorgWorker.js";
+import { checkForReorg, recordLedgerHash } from "./reorgWorker.js";
 import { warmCache } from "./cacheWarming.js";
 import { cacheInvalidate } from "./cacheLayer.js";
 import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics } from "./metrics.js";
@@ -38,6 +38,7 @@ import { recordLedger as gapRecordLedger } from "./predictiveGapDetector.js";
 const RPC_URL = config.SOROBAN_RPC_URL;
 const START_LEDGER = config.START_LEDGER;
 const POLL_MS = config.POLL_MS;
+const REORG_CHECK_INTERVAL = config.REORG_CHECK_INTERVAL;
 // Max events per RPC page — Soroban caps at 200
 const PAGE_LIMIT = 200;
 
@@ -226,6 +227,7 @@ async function indexLedger(ledger) {
 }
 
 let shutdown = false;
+let ledgersSinceReorgCheck = 0;
 
 async function run() {
   await db.init();
@@ -266,11 +268,30 @@ async function run() {
   while (!shutdown) {
     try {
       console.log(`[daemon] polling from ledger ${_cursor}`);
-      const latest = await indexLedger(_cursor);
+      const polledFrom = _cursor;
+      const latest = await indexLedger(polledFrom);
       alertManager.recordPoll();
-      gapRecordLedger(_cursor);
-      const lagSeconds = Math.floor((Date.now() - (_cursor * 5000)) / 1000); // approximate lag
-      updateIndexerStatus(_cursor, lagSeconds);
+      gapRecordLedger(polledFrom);
+      const lagSeconds = Math.floor((Date.now() - (polledFrom * 5000)) / 1000); // approximate lag
+      updateIndexerStatus(polledFrom, lagSeconds);
+
+      ledgersSinceReorgCheck += Math.max(1, latest - polledFrom + 1);
+      if (ledgersSinceReorgCheck >= REORG_CHECK_INTERVAL) {
+        // Keep reorg handling in this single-flight loop so no timer can race
+        // indexLedger() while it owns and persists the daemon cursor.
+        // The raw ledger span only triggers the check. Hash-row lookback stays
+        // bounded inside checkForReorg(), even after a large catch-up jump.
+        const forkLedger = await checkForReorg(rpc);
+        ledgersSinceReorgCheck = 0;
+        if (forkLedger !== null) {
+          // rollbackFromLedger() persisted this rewind in the same transaction
+          // that removed orphaned rows; only the in-memory cursor remains.
+          _cursor = forkLedger;
+          logger.warn({ ledger: forkLedger }, "chain reorganization detected; cursor rewound");
+          continue;
+        }
+      }
+
       _cursor = latest + 1;
       await db.saveCursor(_cursor);
     } catch (err) {

@@ -129,6 +129,11 @@ const configSchema = z.object({
     message: "POLL_MS must be at least 100ms to avoid overwhelming the RPC",
   }),
 
+  // Reorg lookback is bounded to the scheduling interval plus supported depth.
+  REORG_CHECK_INTERVAL: positiveInt(100),
+
+  REORG_MAX_DEPTH: positiveInt(100),
+
   EXPLORER_CONTRACT_ID: z.string().optional(),
 
   API_KEY: z.string().optional(),
