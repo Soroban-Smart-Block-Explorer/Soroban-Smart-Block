@@ -31,6 +31,7 @@ import {
 import { getRedisClient } from '../rateLimit/tokenBucket.js';
 import { db, pool } from '../db.js';
 import { runAllChecks } from '../doctor-lib.js';
+import { getActiveAlerts, resolveAlert } from '../alertManager.js';
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
@@ -164,6 +165,15 @@ export default function registerAdminRoutes(app) {
 
   // Apply admin auth to all routes on this router.
   router.use(adminAuthMiddleware);
+
+  // ── POST /api/admin/alerts/:condition/resolve ─────────────────────────────
+  router.post('/alerts/:condition/resolve', (req, res) => {
+    const { condition } = req.params;
+    const resolved = getActiveAlerts().some((alert) => alert.condition === condition);
+
+    resolveAlert(condition);
+    res.json({ condition, resolved });
+  });
 
   // ── GET /api/admin/api-keys ────────────────────────────────────────────────
   router.get('/api-keys', async (req, res) => {

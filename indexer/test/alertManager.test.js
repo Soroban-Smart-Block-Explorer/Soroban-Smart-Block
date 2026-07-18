@@ -67,11 +67,12 @@ describe("fireAlert and resolveAlert", () => {
     assert.doesNotThrow(() => resolveAlert(ALERT_CONDITIONS.ALL_RPC_DOWN));
   });
 
-  it("active alert has a numeric firedAt timestamp", async () => {
+  it("active alert has an ISO firedAt timestamp and duration", async () => {
     await fireAlert(ALERT_CONDITIONS.REORG_DETECTED, "reorg at 999");
     const alert = getActiveAlerts().find((a) => a.condition === ALERT_CONDITIONS.REORG_DETECTED);
-    assert.ok(typeof alert.firedAt === "number");
-    assert.ok(alert.firedAt <= Date.now());
+    assert.equal(new Date(alert.firedAt).toISOString(), alert.firedAt);
+    assert.ok(Number.isInteger(alert.durationMs));
+    assert.ok(alert.durationMs >= 0);
   });
 });
 

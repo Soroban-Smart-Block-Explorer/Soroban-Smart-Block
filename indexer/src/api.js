@@ -43,6 +43,7 @@ import pg from "pg";
 import { getBurnAlerts } from "./burnDetector.js";
 import { formatAmount } from "./formatAmount.js";
 import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
+import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
 
 function requestIdMiddleware(req, _res, next) {
@@ -237,20 +238,33 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Health check endpoints ──────────────────────────────────────────────
 
-  // Comprehensive health check with dependency status
-  app.get("/health", async (_req, res) => {
+  // Comprehensive health check with dependency and active-alert status
+  const healthHandler = async (_req, res) => {
     try {
       const health = await getHealthStatus();
-      const statusCode = health.status === "healthy" ? 200 : 
-                        health.status === "degraded" ? 200 : 503;
+      const statusCode = ["healthy", "degraded"].includes(health.status) ? 200 : 503;
       res.status(statusCode).json(health);
     } catch (e) {
-      res.status(503).json({ 
+      const activeAlerts = getActiveAlerts();
+      res.status(503).json({
         status: "unhealthy",
         error: e.message,
         timestamp: new Date().toISOString(),
+        alerts: {
+          active_count: activeAlerts.length,
+          conditions: activeAlerts.map(({ condition }) => condition),
+        },
       });
     }
+  };
+
+  app.get("/health", healthHandler);
+  app.get("/api/health", healthHandler);
+
+  // Public snapshot of the process-local alert manager.
+  app.get("/api/alerts", (_req, res) => {
+    const active = getActiveAlerts();
+    res.json({ active, count: active.length });
   });
 
   // Liveness probe (Kubernetes-style)
