@@ -951,6 +951,92 @@ export const db = {
     );
     return rows;
   },
+
+  // ── Gap detection helpers ──────────────────────────────────────────────
+
+  /**
+   * Return the N most recent distinct ledger numbers from the events table,
+   * ordered ascending. Used by the predictive gap detector to scan for gaps.
+   *
+   * @param {number} n  Number of recent ledgers to fetch (default 100)
+   * @returns {Promise<number[]>}  Sorted ascending array of ledger numbers
+   */
+  async getRecentLedgers(n = 100) {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ledger FROM events ORDER BY ledger DESC LIMIT $1`,
+      [n],
+    );
+    return rows.map((r) => Number(r.ledger)).sort((a, b) => a - b);
+  },
+
+  /**
+   * Insert a detected gap into the gap_log table.
+   * Returns the new row id.
+   */
+  async insertGapLog(from, to, size) {
+    const { rows } = await pool.query(
+      `INSERT INTO gap_log (from_ledger, to_ledger, size)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [from, to, size],
+    );
+    return rows[0].id;
+  },
+
+  /**
+   * Mark a gap_log entry as closed (successfully re-indexed).
+   */
+  async closeGapLog(id) {
+    await pool.query(
+      `UPDATE gap_log SET status = 'closed', closed_at = NOW() WHERE id = $1`,
+      [id],
+    );
+  },
+
+  /**
+   * Mark a gap_log entry as sent to the dead-letter queue after exhausting retries.
+   */
+  async dlqGapLog(id) {
+    await pool.query(
+      `UPDATE gap_log SET status = 'dlq', closed_at = NOW() WHERE id = $1`,
+      [id],
+    );
+  },
+
+  /**
+   * Increment the retry counter on a gap_log entry.
+   */
+  async incrementGapRetries(id) {
+    await pool.query(
+      `UPDATE gap_log SET retries = retries + 1 WHERE id = $1`,
+      [id],
+    );
+  },
+
+  /**
+   * Return gap stats for the GET /api/gaps endpoint.
+   */
+  async getGapLogStats() {
+    const [pending, closed24h] = await Promise.all([
+      pool.query(
+        `SELECT from_ledger, to_ledger, size FROM gap_log
+         WHERE status = 'open'
+         ORDER BY from_ledger ASC`,
+      ),
+      pool.query(
+        `SELECT COUNT(*)::INT AS total FROM gap_log
+         WHERE status = 'closed' AND closed_at >= NOW() - INTERVAL '24 hours'`,
+      ),
+    ]);
+    return {
+      pending: pending.rows.map((r) => ({
+        from: Number(r.from_ledger),
+        to: Number(r.to_ledger),
+        size: Number(r.size),
+      })),
+      closed_last_24h: closed24h.rows[0].total,
+    };
+  },
 };
 
 function normalizeSearchTerms(q) {
