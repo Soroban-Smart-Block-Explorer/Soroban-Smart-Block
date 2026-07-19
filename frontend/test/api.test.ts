@@ -9,13 +9,14 @@ async function get(path: string) {
 }
 
 const api = {
-  events: (params: { contract?: string; fn?: string; page?: number; type?: string }) => {
+  events: (params: { contract?: string; fn?: string; after_seq?: number; limit?: number; type?: string }) => {
     const q = new URLSearchParams();
     if (params.contract) q.set("contract", params.contract);
     if (params.fn) q.set("fn", params.fn);
-    if (params.page) q.set("page", String(params.page));
+    if (params.after_seq) q.set("after_seq", String(params.after_seq));
+    if (params.limit) q.set("limit", String(params.limit));
     if (params.type) q.set("type", params.type);
-    return get<Array<{ seq: number }>>(`/events?${q}`);
+    return get<{ data: Array<{ seq: number }>; next_cursor: number | null }>(`/events?${q}`);
   },
   event: (seq: number) => get<{ seq: number }>(`/events/${seq}`),
   contract: (id: string) => get<{ id: string; name: string }>(`/contracts/${id}`),
@@ -103,29 +104,31 @@ describe("api utility", () => {
   }
 
   it("events builds query string with contract filter", async () => {
-    mockFetch([{ seq: 1 }]);
+    mockFetch({ data: [{ seq: 1 }], next_cursor: null });
     const result = await api.events({ contract: "C1" });
-    expect(result).toEqual([{ seq: 1 }]);
+    expect(result).toEqual({ data: [{ seq: 1 }], next_cursor: null });
     const [url] = (fetch as any).mock.calls[0];
     expect(url).toContain("contract=C1");
   });
 
   it("events builds query string with all params", async () => {
-    mockFetch([{ seq: 2 }]);
-    await api.events({ contract: "C1", fn: "transfer", page: 2, type: "soroban" });
+    mockFetch({ data: [{ seq: 2 }], next_cursor: 2 });
+    await api.events({ contract: "C1", fn: "transfer", after_seq: 42, limit: 50, type: "soroban" });
     const [url] = (fetch as any).mock.calls[0];
     expect(url).toContain("contract=C1");
     expect(url).toContain("fn=transfer");
-    expect(url).toContain("page=2");
+    expect(url).toContain("after_seq=42");
+    expect(url).toContain("limit=50");
     expect(url).toContain("type=soroban");
   });
 
   it("events omits undefined params", async () => {
-    mockFetch([]);
+    mockFetch({ data: [], next_cursor: null });
     await api.events({});
     const [url] = (fetch as any).mock.calls[0];
     expect(url).not.toContain("contract=");
     expect(url).not.toContain("fn=");
+    expect(url).not.toContain("after_seq=");
   });
 
   it("event fetches single event by seq", async () => {

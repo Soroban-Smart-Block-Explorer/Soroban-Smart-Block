@@ -37,7 +37,7 @@ export default function DeveloperWorkspace() {
 
   const { data: events = [], isLoading: evLoading } = useQuery({
     queryKey: ["events", id],
-    queryFn: () => api.events({ contract: id }),
+    queryFn: () => api.events({ contract: id }).then((page) => page.data),
     enabled: !!id,
   });
 

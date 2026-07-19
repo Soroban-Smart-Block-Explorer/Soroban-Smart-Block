@@ -81,8 +81,12 @@ paths:
 
   /api/events:
     get:
-      summary: List contract events (offset pagination)
-      description: Returns a list of decoded events using page-based pagination.
+      summary: List contract events (keyset pagination)
+      description: >-
+        Returns a stable page of decoded events using keyset (seq-based)
+        pagination. Pass the `next_cursor` value from the previous response
+        as `after_seq` to fetch the next page; `next_cursor` is null when no
+        further pages exist.
       parameters:
         - name: contract
           in: query
@@ -106,25 +110,37 @@ paths:
             enum: [soroban, classic]
             example: "soroban"
           description: Filter by transaction type
-        - name: page
+        - name: after_seq
           in: query
           required: false
           schema:
             type: integer
-            default: 1
-            example: 1
-          description: Page number (starts at 1)
+            example: 42
+          description: Event seq cursor (`next_cursor` from the previous page); omit for the first page
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 25
+            maximum: 200
+            example: 25
+          description: Max number of items to return (max 200)
       responses:
         "200":
-          description: Array of decoded events
+          description: Paginated events with next_cursor
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DecodedEvent"
+                $ref: "#/components/schemas/CursorPaginatedEvents"
         "400":
           description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid limit or after_seq value
           content:
             application/json:
               schema:

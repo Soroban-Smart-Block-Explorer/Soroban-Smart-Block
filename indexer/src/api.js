@@ -286,34 +286,54 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Existing endpoints ──────────────────────────────────────────────────────
 
-  // GET /api/events?contract=&fn=&page=
+  // GET /api/events?contract=&fn=&type=&after_seq=&limit=
+  // Keyset (cursor) pagination — `after_seq` is the `next_cursor` value from
+  // the previous page (omit for the first page). Responds with
+  // { data: Event[], next_cursor: number|null } (#490).
   app.get(
     "/api/events",
+    // Validate before the cache middleware so malformed params can never be
+    // served a cached 200 (their cache key normalizes to the first page).
+    (req, res, next) => {
+      if (req.query.limit !== undefined) {
+        const parsedLimit = Number(req.query.limit);
+        if (isNaN(parsedLimit) || parsedLimit <= 0 || parsedLimit > 200) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      if (req.query.after_seq !== undefined) {
+        const parsedAfter = Number(req.query.after_seq);
+        if (!Number.isInteger(parsedAfter) || parsedAfter < 0) {
+          return res.status(422).json({ error: "Invalid after_seq" });
+        }
+      }
+      next();
+    },
     makeCache("events_list", (req) => {
-      const { contract = "", fn = "", page = "1", type = "" } = req.query;
-      return `events:list:${contract}:${fn}:${page}:${type}`;
+      const { contract = "", fn = "", type = "" } = req.query;
+      const after = Number(req.query.after_seq) || 0;
+      const limit = Number(req.query.limit) || 25;
+      return `events:list:${contract}:${fn}:${after}:${limit}:${type}`;
     }),
     async (req, res) => {
       try {
-        const key = `events:list:${req.query.contract ?? ""}:${req.query.fn ?? ""}:${Number(req.query.page) || 1}:${req.query.type ?? ""}`;
-        const events = await db.getEvents({
-          contract: req.query.contract,
-          fn: req.query.fn,
-          page: Number(req.query.page) || 1,
-          type: req.query.type,
-        });
+        const contract = req.query.contract || undefined;
+        const fn = req.query.fn || undefined;
+        const type = req.query.type || undefined;
+        const after_seq = req.query.after_seq ? Number(req.query.after_seq) : 0;
+        const limit = req.query.limit ? Number(req.query.limit) : 25;
+
+        const result = await db.getEventsCursor({ contract, fn, type, after_seq, limit });
+
         // Predictive pre-fetch: next page if user is paginating
-        schedulePrefetch(key, {
-          [`events:list:${req.query.contract ?? ""}:${req.query.fn ?? ""}:${(Number(req.query.page) || 1) + 1}:${req.query.type ?? ""}`]:
-            () =>
-              db.getEvents({
-                contract: req.query.contract,
-                fn: req.query.fn,
-                page: (Number(req.query.page) || 1) + 1,
-                type: req.query.type,
-              }),
-        });
-        res.json(events);
+        if (result.next_cursor !== null) {
+          const key = `events:list:${contract ?? ""}:${fn ?? ""}:${after_seq}:${limit}:${type ?? ""}`;
+          schedulePrefetch(key, {
+            [`events:list:${contract ?? ""}:${fn ?? ""}:${result.next_cursor}:${limit}:${type ?? ""}`]: () =>
+              db.getEventsCursor({ contract, fn, type, after_seq: result.next_cursor, limit }),
+          });
+        }
+        res.json(result);
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
