@@ -33,7 +33,8 @@ import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
 import { initDeadLetterQueue, processRetries as dlqProcessRetries } from "./deadLetterQueue.js";
-import { recordLedger as gapRecordLedger } from "./predictiveGapDetector.js";
+import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
+import { enqueue as dlqEnqueue } from "./deadLetterQueue.js";
 
 const RPC_URL = config.SOROBAN_RPC_URL;
 const START_LEDGER = config.START_LEDGER;
@@ -263,12 +264,78 @@ async function run() {
 
   logger.info({ ledger: _cursor }, "daemon starting");
 
+  // ── Predictive gap queue ─────────────────────────────────────────────────────
+  // In-memory priority queue ordered by `from` ledger.
+  // Each entry: { from, to, size, attempts, dbId }
+  const gapQueue = [];
+  const GAP_MAX_ATTEMPTS = 3;
+
+  /**
+   * Drain the gap queue: for each gap, re-index ledgers from → to sequentially.
+   * Successfully closed gaps are removed; failures after GAP_MAX_ATTEMPTS go to DLQ.
+   */
+  async function drainGapQueue() {
+    while (gapQueue.length > 0 && !shutdown) {
+      const gap = gapQueue[0];
+      logger.info({ from: gap.from, to: gap.to, size: gap.size }, "gap drain: re-indexing");
+      let success = true;
+
+      for (let ledger = gap.from; ledger <= gap.to && !shutdown; ledger++) {
+        try {
+          await indexLedger(ledger);
+        } catch (err) {
+          logger.error({ err: err.message, ledger }, "gap drain: re-index failed");
+          success = false;
+          break;
+        }
+      }
+
+      if (success) {
+        gapQueue.shift();
+        await db.updateGapLogStatus(gap.dbId, "closed").catch(() => {});
+        logger.info({ from: gap.from, to: gap.to }, "gap drain: closed");
+      } else {
+        gap.attempts++;
+        if (gap.attempts >= GAP_MAX_ATTEMPTS) {
+          gapQueue.shift();
+          await db.updateGapLogStatus(gap.dbId, "failed").catch(() => {});
+          await dlqEnqueue(
+            { id: `gap-${gap.from}-${gap.to}`, ledger: gap.from, contractId: null, txHash: null },
+            new Error(`Gap ${gap.from}→${gap.to} (${gap.size} ledgers) failed after ${GAP_MAX_ATTEMPTS} attempts`),
+          ).catch(() => {});
+          logger.warn({ from: gap.from, to: gap.to }, "gap drain: exhausted retries, moved to DLQ");
+        } else {
+          // retry on next drain cycle
+          break;
+        }
+      }
+    }
+  }
+
   while (!shutdown) {
     try {
       console.log(`[daemon] polling from ledger ${_cursor}`);
       const latest = await indexLedger(_cursor);
       alertManager.recordPoll();
       gapRecordLedger(_cursor);
+
+      // ── Predictive gap analysis ───────────────────────────────────────────────
+      const recentLedgers = (await db.getRecentLedgers(100)).sort((a, b) => a - b);
+      const analysis = gapAnalyze(recentLedgers);
+
+      for (const gap of analysis.gaps) {
+        // Skip gaps already in the queue
+        if (!gapQueue.some((g) => g.from === gap.from && g.to === gap.to)) {
+          const dbId = await db.insertGapLog(gap).catch(() => null);
+          gapQueue.push({ ...gap, attempts: 0, dbId });
+          gapQueue.sort((a, b) => a.from - b.from);
+          await alertManager.checkLedgerGap(gap.size, gap.from);
+          logger.warn({ from: gap.from, to: gap.to, size: gap.size }, "gap detected");
+        }
+      }
+
+      await drainGapQueue();
+
       const lagSeconds = Math.floor((Date.now() - (_cursor * 5000)) / 1000); // approximate lag
       updateIndexerStatus(_cursor, lagSeconds);
       _cursor = latest + 1;

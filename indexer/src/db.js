@@ -901,6 +901,80 @@ export const db = {
     );
   },
 
+  // ── Predictive Gap Detection helpers ────────────────────────────────────────
+
+  /**
+   * Return the most recently indexed ledger numbers, newest first.
+   * Used by the predictive gap detector to find missing ranges.
+   *
+   * @param {number} n  Maximum number of ledgers to return
+   * @returns {Promise<number[]>}  Descending array of ledger numbers
+   */
+  async getRecentLedgers(n = 100) {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ledger FROM events ORDER BY ledger DESC LIMIT $1`,
+      [n],
+    );
+    return rows.map((r) => Number(r.ledger));
+  },
+
+  /**
+   * Insert a gap record into the gap_log table.
+   *
+   * @param {{ from: number, to: number, size: number, status?: string }} gap
+   * @returns {Promise<number>}  The new gap_log id
+   */
+  async insertGapLog(gap) {
+    const { rows } = await pool.query(
+      `INSERT INTO gap_log (from_ledger, to_ledger, size, status)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [gap.from, gap.to, gap.size, gap.status ?? "open"],
+    );
+    return rows[0].id;
+  },
+
+  /**
+   * Update the status of a gap_log entry.
+   *
+   * @param {number} id
+   * @param {string} status  "closed" | "failed" | "pending"
+   */
+  async updateGapLogStatus(id, status) {
+    await pool.query(
+      `UPDATE gap_log SET status = $1, closed_at = NOW(), updated_at = NOW() WHERE id = $2`,
+      [status, id],
+    );
+  },
+
+  /**
+   * Get pending gaps (sorted by from_ledger ascending).
+   *
+   * @returns {Promise<{ id: number, from: number, to: number, size: number }[]>}
+   */
+  async getPendingGaps() {
+    const { rows } = await pool.query(
+      `SELECT id, from_ledger AS "from", to_ledger AS "to", size
+       FROM gap_log
+       WHERE status = 'open'
+       ORDER BY from_ledger ASC`,
+    );
+    return rows;
+  },
+
+  /**
+   * Count gaps closed in the last 24 hours.
+   *
+   * @returns {Promise<number>}
+   */
+  async getClosedGapCount24h() {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::INT AS total FROM gap_log
+       WHERE status = 'closed' AND closed_at >= NOW() - INTERVAL '24 hours'`,
+    );
+    return rows[0].total;
+  },
+
   // data export — events (CSV/JSON)
   async getEventsForExport({ contract, fn, type, limit = 10000 } = {}) {
     const conditions = [];

@@ -1026,6 +1026,20 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── Ledger gap status ────────────────────────────────────────────
+  // GET /api/gaps — pending gaps and 24h closed count
+  app.get("/api/gaps", async (_req, res) => {
+    try {
+      const [pending, closed_last_24h] = await Promise.all([
+        db.getPendingGaps(),
+        db.getClosedGapCount24h(),
+      ]);
+      res.json({ pending, closed_last_24h });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── RPC node performance metrics ────────────────────────────────
   // GET /api/rpc-metrics — latency history, uptime, error rate per node
   app.get("/api/rpc-metrics", (_req, res) => {
