@@ -1026,15 +1026,12 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
-  // ── Ledger gap status ────────────────────────────────────────────
-  // GET /api/gaps — pending gaps and 24h closed count
+  // ── GET /api/gaps — ledger gap detection status ─────────────────────────────
+  // Returns pending gaps and count of gaps closed in the last 24 hours.
   app.get("/api/gaps", async (_req, res) => {
     try {
-      const [pending, closed_last_24h] = await Promise.all([
-        db.getPendingGaps(),
-        db.getClosedGapCount24h(),
-      ]);
-      res.json({ pending, closed_last_24h });
+      const stats = await db.getGapLogStats();
+      res.json(stats);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

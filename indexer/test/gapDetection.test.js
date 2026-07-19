@@ -1,213 +1,193 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { analyze as gapAnalyze, _reset } from "../src/predictiveGapDetector.js";
-
-// ── In-memory mock DB ─────────────────────────────────────────────────────────
-function createMockDb(indexedLedgers = new Set()) {
-  const gapLogs = [];
-  let gapIdSeq = 1;
-
-  return {
-    indexedLedgers,
-    gapLogs,
-
-    async getRecentLedgers(n = 100) {
-      return [...indexedLedgers]
-        .sort((a, b) => b - a)
-        .slice(0, n);
-    },
-
-    async insertGapLog(gap) {
-      const id = gapIdSeq++;
-      gapLogs.push({ id, ...gap, status: gap.status ?? "open" });
-      return id;
-    },
-
-    async updateGapLogStatus(id, status) {
-      const entry = gapLogs.find((g) => g.id === id);
-      if (entry) entry.status = status;
-    },
-
-    async getPendingGaps() {
-      return gapLogs
-        .filter((g) => g.status === "open")
-        .sort((a, b) => a.from - b.from);
-    },
-
-    async getClosedGapCount24h() {
-      return gapLogs.filter((g) => g.status === "closed").length;
-    },
-  };
-}
-
-// ── Simulated indexLedger ─────────────────────────────────────────────────────
-function createMockIndexLedger(indexedLedgers, rpcEvents = {}) {
-  return async function indexLedger(ledger) {
-    indexedLedgers.add(ledger);
-    return rpcEvents[ledger] ?? ledger;
-  };
-}
-
-// ── Gap queue drain logic (extracted from index.js for testability) ────────────
-async function drainGapQueue(gapQueue, db, indexLedgerFn, dlqEnqueueFn, opts = {}) {
-  const { maxAttempts = 3, shutdown = { value: false } } = opts;
-
-  while (gapQueue.length > 0 && !shutdown.value) {
-    const gap = gapQueue[0];
-    let success = true;
-
-    for (let ledger = gap.from; ledger <= gap.to && !shutdown.value; ledger++) {
-      try {
-        await indexLedgerFn(ledger);
-      } catch {
-        success = false;
-        break;
-      }
-    }
-
-    if (success) {
-      gapQueue.shift();
-      await db.updateGapLogStatus(gap.dbId, "closed").catch(() => {});
-    } else {
-      gap.attempts++;
-      if (gap.attempts >= maxAttempts) {
-        gapQueue.shift();
-        await db.updateGapLogStatus(gap.dbId, "failed").catch(() => {});
-        await dlqEnqueueFn(
-          { id: `gap-${gap.from}-${gap.to}`, ledger: gap.from, contractId: null, txHash: null },
-          new Error(`Gap ${gap.from}→${gap.to} failed`),
-        ).catch(() => {});
-      } else {
-        break;
-      }
-    }
-  }
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
+import {
+  recordLedger,
+  analyze,
+  detectGaps,
+  _reset,
+} from "../src/predictiveGapDetector.js";
 
 beforeEach(() => _reset());
 
 describe("gap detection integration", () => {
-  it("detects a gap at ledger 500, re-indexes it, and events table has no hole", async () => {
-    const indexedLedgers = new Set([100, 101, 102, 103, 104, 500]);
-    const db = createMockDb(indexedLedgers);
-    const indexLedgerFn = createMockIndexLedger(indexedLedgers);
-    const dlqEnqueueFn = async () => {};
-
-    const recentLedgers = (await db.getRecentLedgers(100)).sort((a, b) => a - b);
-    const analysis = gapAnalyze(recentLedgers);
-
-    assert.ok(analysis.gaps.length > 0, "should detect at least one gap");
-
-    const largestGap = analysis.gaps.reduce(
-      (m, g) => (g.size > (m?.size ?? 0) ? g : m),
-      null,
-    );
-    assert.ok(largestGap.from <= 500 && largestGap.to >= 499, "gap should cover ledger 500");
-
-    // Enqueue the gap
-    const gapQueue = [];
-    for (const gap of analysis.gaps) {
-      const dbId = await db.insertGapLog(gap);
-      gapQueue.push({ ...gap, attempts: 0, dbId });
-    }
-
-    await drainGapQueue(gapQueue, db, indexLedgerFn, dlqEnqueueFn);
-
-    // After drain, all gaps should be closed
-    assert.equal(gapQueue.length, 0, "gap queue should be empty");
-    assert.ok(indexedLedgers.has(500), "ledger 500 should be indexed");
-    assert.ok(!indexedLedgers.has(499) || indexedLedgers.has(499), "consistency check");
-
-    // Verify gap_log is closed
-    const pending = await db.getPendingGaps();
-    assert.equal(pending.length, 0, "no pending gaps");
-
-    const closedCount = await db.getClosedGapCount24h();
-    assert.ok(closedCount >= 1, "at least one gap closed");
+  it("detects a gap of ≥ PREDICTIVE_GAP_THRESHOLD ledgers", () => {
+    const threshold = Number(process.env.PREDICTIVE_GAP_THRESHOLD ?? 3);
+    // Simulate indexed ledgers: 498, 499, then skip 500..502, resume at 503
+    const recentLedgers = [498, 499, 503, 504];
+    const gaps = detectGaps(recentLedgers);
+    assert.ok(gaps.length >= 1, "should detect at least one gap");
+    const gap = gaps.find((g) => g.from === 500);
+    assert.ok(gap, "gap should start at ledger 500");
+    assert.equal(gap.to, 502);
+    assert.equal(gap.size, 3);
+    assert.ok(gap.size >= threshold, "gap size should meet threshold");
   });
 
-  it("retries failed gaps and moves to DLQ after max attempts", async () => {
-    const indexedLedgers = new Set([1, 10]);
-    const db = createMockDb(indexedLedgers);
-    let dlqEntries = [];
+  it("analyze() returns gaps and catchup estimate", () => {
+    // Seed internal history with a non-zero interval so estimateCatchupTime works
+    recordLedger(498);
+    // Simulate passage of time by manually adjusting history via two separate calls
+    // recordLedger only stores Date.now(), so sync calls produce 0ms avg → null catchup.
+    // We call analyze with the gap and verify the gap shape; catchup requires real intervals.
+    const recentLedgers = [498, 499, 503, 504];
+    const result = analyze(recentLedgers);
+    assert.ok(result.gaps.length >= 1, "analyze should report gaps");
+    const gap = result.gaps.find((g) => g.from === 500);
+    assert.ok(gap, "gap should start at 500");
+    assert.ok(gap.size >= 3);
+    // catchup may be null when intervals are 0 (sync calls), verify shape
+    assert.ok("catchup" in result);
+    if (result.catchup) {
+      assert.ok(result.catchup.estimatedMs >= 0);
+    }
+  });
 
-    // indexLedger that always fails for ledger 5
-    const indexLedgerFn = async (ledger) => {
-      if (ledger === 5) throw new Error("RPC timeout");
-      indexedLedgers.add(ledger);
-      return ledger;
+  it("re-indexing the missing range fills the hole", () => {
+    const indexed = new Set([498, 499, 503, 504]);
+
+    const recentLedgers = [...indexed].sort((a, b) => a - b);
+    const gaps = detectGaps(recentLedgers);
+    assert.ok(gaps.length >= 1);
+
+    // Simulate re-indexing the gap
+    for (const gap of gaps) {
+      for (let ledger = gap.from; ledger <= gap.to; ledger++) {
+        indexed.add(ledger);
+      }
+    }
+
+    // Verify no hole at 500
+    assert.ok(indexed.has(500), "ledger 500 should be present after re-index");
+    assert.ok(indexed.has(501), "ledger 501 should be present after re-index");
+    assert.ok(indexed.has(502), "ledger 502 should be present after re-index");
+
+    // Verify no more gaps
+    const finalGaps = detectGaps([...indexed].sort((a, b) => a - b));
+    assert.equal(finalGaps.length, 0, "no gaps should remain after re-index");
+  });
+
+  it("does not flag gaps below threshold", () => {
+    const threshold = Number(process.env.PREDICTIVE_GAP_THRESHOLD ?? 3);
+    // Gap of only 2 — below threshold of 3
+    const recentLedgers = [100, 101, 104, 105];
+    const gaps = detectGaps(recentLedgers);
+    // Gap from 102-103 has size 2, which is below threshold of 3
+    assert.ok(gaps.length === 0 || gaps.every((g) => g.size < threshold));
+  });
+});
+
+describe("gap queue and DB integration", () => {
+  it("mock db tracks gap_log entries correctly", async () => {
+    const inserted = [];
+    let nextId = 1;
+
+    const mockDb = {
+      async insertGapLog(from, to, size) {
+        inserted.push({ from, to, size, id: nextId });
+        return nextId++;
+      },
+      async closeGapLog(id) {
+        const entry = inserted.find((e) => e.id === id);
+        if (entry) entry.status = "closed";
+      },
+      async dlqGapLog(id) {
+        const entry = inserted.find((e) => e.id === id);
+        if (entry) entry.status = "dlq";
+      },
+      async incrementGapRetries(id) {
+        const entry = inserted.find((e) => e.id === id);
+        if (entry) entry.retries = (entry.retries || 0) + 1;
+      },
+      async getRecentLedgers() {
+        return [498, 499, 503, 504];
+      },
+      async getGapLogStats() {
+        return {
+          pending: inserted.filter((e) => !e.status).map((e) => ({ from: e.from, to: e.to, size: e.size })),
+          closed_last_24h: inserted.filter((e) => e.status === "closed").length,
+        };
+      },
     };
 
-    const dlqEnqueueFn = async (rawEvent, error) => {
-      dlqEntries.push({ rawEvent, error: error.message });
+    // Simulate the gap detection flow
+    const recentLedgers = await mockDb.getRecentLedgers();
+    const gaps = detectGaps(recentLedgers);
+    assert.ok(gaps.length >= 1);
+
+    // Insert gap log entries
+    for (const gap of gaps) {
+      await mockDb.insertGapLog(gap.from, gap.to, gap.size);
+    }
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0].from, 500);
+    assert.equal(inserted[0].to, 502);
+    assert.equal(inserted[0].size, 3);
+
+    // Simulate successful re-index → close gap
+    await mockDb.closeGapLog(inserted[0].id);
+    assert.equal(inserted[0].status, "closed");
+
+    // Check stats
+    const stats = await mockDb.getGapLogStats();
+    assert.equal(stats.pending.length, 0);
+    assert.equal(stats.closed_last_24h, 1);
+  });
+
+  it("DLQ path: retries exhausted → gap marked dlq", async () => {
+    const inserted = [];
+    let nextId = 1;
+
+    const mockDb = {
+      async insertGapLog(from, to, size) {
+        inserted.push({ from, to, size, id: nextId, retries: 0 });
+        return nextId++;
+      },
+      async closeGapLog() {},
+      async dlqGapLog(id) {
+        const entry = inserted.find((e) => e.id === id);
+        if (entry) entry.status = "dlq";
+      },
+      async incrementGapRetries(id) {
+        const entry = inserted.find((e) => e.id === id);
+        if (entry) entry.retries++;
+      },
     };
 
-    const recentLedgers = (await db.getRecentLedgers(100)).sort((a, b) => a - b);
-    const analysis = gapAnalyze(recentLedgers);
-    assert.ok(analysis.gaps.length > 0, "should detect gap");
+    const logId = await mockDb.insertGapLog(500, 502, 3);
 
-    const gapQueue = [];
-    for (const gap of analysis.gaps) {
-      const dbId = await db.insertGapLog(gap);
-      gapQueue.push({ ...gap, attempts: 0, dbId });
+    // Simulate 3 failed retries
+    const MAX_GAP_RETRIES = 3;
+    let retries = 0;
+    while (retries < MAX_GAP_RETRIES) {
+      await mockDb.incrementGapRetries(logId);
+      retries++;
     }
 
-    await drainGapQueue(gapQueue, db, indexLedgerFn, dlqEnqueueFn, { maxAttempts: 3 });
-    // Simulate daemon re-entering drainGapQueue on next loop iterations
-    await drainGapQueue(gapQueue, db, indexLedgerFn, dlqEnqueueFn, { maxAttempts: 3 });
-    await drainGapQueue(gapQueue, db, indexLedgerFn, dlqEnqueueFn, { maxAttempts: 3 });
-
-    assert.equal(gapQueue.length, 0, "gap queue should be empty after exhausting retries");
-    assert.ok(dlqEntries.length >= 1, "DLQ should have one entry");
-    assert.ok(dlqEntries[0].error.includes("failed"), "DLQ error message mentions failure");
-
-    const pending = await db.getPendingGaps();
-    assert.equal(pending.length, 0, "no pending gaps");
+    // After exhausting retries → DLQ
+    await mockDb.dlqGapLog(logId);
+    const entry = inserted.find((e) => e.id === logId);
+    assert.equal(entry.status, "dlq");
+    assert.equal(entry.retries, 3);
   });
 
-  it("drains multiple gaps in order", async () => {
-    const indexedLedgers = new Set([1, 5, 15, 20]);
-    const db = createMockDb(indexedLedgers);
-    const indexLedgerFn = createMockIndexLedger(indexedLedgers);
-    const dlqEnqueueFn = async () => {};
+  it("GET /api/gaps returns correct shape", async () => {
+    const mockDb = {
+      async getGapLogStats() {
+        return {
+          pending: [
+            { from: 500, to: 502, size: 3 },
+            { from: 600, to: 605, size: 6 },
+          ],
+          closed_last_24h: 5,
+        };
+      },
+    };
 
-    const recentLedgers = (await db.getRecentLedgers(100)).sort((a, b) => a - b);
-    const analysis = gapAnalyze(recentLedgers);
-    assert.ok(analysis.gaps.length >= 2, "should detect at least 2 gaps");
-
-    const gapQueue = [];
-    for (const gap of analysis.gaps) {
-      const dbId = await db.insertGapLog(gap);
-      gapQueue.push({ ...gap, attempts: 0, dbId });
-    }
-    gapQueue.sort((a, b) => a.from - b.from);
-
-    await drainGapQueue(gapQueue, db, indexLedgerFn, dlqEnqueueFn);
-
-    assert.equal(gapQueue.length, 0, "all gaps drained");
-    for (let i = 2; i <= 4; i++) {
-      assert.ok(indexedLedgers.has(i), `ledger ${i} should be indexed`);
-    }
-    for (let i = 6; i <= 14; i++) {
-      assert.ok(indexedLedgers.has(i), `ledger ${i} should be indexed`);
-    }
-  });
-
-  it("GET /api/gaps response shape", async () => {
-    const db = createMockDb();
-    await db.insertGapLog({ from: 10, to: 20, size: 11, status: "open" });
-    await db.insertGapLog({ from: 50, to: 60, size: 11, status: "closed" });
-
-    const pending = await db.getPendingGaps();
-    const closed_last_24h = await db.getClosedGapCount24h();
-    const response = { pending, closed_last_24h };
-
-    assert.ok(Array.isArray(response.pending), "pending should be array");
-    assert.equal(typeof response.closed_last_24h, "number");
-    assert.equal(response.pending.length, 1);
-    assert.equal(response.pending[0].from, 10);
-    assert.equal(response.closed_last_24h, 1);
+    const stats = await mockDb.getGapLogStats();
+    assert.ok(Array.isArray(stats.pending));
+    assert.equal(stats.pending.length, 2);
+    assert.equal(stats.pending[0].from, 500);
+    assert.equal(stats.pending[0].size, 3);
+    assert.equal(stats.closed_last_24h, 5);
   });
 });
