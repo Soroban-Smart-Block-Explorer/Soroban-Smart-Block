@@ -89,6 +89,10 @@
     },
     "sac_asset": {
       "type": "string"
+    },
+    "abi_version": {
+      "type": "integer",
+      "minimum": 0
     }
   }
 }

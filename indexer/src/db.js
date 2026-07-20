@@ -128,8 +128,8 @@ export const db = {
       `INSERT INTO events
          (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data,
           cpu_instructions, mem_bytes, fee_charged, is_high_bloat_risk, upgrade_info, storage_tiers, is_clawback,
-          footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+          footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls, abi_version)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        ON CONFLICT DO NOTHING`,
       [
         ev.contract_id,
@@ -151,6 +151,57 @@ export const db = {
         ev.fee_bump ? JSON.stringify(ev.fee_bump) : null,
         ev.archival_info ? JSON.stringify(ev.archival_info) : null,
         ev.zk_host_calls ? JSON.stringify(ev.zk_host_calls) : null,
+        ev.abi_version ?? 0,
+      ],
+    );
+  },
+
+  async markNeedsRedecode(contractId, newAbiVersion) {
+    if (!contractId || !Number.isInteger(Number(newAbiVersion)) || Number(newAbiVersion) < 0) {
+      throw new Error("contractId and a non-negative ABI version are required");
+    }
+    const { rowCount } = await pool.query(
+      `UPDATE events
+       SET needs_redecode = TRUE
+       WHERE contract_id = $1 AND abi_version < $2 AND needs_redecode = FALSE`,
+      [contractId, Number(newAbiVersion)],
+    );
+    return rowCount ?? 0;
+  },
+
+  async getEventsNeedingRedecode(limit = 100) {
+    const safeLimit = Number(limit);
+    if (!Number.isInteger(safeLimit) || safeLimit < 1 || safeLimit > 1000) {
+      throw new Error("redecode batch size must be between 1 and 1000");
+    }
+    const { rows } = await pool.query(
+      `SELECT seq, contract_id, function, ledger, tx_hash, raw_topics, raw_data, abi_version
+       FROM events
+       WHERE needs_redecode = TRUE
+       ORDER BY seq ASC
+       LIMIT $1`,
+      [safeLimit],
+    );
+    return rows;
+  },
+
+  async updateRedecodedEvent(seq, decoded, abiVersion) {
+    await pool.query(
+      `UPDATE events
+       SET function = $2,
+           description = $3,
+           raw_topics = $4,
+           raw_data = $5,
+           abi_version = $6,
+           needs_redecode = FALSE
+       WHERE seq = $1 AND needs_redecode = TRUE`,
+      [
+        seq,
+        decoded.function,
+        decoded.description,
+        JSON.stringify(decoded.raw_topics),
+        decoded.raw_data,
+        abiVersion,
       ],
     );
   },
