@@ -12,6 +12,7 @@
  */
 
 import { db, pool } from "./db.js";
+import { getActiveAlerts } from "./alertManager.js";
 
 // ── Health check state ────────────────────────────────────────────────────────
 let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0 };
@@ -194,6 +195,7 @@ export async function getHealthStatus() {
 
   const indexer = checkIndexer();
   const workers = checkWorkers();
+  const activeAlerts = getActiveAlerts();
 
   // Overall status: healthy if all critical dependencies are healthy
   // Cache is optional, workers are degradable
@@ -210,6 +212,10 @@ export async function getHealthStatus() {
       cache,
       indexer,
       workers,
+    },
+    alerts: {
+      active_count: activeAlerts.length,
+      conditions: activeAlerts.map(({ condition }) => condition),
     },
   };
 }
