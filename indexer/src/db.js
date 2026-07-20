@@ -32,6 +32,45 @@ export const db = {
     return rows[0] ? Number(rows[0].value) : null;
   },
 
+  // ── ledger reorganization state ───────────────────────────────
+  async recordLedgerHash(ledger, hash) {
+    await pool.query(
+      `INSERT INTO ledger_hashes (ledger, hash)
+       VALUES ($1, $2)
+       ON CONFLICT (ledger) DO NOTHING`,
+      [ledger, hash],
+    );
+  },
+
+  async getRecentLedgerHashes(limit) {
+    const { rows } = await pool.query(
+      "SELECT ledger, hash FROM ledger_hashes ORDER BY ledger DESC LIMIT $1",
+      [limit],
+    );
+    return rows;
+  },
+
+  /** Atomically purge orphaned data and persist the daemon rewind cursor. */
+  async rollbackFromLedger(forkLedger) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM events WHERE ledger >= $1", [forkLedger]);
+      await client.query("DELETE FROM ledger_hashes WHERE ledger >= $1", [forkLedger]);
+      await client.query(
+        `INSERT INTO daemon_state (key, value) VALUES ('cursor', $1)
+         ON CONFLICT (key) DO UPDATE SET value = $1`,
+        [String(forkLedger)],
+      );
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+
   // ── cursor-based pagination ────────────────────────────────────
   /**
    * Return a page of events using keyset (cursor-based) pagination.
@@ -78,7 +117,8 @@ export const db = {
 
     const hasMore = rows.length > limit;
     const data = hasMore ? rows.slice(0, limit) : rows;
-    const next_cursor = hasMore ? data[data.length - 1].seq : null;
+    // seq is BIGINT so pg returns it as a string — coerce for a numeric cursor
+    const next_cursor = hasMore ? Number(data[data.length - 1].seq) : null;
 
     return { data, next_cursor };
   },
@@ -132,6 +172,11 @@ export const db = {
     await this.upsertEvent(validated);
   },
 
+  /**
+   * @deprecated OFFSET pagination degrades to a full-table scan at depth on
+   * large tables — use getEventsCursor() instead (#490). Kept only for the
+   * page-based GET /api/contracts/:id/events endpoint.
+   */
   async getEvents({ contract, fn, page = 1, limit = 25, type } = {}) {
     const conditions = [];
     const params = [];

@@ -122,9 +122,15 @@ export function resolveAlert(condition) {
   }
 }
 
-/** Return the list of currently active alert conditions with their fire timestamps. */
+/** Return the list of currently active alert conditions with their durations. */
 export function getActiveAlerts() {
-  return Array.from(_active.entries()).map(([condition, firedAt]) => ({ condition, firedAt }));
+  const now = Date.now();
+
+  return Array.from(_active.entries()).map(([condition, firedAt]) => ({
+    condition,
+    firedAt: new Date(firedAt).toISOString(),
+    durationMs: Math.max(0, now - firedAt),
+  }));
 }
 
 // ── Condition checkers ────────────────────────────────────────────────────────

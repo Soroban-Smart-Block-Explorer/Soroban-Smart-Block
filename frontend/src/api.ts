@@ -200,6 +200,12 @@ export interface BurnAlert {
   flaggedAt: number;
 }
 
+// keyset-paginated events list response (GET /api/events)
+export interface EventsPage {
+  data: DecodedEvent[];
+  next_cursor: number | null;
+}
+
 // paginated contract transaction response
 export interface ContractTransactionsResponse {
   data: DecodedEvent[];
@@ -394,13 +400,14 @@ export interface TransactionTreeDiff {
 }
 
 export const api = {
-  events: (params: { contract?: string; fn?: string; page?: number; type?: string }) => {
+  events: (params: { contract?: string; fn?: string; after_seq?: number; limit?: number; type?: string }) => {
     const q = new URLSearchParams();
     if (params.contract) q.set("contract", params.contract);
     if (params.fn) q.set("fn", params.fn);
-    if (params.page) q.set("page", String(params.page));
+    if (params.after_seq) q.set("after_seq", String(params.after_seq));
+    if (params.limit) q.set("limit", String(params.limit));
     if (params.type) q.set("type", params.type);
-    return get<DecodedEvent[]>(`/events?${q}`);
+    return get<EventsPage>(`/events?${q}`);
   },
   event: (seq: number) => get<DecodedEvent>(`/events/${seq}`),
   search: (q: string, limit = 10) => {

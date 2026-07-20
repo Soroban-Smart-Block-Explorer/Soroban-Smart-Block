@@ -14,8 +14,8 @@ describe("API request correlation and logging", () => {
     const app = createApi({
       logDestination: logStream,
       dbOverride: {
-        async getEvents() {
-          return [];
+        async getEventsCursor() {
+          return { data: [], next_cursor: null };
         },
       },
     });
@@ -41,8 +41,8 @@ describe("API request correlation and logging", () => {
     const app = createApi({
       logDestination: new PassThrough(),
       dbOverride: {
-        async getEvents() {
-          return [];
+        async getEventsCursor() {
+          return { data: [], next_cursor: null };
         },
       },
     });
