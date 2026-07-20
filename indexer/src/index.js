@@ -33,8 +33,8 @@ import { startAuditPartitionCron } from "./audit/auditLogger.js";
 import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
-import { initDeadLetterQueue, processRetries as dlqProcessRetries } from "./deadLetterQueue.js";
-import { recordLedger as gapRecordLedger } from "./predictiveGapDetector.js";
+import { initDeadLetterQueue, processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
+import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
 
 const RPC_URL = config.SOROBAN_RPC_URL;
 const START_LEDGER = config.START_LEDGER;
@@ -42,8 +42,14 @@ const POLL_MS = config.POLL_MS;
 const REORG_CHECK_INTERVAL = config.REORG_CHECK_INTERVAL;
 // Max events per RPC page — Soroban caps at 200
 const PAGE_LIMIT = 200;
+const MAX_GAP_RETRIES = 3;
 
 const rpc = new SorobanRpc.Server(RPC_URL, { allowHttp: true });
+
+// ── gap remediation queue ────────────────────────────────────────
+// In-memory priority queue of gaps to re-index, ordered by from_ledger.
+// Each entry: { from, to, retries, logId }.
+let _gapQueue = [];
 
 // ── persisted ledger cursor ────────────────────────────────────────
 // The cursor is stored in the DB so the daemon resumes correctly after restart.
@@ -314,6 +320,46 @@ async function run() {
 
   while (!shutdown) {
     try {
+      // ── drain gap queue first ──────────────────────────────────────
+      while (_gapQueue.length > 0 && !shutdown) {
+        const gap = _gapQueue[0];
+        console.log(`[gap] re-indexing ledgers ${gap.from} → ${gap.to} (attempt ${gap.retries + 1}/${MAX_GAP_RETRIES})`);
+        let gapOk = true;
+        for (let ledger = gap.from; ledger <= gap.to; ledger++) {
+          if (shutdown) break;
+          try {
+            await indexLedger(ledger);
+            gapRecordLedger(ledger);
+          } catch (err) {
+            logger.error({ err: err.message, ledger }, "gap re-index failed");
+            gapOk = false;
+            break;
+          }
+        }
+
+        if (gapOk) {
+          _gapQueue.shift();
+          await db.closeGapLog(gap.logId).catch(() => {});
+          logger.info({ from: gap.from, to: gap.to }, "gap closed");
+        } else {
+          gap.retries++;
+          await db.incrementGapRetries(gap.logId).catch(() => {});
+          if (gap.retries >= MAX_GAP_RETRIES) {
+            _gapQueue.shift();
+            await db.dlqGapLog(gap.logId).catch(() => {});
+            await dlqEnqueue(
+              { ledger: gap.from, _gapRange: `${gap.from}-${gap.to}` },
+              new Error(`Gap ${gap.from}-${gap.to} failed after ${MAX_GAP_RETRIES} retries`),
+            ).catch(() => {});
+            logger.warn({ from: gap.from, to: gap.to }, "gap retries exhausted → DLQ");
+          } else {
+            // push to back for later retry
+            _gapQueue.push(_gapQueue.shift());
+          }
+        }
+      }
+
+      // ── normal forward indexing ────────────────────────────────────
       console.log(`[daemon] polling from ledger ${_cursor}`);
       const polledFrom = _cursor;
       const latest = await indexLedger(polledFrom);
