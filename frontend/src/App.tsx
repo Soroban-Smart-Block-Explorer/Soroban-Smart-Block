@@ -4,6 +4,7 @@ import Nav from "./components/Nav";
 import ErrorBoundary from "./components/ErrorBoundary";
 
 const Home = lazy(() => import("./pages/Home"));
+const RegistryPage = lazy(() => import("./pages/RegistryPage"));
 const ContractPage = lazy(() => import("./pages/ContractPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
 const EventPage = lazy(() => import("./pages/EventPage"));
@@ -31,6 +32,7 @@ export default function App() {
         <Suspense fallback={<Fallback />}>
           <Routes>
             <Route path="/" element={<Home />} />
+            <Route path="/contracts" element={<RegistryPage />} />
             <Route path="/contract/:id" element={<ContractPage />} />
             <Route path="/contract/:id/workspace" element={<DeveloperWorkspace />} />
             <Route path="/wallet/:address" element={<WalletPage />} />
