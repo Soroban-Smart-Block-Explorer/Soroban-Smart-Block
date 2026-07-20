@@ -117,7 +117,8 @@ export const db = {
 
     const hasMore = rows.length > limit;
     const data = hasMore ? rows.slice(0, limit) : rows;
-    const next_cursor = hasMore ? data[data.length - 1].seq : null;
+    // seq is BIGINT so pg returns it as a string — coerce for a numeric cursor
+    const next_cursor = hasMore ? Number(data[data.length - 1].seq) : null;
 
     return { data, next_cursor };
   },
@@ -171,6 +172,11 @@ export const db = {
     await this.upsertEvent(validated);
   },
 
+  /**
+   * @deprecated OFFSET pagination degrades to a full-table scan at depth on
+   * large tables — use getEventsCursor() instead (#490). Kept only for the
+   * page-based GET /api/contracts/:id/events endpoint.
+   */
   async getEvents({ contract, fn, page = 1, limit = 25, type } = {}) {
     const conditions = [];
     const params = [];

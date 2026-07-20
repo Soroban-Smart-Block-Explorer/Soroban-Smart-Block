@@ -31,28 +31,33 @@ const TYPE_LABELS: { key: TxType; label: string; title: string }[] = [
 
 export default function Home() {
   const [fnFilter, setFnFilter] = useState("");
-  const [page, setPage] = useState(1);
+  // Keyset pagination (#490): stack of after_seq cursors for the pages we've
+  // navigated past — empty stack = first page, pop to go back.
+  const [cursorStack, setCursorStack] = useState<number[]>([]);
   const [txType, setTxType] = useState<TxType>("all");
+  const afterSeq = cursorStack.length ? cursorStack[cursorStack.length - 1] : undefined;
 
   const queryClient = useQueryClient();
-  const { data: events = [], isLoading } = useQuery({
-    queryKey: ["events", fnFilter, page, txType],
+  const { data: eventsPage, isLoading } = useQuery({
+    queryKey: ["events", fnFilter, afterSeq ?? 0, txType],
     queryFn: () =>
       api.events({
         fn: fnFilter || undefined,
-        page,
+        after_seq: afterSeq,
         type: txType !== "all" ? txType : undefined,
       }),
   });
+  const events = eventsPage?.data ?? [];
+  const nextCursor = eventsPage?.next_cursor ?? null;
 
-  // invalidate the event list when a live event arrives on page 1
+  // invalidate the event list when a live event arrives on the first page
   const handleLiveEvent = useCallback(
     (ev: DecodedEvent) => {
-      if (page === 1 && (!fnFilter || ev.function === fnFilter)) {
-        queryClient.invalidateQueries({ queryKey: ["events", fnFilter, 1] });
+      if (cursorStack.length === 0 && (!fnFilter || ev.function === fnFilter)) {
+        queryClient.invalidateQueries({ queryKey: ["events", fnFilter, 0] });
       }
     },
-    [page, fnFilter, queryClient],
+    [cursorStack.length, fnFilter, queryClient],
   );
 
   useEventStream(handleLiveEvent);
@@ -89,7 +94,7 @@ export default function Home() {
               title={title}
               onClick={() => {
                 setTxType(key);
-                setPage(1);
+                setCursorStack([]);
               }}
               style={{
                 background: txType === key ? "var(--accent)" : "var(--surface)",
@@ -112,7 +117,7 @@ export default function Home() {
             value={fnFilter}
             onChange={(e) => {
               setFnFilter(e.target.value);
-              setPage(1);
+              setCursorStack([]);
             }}
           >
             {FUNCTIONS.map((f) => (
@@ -138,11 +143,16 @@ export default function Home() {
 
       {/* Pagination */}
       <div style={{ display: "flex", gap: 8 }}>
-        <button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>
+        <button disabled={cursorStack.length === 0} onClick={() => setCursorStack((s) => s.slice(0, -1))}>
           ← Prev
         </button>
-        <span style={{ padding: "6px 10px", color: "var(--muted)" }}>Page {page}</span>
-        <button disabled={events.length < 25} onClick={() => setPage((p) => p + 1)}>
+        <span style={{ padding: "6px 10px", color: "var(--muted)" }}>Page {cursorStack.length + 1}</span>
+        <button
+          disabled={nextCursor === null}
+          onClick={() => {
+            if (nextCursor !== null) setCursorStack((s) => [...s, nextCursor]);
+          }}
+        >
           Next →
         </button>
       </div>

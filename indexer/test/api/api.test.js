@@ -134,24 +134,69 @@ describe("REST API Integration Tests", () => {
     });
   });
 
-  describe("GET /api/events (Page-based)", () => {
-    it("should return events list with page-based pagination", async () => {
-      const res = await request(app).get("/api/events?page=1");
+  describe("GET /api/events (Keyset cursor)", () => {
+    // Each test uses a distinct X-Forwarded-For so the per-IP unauthenticated
+    // rate-limit bucket (burst 10) is not shared with the rest of the suite.
+    let ipCounter = 0;
+    const getEvents = (url) => request(app).get(url).set("X-Forwarded-For", `10.90.0.${++ipCounter}`);
+
+    it("should return { data, next_cursor } with default limit 25", async () => {
+      const res = await getEvents("/api/events");
       expect(res.status).toBe(200);
-      expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body.length).toBeLessThanOrEqual(25);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBe(25);
+      expect(res.body.next_cursor).not.toBeNull();
+    });
+
+    it("should return null next_cursor when no further pages exist", async () => {
+      const res = await getEvents("/api/events?limit=200");
+      expect(res.status).toBe(200);
+      expect(res.body.data.length).toBe(50);
+      expect(res.body.next_cursor).toBeNull();
+    });
+
+    it("should paginate correctly using next_cursor as after_seq", async () => {
+      const res1 = await getEvents("/api/events?limit=30");
+      expect(res1.status).toBe(200);
+      expect(res1.body.data.length).toBe(30);
+      const nextCursor = res1.body.next_cursor;
+      expect(nextCursor).not.toBeNull();
+
+      const res2 = await getEvents(`/api/events?limit=30&after_seq=${nextCursor}`);
+      expect(res2.status).toBe(200);
+      expect(res2.body.data.length).toBe(20);
+      expect(res2.body.next_cursor).toBeNull();
+
+      // No overlap: every seq on page 2 is below the cursor
+      const maxPage2Seq = Math.max(...res2.body.data.map((e) => Number(e.seq)));
+      expect(maxPage2Seq).toBeLessThan(Number(nextCursor));
     });
 
     it("should filter events by contract", async () => {
-      const res = await request(app).get("/api/events?contract=C1");
+      const res = await getEvents("/api/events?contract=C1");
       expect(res.status).toBe(200);
-      expect(res.body.every((ev) => ev.contract_id === "C1")).toBe(true);
+      expect(res.body.data.every((ev) => ev.contract_id === "C1")).toBe(true);
     });
 
     it("should filter events by function name", async () => {
-      const res = await request(app).get("/api/events?fn=transfer");
+      const res = await getEvents("/api/events?fn=transfer");
       expect(res.status).toBe(200);
-      expect(res.body.every((ev) => ev.function === "transfer")).toBe(true);
+      expect(res.body.data.every((ev) => ev.function === "transfer")).toBe(true);
+    });
+
+    it("should return 422 for invalid limit values", async () => {
+      const invalidLimits = ["-5", "0", "999", "abc"];
+      for (const val of invalidLimits) {
+        const res = await getEvents(`/api/events?limit=${val}`);
+        expect(res.status).toBe(422);
+        expect(res.body).toEqual({ error: "Invalid limit" });
+      }
+    });
+
+    it("should return 422 for an invalid after_seq value", async () => {
+      const res = await getEvents("/api/events?after_seq=abc");
+      expect(res.status).toBe(422);
+      expect(res.body).toEqual({ error: "Invalid after_seq" });
     });
   });
 
@@ -278,6 +323,54 @@ describe("REST API Integration Tests", () => {
     it("should return 400 for a malformed address", async () => {
       const res = await request(app).get("/api/wallet/not-a-valid-address");
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe("GET /api/events — keyset pagination over 500 events (#490)", () => {
+    // Distinct contract id so these events (and their cache keys) don't
+    // collide with the 50 events seeded for the earlier tests.
+    const PAGINATION_CONTRACT = "CPAGINATION";
+
+    beforeAll(async () => {
+      const values = [];
+      const params = [];
+      for (let i = 1; i <= 500; i++) {
+        const base = params.length;
+        params.push(PAGINATION_CONTRACT, "transfer", 5000 + i, `pagination_tx_${i}`, `Pagination event ${i}`, "[]", "{}");
+        values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`);
+      }
+      await db.query(
+        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data)
+         VALUES ${values.join(", ")}`,
+        params,
+      );
+    });
+
+    it("returns all 500 events exactly once across pages of 25", async () => {
+      const seenSeqs = [];
+      let after = null;
+      let pages = 0;
+
+      do {
+        const url =
+          after === null
+            ? `/api/events?contract=${PAGINATION_CONTRACT}&limit=25`
+            : `/api/events?contract=${PAGINATION_CONTRACT}&limit=25&after_seq=${after}`;
+        // Unique client IP per request so the per-IP unauthenticated
+        // rate-limit bucket (burst 10) never throttles the pagination walk.
+        const res = await request(app).get(url).set("X-Forwarded-For", `10.91.0.${pages + 1}`);
+        expect(res.status).toBe(200);
+        expect(res.body.data.length).toBeLessThanOrEqual(25);
+        for (const ev of res.body.data) seenSeqs.push(Number(ev.seq));
+        after = res.body.next_cursor;
+        pages++;
+        // Safety guard against an infinite pagination loop
+        expect(pages).toBeLessThanOrEqual(21);
+      } while (after !== null);
+
+      expect(pages).toBe(20);
+      expect(seenSeqs.length).toBe(500);
+      expect(new Set(seenSeqs).size).toBe(500);
     });
   });
 });

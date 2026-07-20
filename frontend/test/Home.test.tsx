@@ -42,7 +42,7 @@ vi.mock("../src/api", async (importOriginal) => {
     ...original,
     api: {
       ...original.api,
-      events: vi.fn().mockResolvedValue([]),
+      events: vi.fn().mockResolvedValue({ data: [], next_cursor: null }),
     },
   };
 });
