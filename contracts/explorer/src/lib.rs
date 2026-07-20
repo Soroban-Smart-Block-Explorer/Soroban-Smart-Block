@@ -652,6 +652,30 @@ mod tests {
         assert_eq!(empty.len(), 0);
     }
 
+    // Boundary check for `get_events`: a page requested from the middle of the
+    // log must honour both the `start` offset and the `limit` cap, returning
+    // exactly `min(limit, total - start)` events beginning at `start`.
+    #[test]
+    fn test_get_events_pagination() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[4u8; 32]);
+        let base = make_input(&env, &cid);
+
+        for _ in 0..5 {
+            client.submit_event(&admin, &base);
+        }
+        assert_eq!(client.event_count(), 5u64);
+
+        // start = 2, limit = 2 -> events with seq 2 and 3.
+        let page = client.get_events(&2u64, &2u32);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get(0).unwrap().seq, 2);
+        assert_eq!(page.get(1).unwrap().seq, 3);
+    }
+
     #[test]
     #[should_panic]
     fn test_double_init_panics() {
