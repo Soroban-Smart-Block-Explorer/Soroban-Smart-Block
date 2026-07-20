@@ -104,7 +104,7 @@ const NATIVE_SAC_IDS = new Set([
  * Decode a raw Soroban RPC event into a human-readable record.
  * Uses the ABI template when available; falls back to a generic description.
  */
-export async function decode(ev) {
+export async function decode(ev, { currentAbi = false } = {}) {
   const contractId = ev.contractId;
   const topics = ev.topic.map((t) => scValToNative(t));
   const data = scValToNative(ev.value);
@@ -131,9 +131,11 @@ export async function decode(ev) {
 
   // Look up registered ABI for richer description
   // Use versioned lookup: find the ABI version active at the event's ledger
-  const meta = await db
-    .getContractMetaByLedger(contractId, ev.ledger)
-    .catch(() => null) ?? await db.getContractMeta(contractId).catch(() => null);
+  const meta = currentAbi
+    ? await db.getContractMeta(contractId).catch(() => null)
+    : await db
+        .getContractMetaByLedger(contractId, ev.ledger)
+        .catch(() => null) ?? await db.getContractMeta(contractId).catch(() => null);
   const fnAbi = meta?.functions?.find((f) => f.name === fnName);
 
   // Check if this contract is a registered vault

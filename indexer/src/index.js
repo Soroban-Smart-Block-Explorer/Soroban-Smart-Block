@@ -25,6 +25,7 @@ import { handleVaultEvent, refreshAllVaults } from "./vaultIndexer.js";
 import { processCircuitBreakerEvent } from "./circuitBreakerIndexer.js";
 import { startGasGuzzlersWorker } from "./gasGuzzlers.js";
 import { checkForReorg, recordLedgerHash } from "./reorgWorker.js";
+import { startReDecodeWorker } from "./reDecodeWorker.js";
 import { warmCache } from "./cacheWarming.js";
 import { cacheInvalidate } from "./cacheLayer.js";
 import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics } from "./metrics.js";
@@ -173,6 +174,8 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   const { feeBump, archivalInfo } = context ?? (await loadTransactionContext(rawSorobanEvent.txHash));
   const decodeStart = Date.now();
   const decoded = await decode(rawSorobanEvent);
+  const contractMeta = await db.getContractMeta(rawSorobanEvent.contractId).catch(() => null);
+  decoded.abi_version = Number(contractMeta?.abi_version ?? 0);
   decodeLatency.observe(Date.now() - decodeStart);
   eventsIngested.inc({ function: decoded.function });
   decoded.is_high_bloat_risk = isHighBloatRisk(rawSorobanEvent, rawSorobanEvent.contractId);
@@ -184,6 +187,9 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
       `[${rawSorobanEvent.ledger}] CONTRACT UPGRADE ${rawSorobanEvent.contractId}: ${upgrade.oldHash} → ${upgrade.newHash}`,
     );
     decoded.upgrade = upgrade;
+    if (decoded.abi_version > 0) {
+      await db.markNeedsRedecode(rawSorobanEvent.contractId, decoded.abi_version);
+    }
   }
 
   decoded.storage_tiers = classifyStorageWrites(rawSorobanEvent);
@@ -210,9 +216,8 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   handleVaultEvent(decoded); // vault ratio update (async, non-blocking)
 
   // Process circuit breaker events.
-  const meta = await db.getContractMeta(rawSorobanEvent.contractId).catch(() => null);
-  if (meta) {
-    processCircuitBreakerEvent(decoded, meta).catch((err) =>
+  if (contractMeta) {
+    processCircuitBreakerEvent(decoded, contractMeta).catch((err) =>
       console.error("[circuitBreakerIndexer] Error:", err.message),
     );
   }
@@ -294,6 +299,7 @@ async function run() {
   startMetricsCollector(); // RPC latency probes
   startPruner(); // daily temporary-storage cleanup
   startGasGuzzlersWorker(); // daily gas consumption leaderboard
+  startReDecodeWorker(); // low-priority ABI refresh for superseded events
 
   // ── Auth & Rate Limiting cron jobs ─────────────────────────────────────────
   startUsageFlushCron();       // flush Redis usage counters → DB every minute
