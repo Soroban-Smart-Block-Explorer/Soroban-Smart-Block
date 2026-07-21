@@ -38,7 +38,14 @@ describe("SearchPage", () => {
       </QueryClientProvider>
     );
 
-    const resultMessage = await screen.findByText(/No results for .*nonexistent/i);
+    // Text spans multiple nodes: "No results for <code>nonexistent</code>. Try..."
+    // Match the deepest element whose textContent contains both phrases
+    const resultMessage = await screen.findByText((_, element) => {
+      const hasText = (el: Element | null) =>
+        Boolean(el?.textContent?.includes("No results for") && el?.textContent?.includes("nonexistent"));
+      // Only match if this element has the text but no child element also has it
+      return hasText(element) && Array.from(element?.children ?? []).every((child) => !hasText(child));
+    });
     expect(resultMessage).toBeDefined();
     expect(consoleErrorSpy).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith("/api/search?q=nonexistent&limit=50");
