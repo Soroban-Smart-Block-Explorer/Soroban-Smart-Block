@@ -43,7 +43,7 @@ try {
 
 const [
   { db },
-  { computeNextRetryDelay, enqueue, initDeadLetterQueue, processRetries },
+  { computeNextRetryDelay, enqueue, processRetries },
   { loadTransactionContext, processSingleEvent },
 ] = importedModules;
 
@@ -101,7 +101,7 @@ describe("transaction context loading", () => {
 describe("DLQ retries through the real indexing handler", () => {
   beforeAll(async () => {
     await db.init();
-    await initDeadLetterQueue();
+    // Table creation now handled by migration system
   });
 
   beforeEach(async () => {
