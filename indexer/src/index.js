@@ -34,7 +34,7 @@ import { startAuditPartitionCron } from "./audit/auditLogger.js";
 import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
-import { initDeadLetterQueue, processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
+import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
 import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
 
 const RPC_URL = config.SOROBAN_RPC_URL;
@@ -289,7 +289,6 @@ let ledgersSinceReorgCheck = 0;
 
 async function run() {
   await db.init();
-  await initDeadLetterQueue();
   const server = startApi();
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);

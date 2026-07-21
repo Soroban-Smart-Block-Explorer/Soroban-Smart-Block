@@ -74,6 +74,29 @@ describe("DB schema integration", () => {
     }
   });
 
+  it("dead_letter_queue table exists with expected columns", async () => {
+    const { rows } = await pool.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'dead_letter_queue'
+    `);
+    const cols = new Set(rows.map((r) => r.column_name));
+    for (const col of ["id", "event_id", "contract_id", "ledger", "tx_hash",
+                        "raw_event", "error_message", "error_code", "retry_count",
+                        "max_retries", "next_retry_at", "resolved", "created_at", "updated_at"]) {
+      assert.ok(cols.has(col), `Missing column: ${col}`);
+    }
+  });
+
+  it("dead_letter_queue indexes exist", async () => {
+    const { rows } = await pool.query(`
+      SELECT indexname FROM pg_indexes WHERE tablename = 'dead_letter_queue'
+    `);
+    const idxs = new Set(rows.map((r) => r.indexname));
+    for (const idx of ["idx_dlq_resolved", "idx_dlq_next_retry", "idx_dlq_ledger"]) {
+      assert.ok(idxs.has(idx), `Missing DLQ index: ${idx}`);
+    }
+  });
+
   it("upsert and query events round-trips correctly", async () => {
     const testContractId = `TEST_${Date.now()}`;
     await pool.query(`
