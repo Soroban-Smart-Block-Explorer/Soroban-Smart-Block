@@ -159,6 +159,28 @@ export interface ContractMeta {
   dependency_advisory?: DependencyAdvisory | null;
 }
 
+export interface ContractListItem {
+  id: string;
+  name: string;
+  description: string;
+  registered_by: string;
+  has_circuit_breaker: boolean;
+  is_paused: boolean;
+  is_rwa: boolean;
+  rwa_type: string | null;
+  created_at: string;
+}
+
+export interface ContractsListResponse {
+  contracts: ContractListItem[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
+}
+
 export type SearchKind = "contract" | "event" | "wallet";
 
 export interface SearchContract {
@@ -418,6 +440,12 @@ export const api = {
   },
   zkCosts: (seq: number) => get<{ calls: ZkHostCall[]; delta: ZkCostDelta | null }>(`/events/${seq}/zk-costs`),
   contract: (id: string) => get<ContractMeta>(`/contracts/${id}`),
+  listContracts: (page = 1, limit = 25) => {
+    const q = new URLSearchParams();
+    q.set("page", String(page));
+    q.set("limit", String(limit));
+    return get<ContractsListResponse>(`/contracts?${q}`);
+  },
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
   wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
