@@ -255,6 +255,15 @@ const configSchema = z.object({
 
   // ── Cloudflare ──────────────────────────────────────────────────────────────
   CLOUDFLARE_WEBHOOK_URL: optionalUrl(),
+
+  // ── GraphQL Security ────────────────────────────────────────────────────────
+  MAX_GRAPHQL_DEPTH: positiveInt(4).refine((val) => val >= 1 && val <= 20, {
+    message: "MAX_GRAPHQL_DEPTH must be between 1 and 20",
+  }),
+
+  MAX_GRAPHQL_COMPLEXITY: positiveInt(1000).refine((val) => val >= 100 && val <= 100000, {
+    message: "MAX_GRAPHQL_COMPLEXITY must be between 100 and 100000",
+  }),
 });
 
 // ── Validate and Export Configuration ─────────────────────────────────────────
