@@ -48,6 +48,18 @@ If the contract lives in a workspace package, run the Cargo command from that pa
 find . -path "*target/wasm32-unknown-unknown/release/*.wasm"
 ```
 
+### Verified Build Reference
+
+A clean release build of `soroban-explorer-contract` was verified at commit `002fc6a` (2026-07-21) per [#441](https://github.com/Soroban-Smart-Block-Explorer/Soroban-Smart-Block/issues/441):
+
+| Field | Value |
+| --- | --- |
+| Artifact | `target/wasm32-unknown-unknown/release/soroban_explorer_contract.wasm` |
+| Size | 30,778 bytes (~30 KB, well under the 100 KB budget) |
+| SHA256 | `82dd8081e1af944a331905a69892b45ad9c115ee8e96cdb4ac7ba566bf41b2fd` |
+
+This is a point-in-time record, not a guarantee for future builds — recompute the size and hash after any contract source change before deploying.
+
 ## 2. Deploy The Contract To Testnet
 
 Configure the CLI and fund the deployer account if needed:
