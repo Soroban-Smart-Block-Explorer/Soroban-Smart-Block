@@ -23,6 +23,7 @@ import RwaMetadataDisplay from "../components/RwaMetadataDisplay";
 import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
+import AbiHistoryDrawer from "../components/AbiHistoryDrawer";
 
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff";
 
@@ -46,6 +47,7 @@ export default function ContractPage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [selectedFn, setSelectedFn] = useState("");
   const [snippetFn, setSnippetFn] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // ── Local ABI (session-only, never sent to server) ──────────────────────────
   const { localAbi, loadAbi, clearAbi, parseError } = useLocalAbi(id);
@@ -189,6 +191,22 @@ export default function ContractPage() {
             </code>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              style={{
+                padding: "8px 16px",
+                background: "transparent",
+                color: "var(--text)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+              aria-label="View ABI version history"
+            >
+              📜 ABI History
+            </button>
             <Link
               to={`/contract/${id}/workspace`}
               style={{
@@ -518,6 +536,13 @@ export default function ContractPage() {
 
       {/* Tab: State-Diff Timeline — */}
       {tab === "state-diff" && <StateDiffTimeline contractId={id} />}
+
+      {/* ABI Version History Drawer — Issue #516 */}
+      <AbiHistoryDrawer
+        contractId={id}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
     </div>
   );
 }
