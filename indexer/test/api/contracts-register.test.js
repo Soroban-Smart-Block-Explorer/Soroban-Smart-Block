@@ -11,8 +11,8 @@ process.env.API_KEY = "test-api-key";
 // Skip on-chain ABI verification so the test does not require RPC access.
 process.env.VERIFY_ABI = "false";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
 
 describe("POST /api/contracts (issue #414)", () => {
   let server;

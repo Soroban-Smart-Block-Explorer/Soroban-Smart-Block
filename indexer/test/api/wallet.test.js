@@ -7,8 +7,8 @@ const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "pos
 process.env.DATABASE_URL = DB_URL;
 process.env.API_KEY = "test-api-key";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
 
 describe("GET /api/wallet/:address (issue #415)", () => {
   let server;
