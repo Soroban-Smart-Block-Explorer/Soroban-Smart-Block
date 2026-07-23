@@ -79,7 +79,7 @@ jobs:
         working-directory: contracts/ticket
         run: |
           cargo llvm-cov --features testutils --release --lcov --output-path lcov-ticket.info
-          cargo llvm-cov report --features testutils --release --summary-only | tee coverage_summary_ticket.txt
+          cargo llvm-cov report --release --summary-only | tee coverage_summary_ticket.txt
 
       - name: Check ticket coverage threshold (85%)
         working-directory: contracts/ticket
@@ -192,7 +192,7 @@ jobs:
           fi
 
       - name: Validate OpenAPI spec
-        run: npx -y @apidevtools/swagger-parser-cli validate docs/api/openapi.yaml
+        run: npx -y @apidevtools/swagger-cli validate docs/api/openapi.yaml
 
       - name: Indexer tests
         run: npm test -- --coverage --coverageReporters=lcov

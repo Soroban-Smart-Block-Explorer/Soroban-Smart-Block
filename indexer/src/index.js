@@ -11,7 +11,7 @@ import { isHighBloatRisk } from "./bloatDetector.js";
 import { detectUpgrade } from "./upgradeDetector.js";
 import { classifyStorageWrites } from "./storageTierClassifier.js";
 import { startBurnDetector } from "./burnDetector.js";
-import { multiNodeRpc } from "./rpcMultiNode.js";
+import { multiNodeRpc, startNodeRecoveryPoll } from "./rpcMultiNode.js";
 import { startMetricsCollector } from "./rpcMetrics.js";
 import { startPruner } from "./pruner.js";
 import { extractStateDiffs } from "./stateDiffIndexer.js";
@@ -30,7 +30,7 @@ import { warmCache } from "./cacheWarming.js";
 import { cacheInvalidate } from "./cacheLayer.js";
 import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics } from "./metrics.js";
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
-import { startAuditPartitionCron } from "./audit/auditLogger.js";
+import { startAuditPartitionCron, startAuditFlush } from "./audit/auditLogger.js";
 import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
@@ -296,6 +296,7 @@ async function run() {
   startAbiSync();
   startBurnDetector();
   startMetricsCollector(); // RPC latency probes
+  startNodeRecoveryPoll(); // re-check unhealthy multi-node RPC failover nodes
   startPruner(); // daily temporary-storage cleanup
   startGasGuzzlersWorker(); // daily gas consumption leaderboard
   startReDecodeWorker(); // low-priority ABI refresh for superseded events
@@ -304,6 +305,7 @@ async function run() {
   startUsageFlushCron();       // flush Redis usage counters → DB every minute
   startRetentionCleanupCron(); // nightly usage data retention cleanup
   startAuditPartitionCron();   // monthly audit log partition management
+  startAuditFlush();           // drain queued audit log entries every 500ms
 
   // Bootstrap vault indexer: initial ratio snapshot for all registered vaults
   refreshAllVaults().catch(() => {});

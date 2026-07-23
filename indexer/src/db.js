@@ -2,6 +2,12 @@ import pg from "pg";
 import { runMigrations } from "./migrate.js";
 import { validateAndSanitizeDecodedEvent } from "./decoderValidator.js";
 
+// BIGINT/BIGSERIAL (OID 20) columns — seq, ledger — are returned as JS
+// strings by default to avoid silent precision loss above 2^53. Ledger and
+// event sequence numbers stay well within that range, and the OpenAPI schema
+// documents these fields as `integer`, so parse them as numbers.
+pg.types.setTypeParser(20, (val) => parseInt(val, 10));
+
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 /** Exported for pool metric collection — do not use for queries outside db.js. */

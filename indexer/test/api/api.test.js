@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 import pg from "pg";
 
@@ -7,8 +8,8 @@ process.env.DATABASE_URL = DB_URL;
 process.env.API_KEY = "test-api-key";
 process.env.VERIFY_ABI = "false";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
 
 describe("REST API Integration Tests", () => {
   let app;
