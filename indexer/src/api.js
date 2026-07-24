@@ -10,6 +10,7 @@ import swaggerUi from "swagger-ui-express";
 import { db } from "./db.js";
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
+import { fetchWalletBalances, AccountNotFoundError } from "./horizonBalances.js";
 import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -881,16 +882,36 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
   // Returns 200 with { events: [...] } (empty array for an unknown address) and
   // 400 when the address is not a well-formed Stellar public key (G... base32).
+  // Optional ?fn=transfer,mint filters by comma-separated event-type categories
+  // (transfer/swap/mint/burn/stake match by prefix; "other" matches everything else).
   app.get("/api/wallet/:address", async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
         return res.status(400).json({ error: "Invalid wallet address format" });
       }
-      const events = await db.getWalletEvents(address);
+      const events = await db.getWalletEvents(address, { fn: req.query.fn });
       res.json({ events });
     } catch (e) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/wallet/:address/balances — classic XLM + SEP-41/classic asset
+  // balances sourced from Horizon (issue #530). Cached for 30s per address.
+  app.get("/api/wallet/:address/balances", async (req, res) => {
+    try {
+      const address = req.params.address;
+      if (!/^G[A-Z2-7]{55}$/.test(address)) {
+        return res.status(400).json({ error: "Invalid wallet address format" });
+      }
+      const balances = await fetchWalletBalances(address);
+      res.json({ balances });
+    } catch (e) {
+      if (e instanceof AccountNotFoundError) {
+        return res.status(404).json({ error: "Account not found on network" });
+      }
+      res.status(502).json({ error: e.message });
     }
   });
 

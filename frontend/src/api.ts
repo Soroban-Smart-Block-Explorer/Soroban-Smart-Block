@@ -181,6 +181,14 @@ export interface ContractsListResponse {
   };
 }
 
+// Classic/SEP-41 asset balance entry from the wallet balances endpoint (issue #530).
+export interface WalletBalance {
+  asset_code: string;
+  asset_issuer: string | null;
+  balance: string;
+  is_native: boolean;
+}
+
 export type SearchKind = "contract" | "event" | "wallet";
 
 export interface SearchContract {
@@ -448,7 +456,15 @@ export const api = {
   },
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
-  wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
+  // Optional fn filter (comma-separated event-type categories, issue #532)
+  wallet: (address: string, opts?: { fn?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.fn) q.set("fn", opts.fn);
+    const qs = q.toString();
+    return get<{ events: DecodedEvent[] }>(`/wallet/${address}${qs ? `?${qs}` : ""}`).then((r) => r.events);
+  },
+  // Classic XLM + SEP-41 asset balances sourced from Horizon (issue #530)
+  walletBalances: (address: string) => get<{ balances: WalletBalance[] }>(`/wallet/${address}/balances`),
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),

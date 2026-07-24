@@ -270,7 +270,42 @@ export const db = {
     return rows[0] ?? null;
   },
 
-  async getWalletEvents(address) {
+  // Function-name categories recognised by the wallet event-type filter (issue #532).
+  // Each category matches by prefix (e.g. "swap" also matches "swap_exact", "swap_tokens").
+  WALLET_EVENT_CATEGORIES: ["transfer", "swap", "mint", "burn", "stake"],
+
+  async getWalletEvents(address, { fn } = {}) {
+    const params = [address];
+    let categoryClause = "";
+
+    const categories = fn
+      ? String(fn)
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean)
+      : [];
+
+    if (categories.length) {
+      const known = this.WALLET_EVENT_CATEGORIES.filter((c) => categories.includes(c));
+      const wantsOther = categories.includes("other");
+      const orParts = [];
+
+      for (const cat of known) {
+        params.push(`${cat}%`);
+        orParts.push(`function ILIKE $${params.length}`);
+      }
+      if (wantsOther) {
+        const notLikeParts = this.WALLET_EVENT_CATEGORIES.map((cat) => {
+          params.push(`${cat}%`);
+          return `function NOT ILIKE $${params.length}`;
+        });
+        orParts.push(`(${notLikeParts.join(" AND ")})`);
+      }
+      if (orParts.length) {
+        categoryClause = `AND (${orParts.join(" OR ")})`;
+      }
+    }
+
     // Use the GIN full-text index via plainto_tsquery so the query uses the
     // idx_events_search_fts index instead of a full-table raw_topics::text scan.
     const { rows } = await pool.query(
@@ -280,9 +315,10 @@ export const db = {
          coalesce(raw_topics::text, '') || ' ' ||
          coalesce(raw_data, '')
        ) @@ plainto_tsquery('simple', $1)
+       ${categoryClause}
        ORDER BY ledger DESC
        LIMIT 100`,
-      [address],
+      params,
     );
     return rows;
   },

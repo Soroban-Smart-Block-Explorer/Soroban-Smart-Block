@@ -26,6 +26,7 @@ const TTL_CONFIG = {
   contracts_single: { l1: 60, l2: 900, l3: "public, max-age=300, stale-if-error=86400" },
   search: { l1: 0, l2: 10, l3: "no-cache, no-store" },
   stats: { l1: 60, l2: 300, l3: "public, max-age=300" },
+  wallet_balances: { l1: 30, l2: 30, l3: "public, max-age=30" },
   default: { l1: 30, l2: 60, l3: "public, max-age=60" },
 };
 
