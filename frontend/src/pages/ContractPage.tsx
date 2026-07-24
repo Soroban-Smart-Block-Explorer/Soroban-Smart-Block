@@ -24,7 +24,7 @@ import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
 
-type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff";
+type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff" | "abi-history";
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
@@ -32,6 +32,22 @@ function EmptyState({ title, message }: { title: string; message: string }) {
       <strong style={{ display: "block", color: "var(--text)", fontSize: 14, marginBottom: 6 }}>{title}</strong>
       {message}
     </div>
+  );
+}
+
+/** Blue checkmark shown next to contract name when DB ABI matches on-chain registry. */
+function VerifiedBadge({ ledger }: { ledger?: number | null }) {
+  return (
+    <span
+      title={ledger ? `ABI verified against on-chain registry at ledger #${ledger}` : "ABI verified against on-chain registry"}
+      style={{ display: "inline-flex", alignItems: "center", marginLeft: 8, cursor: "default" }}
+      aria-label="Verified contract"
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <circle cx="8" cy="8" r="8" fill="#1d9bf0" />
+        <path d="M4.5 8l2.5 2.5 4.5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </span>
   );
 }
 
@@ -66,6 +82,12 @@ export default function ContractPage() {
   const { data: migrationStatus } = useQuery({
     queryKey: ["migration-status", id],
     queryFn: () => api.migrationStatus(id),
+    enabled: !!id,
+  });
+
+  const { data: abiHistoryData } = useQuery({
+    queryKey: ["abi-history", id],
+    queryFn: () => api.abiHistory(id),
     enabled: !!id,
   });
 
@@ -146,6 +168,7 @@ export default function ContractPage() {
     { key: "networks", label: "Networks" },
     { key: "graph", label: "Address Graph" },
     { key: "state-diff", label: "State Timeline" },
+    { key: "abi-history", label: "ABI History" },
   ];
 
   return (
@@ -174,7 +197,27 @@ export default function ContractPage() {
           }}
         >
           <div>
-            <h2 style={{ marginBottom: 8 }}>{meta.name || "Unnamed Contract"}</h2>
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+              <h2 style={{ margin: 0 }}>{meta.name || "Unnamed Contract"}</h2>
+              {(meta as any).is_verified && <VerifiedBadge ledger={(meta as any).verified_ledger} />}
+              {(meta as any).protocol_type && (meta as any).protocol_type !== "other" && (
+                <span
+                  style={{
+                    marginLeft: 10,
+                    fontSize: 11,
+                    padding: "2px 8px",
+                    borderRadius: 10,
+                    background: "var(--border)",
+                    color: "var(--muted)",
+                    textTransform: "uppercase",
+                    fontWeight: 700,
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  {(meta as any).protocol_type}
+                </span>
+              )}
+            </div>
             <p style={{ color: "var(--muted)", marginBottom: 12 }}>
               {meta.description || "No contract description available."}
             </p>
@@ -518,6 +561,62 @@ export default function ContractPage() {
 
       {/* Tab: State-Diff Timeline — */}
       {tab === "state-diff" && <StateDiffTimeline contractId={id} />}
+
+      {/* Tab: ABI History (Issue #517) — version-by-version ABI snapshots */}
+      {tab === "abi-history" && (
+        <div className="card">
+          <h3 style={{ fontSize: 14, marginBottom: 12 }}>ABI Version History</h3>
+          {!abiHistoryData || abiHistoryData.history.length === 0 ? (
+            <p style={{ color: "var(--muted)", fontSize: 13 }}>No ABI version history recorded yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {abiHistoryData.history.map((entry) => (
+                <div
+                  key={entry.abi_version}
+                  style={{
+                    borderLeft: "3px solid var(--accent)",
+                    paddingLeft: 12,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <strong style={{ fontSize: 13 }}>v{entry.abi_version}</strong>
+                    <span style={{ color: "var(--muted)", fontSize: 12 }}>
+                      ledger #{entry.min_ledger} · {new Date(entry.created_at).toLocaleString()}
+                    </span>
+                    {entry.registered_by && (
+                      <span style={{ color: "var(--muted)", fontSize: 11 }}>
+                        by <code>{entry.registered_by}</code>
+                      </span>
+                    )}
+                  </div>
+                  {entry.functions.length === 0 ? (
+                    <p style={{ color: "var(--muted)", fontSize: 12 }}>No functions recorded.</p>
+                  ) : (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                      {entry.functions.map((f: { name: string; description?: string }) => (
+                        <span
+                          key={f.name}
+                          title={f.description || f.name}
+                          style={{
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: 4,
+                            padding: "2px 8px",
+                            fontSize: 12,
+                            fontFamily: "monospace",
+                          }}
+                        >
+                          {f.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

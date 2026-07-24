@@ -6,6 +6,7 @@ import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
 import { decode } from "./decoder.js";
 import { startAbiSync } from "./githubAbiSync.js";
+import { startContractVerifier } from "./contractVerifier.js";
 import { withRetry } from "./rpcRetry.js";
 import { isHighBloatRisk } from "./bloatDetector.js";
 import { detectUpgrade } from "./upgradeDetector.js";
@@ -294,6 +295,7 @@ async function run() {
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
   warmCache().catch((e) => logger.warn({ err: e.message }, "cache warm failed"));
   startAbiSync();
+  startContractVerifier(); // periodically verify DB ABI hashes against on-chain registry
   startBurnDetector();
   startMetricsCollector(); // RPC latency probes
   startNodeRecoveryPoll(); // re-check unhealthy multi-node RPC failover nodes
