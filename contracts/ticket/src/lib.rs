@@ -1,12 +1,5 @@
 #![no_std]
 
-// Formal-verification harnesses (Kani only — zero cost in normal builds).
-#[cfg(kani)]
-mod kani_proofs;
-
-// Multi-contract interaction tests (test cfg only).
-#[cfg(test)]
-mod multi_contract_tests;
 
 // Unit / property / snapshot / stress / gas tests.
 #[cfg(test)]

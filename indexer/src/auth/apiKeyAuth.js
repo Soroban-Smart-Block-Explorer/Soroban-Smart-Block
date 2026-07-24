@@ -211,6 +211,21 @@ async function apiKeyAuthenticator(req, res, next) {
 
     // ── Authenticated path ──────────────────────────────────────────────────
 
+    // Legacy static admin key (ADMIN_SECRET-style shared secret via API_KEY):
+    // predates the per-key DB-backed system above and is still relied on by
+    // route-level `requireApiKey` checks in api.js.
+    const staticAdminKey = process.env.API_KEY;
+    if (staticAdminKey && rawKey === staticAdminKey) {
+      req.rateContext = {
+        clientId: 'static-admin-key',
+        tier: 'enterprise',
+        rateLimit: null,
+        keyId: null,
+        keyName: 'static-admin-key',
+      };
+      return next();
+    }
+
     // 1. Try LRU cache first.
     let keyRecord = keyCache.get(rawKey);
 

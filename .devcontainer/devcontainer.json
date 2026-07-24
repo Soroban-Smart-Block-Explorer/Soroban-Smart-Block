@@ -2,8 +2,9 @@
   "name": "Soroban Smart Block Explorer",
 
   // Build the dev image from .devcontainer/Dockerfile (Rust + Node 20 + wasm32)
-  // and compose up postgres as a sidecar.
-  "dockerComposeFile": ["../docker-compose.yml", "docker-compose.devcontainer.yml"],
+  // and compose up postgres as a sidecar. Uses a self-contained compose file so
+  // Codespaces doesn't attempt to build the full production stack on startup.
+  "dockerComposeFile": "docker-compose.devcontainer.yml",
   "service": "devcontainer",
   "workspaceFolder": "/workspaces/Soroban-Smart-Block",
   "overrideCommand": true,

@@ -328,7 +328,7 @@ function TreeView({ node, depth = 0 }: { node: TreeNode; depth?: number }) {
 
 export default function XdrInspector() {
   const [input, setInput] = useState("");
-  const decoded = input.trim() ? tryDecode(input) : null;
+  const decoded = tryDecode(input);
 
   const copyAll = () => {
     if (decoded && !("error" in decoded)) {

@@ -55,7 +55,7 @@ function buildFlamebars(
 
   for (const [, chain] of byTx) {
     const sorted = [...chain].sort((a, b) => a.depth - b.depth);
-    const totalGas = sorted.reduce((s, i) => s + (i.gas_cost ?? 1), 0);
+    const totalGas = sorted.reduce((s, i) => s + (i.fee_charged ?? 1), 0);
 
     // Group by depth level
     const byDepth = new Map<number, SubInvocationExtended[]>();
@@ -68,7 +68,7 @@ function buildFlamebars(
     for (const [depth, levelInvs] of byDepth) {
       let levelOffset = txOffset;
       for (const inv of levelInvs) {
-        const gas = inv.gas_cost ?? 1;
+        const gas = inv.fee_charged ?? 1;
         const w = Math.max(1, (gas / totalGas) * txWidth);
         allBars.push({ inv, x: levelOffset, width: w, depth });
         levelOffset += w;
@@ -126,7 +126,7 @@ export default function SubInvocationFlamegraph({ invocations, txHash }: Props) 
               style={{ cursor: "pointer" }}
               onClick={() => setSelected(bar.inv)}
               onMouseEnter={(e) => {
-                const gas = bar.inv.gas_cost;
+                const gas = bar.inv.fee_charged;
                 setTooltip({
                   text: `${bar.inv.contract_id} · ${bar.inv.function}${gas != null ? ` · ${gas.toLocaleString()} gas` : ""}`,
                   x: e.nativeEvent.offsetX,
@@ -205,9 +205,9 @@ export default function SubInvocationFlamegraph({ invocations, txHash }: Props) 
           <span>
             <strong>Depth:</strong> {selected.depth}
           </span>
-          {selected.gas_cost != null && (
+          {selected.fee_charged != null && (
             <span>
-              <strong>Gas:</strong> {selected.gas_cost.toLocaleString()}
+              <strong>Gas:</strong> {selected.fee_charged.toLocaleString()}
             </span>
           )}
           <span>

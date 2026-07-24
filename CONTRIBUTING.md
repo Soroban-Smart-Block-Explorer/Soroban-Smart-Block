@@ -28,10 +28,6 @@ The repo ships a fully configured dev container that provides Rust, Node 20,
    ```
    Frontend: http://localhost:5173 · API: http://localhost:3001
 
-> If you see **"running in recovery mode"**, run **Rebuild Container** from the
-> VS Code command palette. This rebuilds the image with Rust + Node 20 from
-> `.devcontainer/Dockerfile`.
-
 ### Option B — Local setup
 
 1. Fork the repository and clone your fork.

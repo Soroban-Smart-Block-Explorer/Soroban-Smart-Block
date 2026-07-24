@@ -3,7 +3,7 @@
  * Uses read-only simulateTransaction to retrieve name, symbol, and decimals
  * from any SEP-41 compliant contract without spending fees.
  */
-import { SorobanRpc, TransactionBuilder, Networks, Account, Contract, scValToNative } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc, TransactionBuilder, Networks, Account, Contract, scValToNative } from "@stellar/stellar-sdk";
 import { withRetry } from "./rpcRetry.js";
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";

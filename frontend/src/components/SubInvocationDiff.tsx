@@ -35,7 +35,7 @@ function InvocationRow({
       <td style={{ padding: "3px 8px" }}>{inv.function}</td>
       <td style={{ padding: "3px 8px", textAlign: "center" }}>{inv.depth}</td>
       <td style={{ padding: "3px 8px", textAlign: "right" }}>
-        {inv.gas_cost != null ? inv.gas_cost.toLocaleString() : "—"}
+        {inv.fee_charged != null ? inv.fee_charged.toLocaleString() : "—"}
       </td>
     </tr>
   );
@@ -62,8 +62,8 @@ function diffInvocations(
   const only_in_b = b.filter((i) => !aKeys.has(keyOf(i)));
   const common = a.filter((i) => bKeys.has(keyOf(i)));
 
-  const gasA = a.reduce((s, i) => s + (i.gas_cost ?? 0), 0);
-  const gasB = b.reduce((s, i) => s + (i.gas_cost ?? 0), 0);
+  const gasA = a.reduce((s, i) => s + (i.fee_charged ?? 0), 0);
+  const gasB = b.reduce((s, i) => s + (i.fee_charged ?? 0), 0);
 
   return {
     tx_a: a[0]?.parent_tx_hash ?? "",

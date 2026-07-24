@@ -71,3 +71,28 @@ export function parseHeuristic(params) {
     ...guessType(p),
   }));
 }
+
+/**
+ * Generate a human-readable fallback description for an event using heuristics.
+ * Always returns a non-empty string — never null, undefined, or ''.
+ *
+ * Intended as the last-resort fallback in the decoder when no ABI is registered
+ * and no known SAC/vault pattern matches.
+ *
+ * @param {object} ev  Event object with function, raw_topics, and raw_data fields
+ * @returns {string}  Non-empty description string
+ */
+export function heuristicParser(ev) {
+  const fn = String(ev?.function ?? ev?.fn ?? "") || "unknown";
+  const rawTopics = Array.isArray(ev?.raw_topics) ? ev.raw_topics : [];
+  // Skip index 0 — that slot holds the function-name topic itself
+  const params = rawTopics.slice(1);
+  const heuristic = parseHeuristic(params);
+
+  if (!heuristic.length) {
+    return `${fn}() [heuristic]`;
+  }
+
+  const paramStr = heuristic.map((p) => p.value).join(", ");
+  return `${fn}(${paramStr}) [heuristic]`;
+}

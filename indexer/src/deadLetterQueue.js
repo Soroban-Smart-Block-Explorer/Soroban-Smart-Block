@@ -7,9 +7,10 @@
  */
 
 import { db } from "./db.js";
+import config from "./config.js";
 
-const DLQ_MAX_RETRIES = Number(process.env.DLQ_MAX_RETRIES || 3);
-const DLQ_RETRY_DELAY_MS = Number(process.env.DLQ_RETRY_DELAY_MS || 30_000);
+const DLQ_MAX_RETRIES = config.DLQ_MAX_RETRIES;
+const DLQ_RETRY_DELAY_MS = config.DLQ_RETRY_DELAY_MS;
 
 /**
  * Classify whether an error message indicates a transient failure
@@ -33,30 +34,14 @@ export function computeNextRetryDelay(retryCount) {
 }
 
 /**
- * Initialise the dead_letter_queue table. Called once during startup.
+ * Initialise the dead_letter_queue functionality.
+ * 
+ * Note: The table creation is now handled by migration 010_dead_letter_queue.sql
+ * This function is kept as a no-op for backwards compatibility but will be
+ * removed in a future version once all references are cleaned up.
  */
 export async function initDeadLetterQueue() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS dead_letter_queue (
-      id            BIGSERIAL PRIMARY KEY,
-      event_id      TEXT,
-      contract_id   TEXT,
-      ledger        BIGINT,
-      tx_hash       TEXT,
-      raw_event     JSONB NOT NULL,
-      error_message TEXT NOT NULL,
-      error_code    TEXT,
-      retry_count   INT NOT NULL DEFAULT 0,
-      max_retries   INT NOT NULL DEFAULT 3,
-      next_retry_at TIMESTAMPTZ,
-      resolved      BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at    TIMESTAMPTZ DEFAULT NOW(),
-      updated_at    TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_dlq_resolved    ON dead_letter_queue(resolved);
-    CREATE INDEX IF NOT EXISTS idx_dlq_next_retry  ON dead_letter_queue(next_retry_at) WHERE resolved = FALSE;
-    CREATE INDEX IF NOT EXISTS idx_dlq_ledger      ON dead_letter_queue(ledger);
-  `);
+  // No-op: table creation moved to migration system (010_dead_letter_queue.sql)
 }
 
 /**

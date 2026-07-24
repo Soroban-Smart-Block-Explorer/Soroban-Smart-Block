@@ -147,6 +147,44 @@ export function parseZkHostFunctions(ev) {
 }
 
 /**
+ * High-level ZK detection for the EventPage cost panel (CAP-0080).
+ *
+ * Given a transaction meta (XDR `TransactionMeta` object) — or an event-like
+ * wrapper already carrying `txMeta` / `diagnosticEvents` / `hostFunctions` —
+ * returns a flat result describing whether the transaction invoked any native
+ * ZK host function and, if so, the aggregate cost delta versus a Wasm-side
+ * implementation.
+ *
+ * @param {object} txMeta  Stellar `TransactionMeta` XDR object, or event-like wrapper
+ * @returns {{ is_zk: boolean, calls: ZkHostCall[], total_native: number, total_legacy: number, saved_cpu: number, saved_pct: number }}
+ */
+export function detect(txMeta) {
+  // Accept either a raw txMeta XDR object or an event-like wrapper. The parser
+  // looks for ZK calls under ev.txMeta / ev.diagnosticEvents / ev.hostFunctions,
+  // so wrap a bare txMeta accordingly.
+  const ev =
+    txMeta &&
+    (txMeta.txMeta || txMeta.diagnosticEvents || txMeta.diagnostic_events ||
+      txMeta.hostFunctions || txMeta.host_functions)
+      ? txMeta
+      : { txMeta };
+
+  const calls = parseZkHostFunctions(ev);
+  if (!calls || calls.length === 0) {
+    return {
+      is_zk: false,
+      calls: [],
+      total_native: 0,
+      total_legacy: 0,
+      saved_cpu: 0,
+      saved_pct: 0,
+    };
+  }
+
+  return { is_zk: true, calls, ...computeZkCostDelta(calls) };
+}
+
+/**
  * Compute aggregate cost delta across all ZK calls in an event.
  *
  * @param {ZkHostCall[]} calls

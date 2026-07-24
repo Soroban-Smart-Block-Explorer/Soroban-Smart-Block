@@ -68,23 +68,23 @@ fn test_register_wrong_auth() {
 #[test]
 #[should_panic]
 fn test_update_by_stranger() {
-    let (env, client, _admin) = setup_with_admin();
+    let (env, client, admin) = setup_with_admin();
     let registrant = Address::generate(&env);
     let stranger = Address::generate(&env);
     let cid = BytesN::from_array(&env, &[2u8; 32]);
     let meta = make_meta(&env, &registrant);
 
-    // register as registrant
+    // register as admin (but with registrant as registered_by in meta)
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 
     // stranger tries to update
     let meta2 = ContractMeta {
@@ -113,15 +113,15 @@ fn test_admin_can_update_any() {
     let meta = make_meta(&env, &registrant);
 
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 
     let meta2 = ContractMeta {
         version: 2,
@@ -138,27 +138,27 @@ fn test_admin_can_update_any() {
         },
     }]);
     client.update_contract(&admin, &cid, &meta2);
-    assert_eq!(client.get_contract(&cid).unwrap().version, 2u32);
+    assert_eq!(client.get_contract(&cid).version, 2u32);
 }
 
 // 4. Registrant can update their own contract
 #[test]
 fn test_registrant_can_update_own() {
-    let (env, client, _admin) = setup_with_admin();
+    let (env, client, admin) = setup_with_admin();
     let registrant = Address::generate(&env);
     let cid = BytesN::from_array(&env, &[4u8; 32]);
     let meta = make_meta(&env, &registrant);
 
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 
     let meta2 = ContractMeta {
         version: 2,
@@ -175,7 +175,7 @@ fn test_registrant_can_update_own() {
         },
     }]);
     client.update_contract(&registrant, &cid, &meta2);
-    assert_eq!(client.get_contract(&cid).unwrap().version, 2u32);
+    assert_eq!(client.get_contract(&cid).version, 2u32);
 }
 
 // 5. submit_event called by non-admin → Unauthorized
@@ -233,21 +233,21 @@ fn test_set_max_events_non_admin() {
 // 8. deregister by registrant succeeds
 #[test]
 fn test_deregister_by_registrant() {
-    let (env, client, _admin) = setup_with_admin();
+    let (env, client, admin) = setup_with_admin();
     let registrant = Address::generate(&env);
     let cid = BytesN::from_array(&env, &[10u8; 32]);
     let meta = make_meta(&env, &registrant);
 
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 
     env.mock_auths(&[MockAuth {
         address: &registrant,
@@ -270,15 +270,15 @@ fn test_deregister_by_admin() {
     let meta = make_meta(&env, &registrant);
 
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 
     env.mock_auths(&[MockAuth {
         address: &admin,
@@ -296,22 +296,22 @@ fn test_deregister_by_admin() {
 #[test]
 #[should_panic]
 fn test_deregister_by_stranger() {
-    let (env, client, _admin) = setup_with_admin();
+    let (env, client, admin) = setup_with_admin();
     let registrant = Address::generate(&env);
     let stranger = Address::generate(&env);
     let cid = BytesN::from_array(&env, &[12u8; 32]);
     let meta = make_meta(&env, &registrant);
 
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 
     env.mock_auths(&[MockAuth {
         address: &stranger,
@@ -437,17 +437,16 @@ fn test_register_while_paused() {
     }]);
     client.pause(&admin);
 
-    let registrant = Address::generate(&env);
     let cid = BytesN::from_array(&env, &[20u8; 32]);
-    let meta = make_meta(&env, &registrant);
+    let meta = make_meta(&env, &admin);
     env.mock_auths(&[MockAuth {
-        address: &registrant,
+        address: &admin,
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "register_contract",
-            args: (registrant.clone(), cid.clone(), meta.clone()).into_val(&env),
+            args: (admin.clone(), cid.clone(), meta.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    client.register_contract(&registrant, &cid, &meta);
+    client.register_contract(&admin, &cid, &meta);
 }

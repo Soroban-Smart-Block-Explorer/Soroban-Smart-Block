@@ -43,16 +43,36 @@ import pg from "pg";
 import { getBurnAlerts } from "./burnDetector.js";
 import { formatAmount } from "./formatAmount.js";
 import { sendVerificationEmail, isConfigured } from "./emailService.js";
+import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
+import { getActiveAlerts } from "./alertManager.js";
+import { randomUUID } from "crypto";
+
+function requestIdMiddleware(req, _res, next) {
+  req.id = req.headers["x-request-id"] || randomUUID();
+  next();
+}
+
+function createHttpLogger(_logDestination) {
+  return (req, res, next) => {
+    res.on("finish", () => {
+      console.log(`[api] ${req.method} ${req.url} ${res.statusCode}`);
+    });
+    next();
+  };
+}
+
+function metricsMiddleware(_req, _res, next) {
+  next();
+}
 
 const PORT = process.env.PORT || 3001;
-const VERIFY_ON_UPLOAD = process.env.VERIFY_ABI !== "false";
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const API_KEY = process.env.API_KEY;
 
 function requireApiKey(req, res, next) {
-  if (!API_KEY) return next();
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) return next();
   const key = req.headers["x-api-key"];
-  if (!key || key !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
+  if (!key || key !== apiKey) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
@@ -118,13 +138,13 @@ function makeCache(cacheType, getKey) {
   };
 }
 
-// const generalLimiter = rateLimit({
-//   windowMs: 60_000,
-//   max: 100,
-//   standardHeaders: true,
-//   legacyHeaders: false,
-//   message: { error: "Too many requests" },
-// });
+const generalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests" },
+});
 
 const writeLimiter = rateLimit({
   windowMs: 60_000,
@@ -134,7 +154,7 @@ const writeLimiter = rateLimit({
   message: { error: "Too many requests" },
 });
 
-export async function createApi({ logDestination: _logDestination, dbOverride: _dbOverride } = {}) {
+export function createApi({ logDestination, dbOverride } = {}) {
   const app = express();
   app.use(helmet());
   const isWildcard = process.env.CORS_ORIGINS === '*';
@@ -171,9 +191,9 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
   app.use("/api/billing", stripeWebhookRouter);
 
   app.use(express.json());
-  // app.use(requestIdMiddleware);
-  // app.use(createHttpLogger(logDestination));
-  // app.use(metricsMiddleware);
+  app.use(requestIdMiddleware);
+  app.use(createHttpLogger(logDestination));
+  app.use(metricsMiddleware);
 
   // ── Auth & Rate Limiting Middleware Stack ─────────────────────────────────
   // Order matters: audit logger sets _startTime first, then auth resolves tier,
@@ -218,23 +238,34 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
   });
 
   // ── Health check endpoints ──────────────────────────────────────────────
-  // Import health check module
-  const { getHealthStatus, getLivenessStatus, getReadinessStatus } = await import("./health.js");
 
-  // Comprehensive health check with dependency status
-  app.get("/health", async (_req, res) => {
+  // Comprehensive health check with dependency and active-alert status
+  const healthHandler = async (_req, res) => {
     try {
       const health = await getHealthStatus();
-      const statusCode = health.status === "healthy" ? 200 : 
-                        health.status === "degraded" ? 200 : 503;
+      const statusCode = ["healthy", "degraded"].includes(health.status) ? 200 : 503;
       res.status(statusCode).json(health);
     } catch (e) {
-      res.status(503).json({ 
+      const activeAlerts = getActiveAlerts();
+      res.status(503).json({
         status: "unhealthy",
         error: e.message,
         timestamp: new Date().toISOString(),
+        alerts: {
+          active_count: activeAlerts.length,
+          conditions: activeAlerts.map(({ condition }) => condition),
+        },
       });
     }
+  };
+
+  app.get("/health", healthHandler);
+  app.get("/api/health", healthHandler);
+
+  // Public snapshot of the process-local alert manager.
+  app.get("/api/alerts", (_req, res) => {
+    const active = getActiveAlerts();
+    res.json({ active, count: active.length });
   });
 
   // Liveness probe (Kubernetes-style)
@@ -270,34 +301,54 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
 
   // ── Existing endpoints ──────────────────────────────────────────────────────
 
-  // GET /api/events?contract=&fn=&page=
+  // GET /api/events?contract=&fn=&type=&after_seq=&limit=
+  // Keyset (cursor) pagination — `after_seq` is the `next_cursor` value from
+  // the previous page (omit for the first page). Responds with
+  // { data: Event[], next_cursor: number|null } (#490).
   app.get(
     "/api/events",
+    // Validate before the cache middleware so malformed params can never be
+    // served a cached 200 (their cache key normalizes to the first page).
+    (req, res, next) => {
+      if (req.query.limit !== undefined) {
+        const parsedLimit = Number(req.query.limit);
+        if (isNaN(parsedLimit) || parsedLimit <= 0 || parsedLimit > 200) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      if (req.query.after_seq !== undefined) {
+        const parsedAfter = Number(req.query.after_seq);
+        if (!Number.isInteger(parsedAfter) || parsedAfter < 0) {
+          return res.status(422).json({ error: "Invalid after_seq" });
+        }
+      }
+      next();
+    },
     makeCache("events_list", (req) => {
-      const { contract = "", fn = "", page = "1", type = "" } = req.query;
-      return `events:list:${contract}:${fn}:${page}:${type}`;
+      const { contract = "", fn = "", type = "" } = req.query;
+      const after = Number(req.query.after_seq) || 0;
+      const limit = Number(req.query.limit) || 25;
+      return `events:list:${contract}:${fn}:${after}:${limit}:${type}`;
     }),
     async (req, res) => {
       try {
-        const key = `events:list:${req.query.contract ?? ""}:${req.query.fn ?? ""}:${Number(req.query.page) || 1}:${req.query.type ?? ""}`;
-        const events = await db.getEvents({
-          contract: req.query.contract,
-          fn: req.query.fn,
-          page: Number(req.query.page) || 1,
-          type: req.query.type,
-        });
+        const contract = req.query.contract || undefined;
+        const fn = req.query.fn || undefined;
+        const type = req.query.type || undefined;
+        const after_seq = req.query.after_seq ? Number(req.query.after_seq) : 0;
+        const limit = req.query.limit ? Number(req.query.limit) : 25;
+
+        const result = await db.getEventsCursor({ contract, fn, type, after_seq, limit });
+
         // Predictive pre-fetch: next page if user is paginating
-        schedulePrefetch(key, {
-          [`events:list:${req.query.contract ?? ""}:${req.query.fn ?? ""}:${(Number(req.query.page) || 1) + 1}:${req.query.type ?? ""}`]:
-            () =>
-              db.getEvents({
-                contract: req.query.contract,
-                fn: req.query.fn,
-                page: (Number(req.query.page) || 1) + 1,
-                type: req.query.type,
-              }),
-        });
-        res.json(events);
+        if (result.next_cursor !== null) {
+          const key = `events:list:${contract ?? ""}:${fn ?? ""}:${after_seq}:${limit}:${type ?? ""}`;
+          schedulePrefetch(key, {
+            [`events:list:${contract ?? ""}:${fn ?? ""}:${result.next_cursor}:${limit}:${type ?? ""}`]: () =>
+              db.getEventsCursor({ contract, fn, type, after_seq: result.next_cursor, limit }),
+          });
+        }
+        res.json(result);
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
@@ -470,7 +521,7 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
       const cached = getTransactionStatus(txHash);
       if (cached) return res.json(cached);
 
-      const { SorobanRpc } = await import("@stellar/stellar-sdk");
+      const { rpc: SorobanRpc } = await import("@stellar/stellar-sdk");
       const server = new SorobanRpc.Server(RPC_URL);
       const txResult = await server.getTransaction(txHash);
       const status = txResult?.status === "SUCCESS" ? "success" : txResult?.status === "FAILED" ? "failed" : "pending";
@@ -486,6 +537,50 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
       if (e?.message?.includes("404") || e?.message?.includes("not found")) {
         return res.status(404).json({ error: "Not found" });
       }
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/contracts?page=&limit=  — paginated list of registered contracts
+  app.get(
+    "/api/contracts",
+    makeCache("contracts_list", (req) => {
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 25;
+      return `contracts:list:${page}:${limit}`;
+    }),
+    async (req, res) => {
+      try {
+        const page = Number(req.query.page) || 1;
+        const limit = Math.min(Number(req.query.limit) || 25, 100);
+        const result = await db.listContracts({ page, limit });
+        res.json(result);
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
+  // GET /api/contracts/:id/events?page=&limit=  — events for a specific contract
+  app.get("/api/contracts/:id/events", async (req, res) => {
+    try {
+      const page = Number(req.query.page) || 1;
+      const limit = Math.min(Number(req.query.limit) || 25, 100);
+      const rows = await db.getEvents({
+        contract: req.params.id,
+        page,
+        limit,
+      });
+      const total = rows.length; // best-effort; full count would need a second query
+      res.json({
+        events: rows,
+        pagination: {
+          page,
+          limit,
+          total,
+        },
+      });
+    } catch (e) {
       res.status(500).json({ error: e.message });
     }
   });
@@ -570,7 +665,7 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
       const { id, functions } = req.body;
 
       if (!id || !functions) {
-        return res.status(422).json({ error: "Missing id or functions" });
+        return res.status(400).json({ error: "Missing id or functions" });
       }
 
       const existing = await db.getContractMeta(id);
@@ -579,7 +674,7 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
       }
 
       // Verify ABI against on-chain spec if enabled
-      if (VERIFY_ON_UPLOAD) {
+      if (process.env.VERIFY_ABI !== "false") {
         const verification = await verifyAbi(id, functions);
 
         if (!verification.valid) {
@@ -656,7 +751,7 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
       const { contractId, fn, args = [] } = req.body;
       if (!contractId || !fn) return res.status(400).json({ error: "Missing contractId or fn" });
 
-      const { SorobanRpc, Contract, nativeToScVal } = await import("@stellar/stellar-sdk");
+      const { rpc: SorobanRpc, Contract, nativeToScVal } = await import("@stellar/stellar-sdk");
       const rpcUrl = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
       const server = new SorobanRpc.Server(rpcUrl);
 
@@ -755,7 +850,7 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
       const { xdrEnvelope } = req.body;
       if (!xdrEnvelope) return res.status(400).json({ error: "Missing xdrEnvelope" });
 
-      const { SorobanRpc, xdr } = await import("@stellar/stellar-sdk");
+      const { rpc: SorobanRpc, xdr } = await import("@stellar/stellar-sdk");
       const server = new SorobanRpc.Server(RPC_URL);
 
       const envelope = xdr.TransactionEnvelope.fromXDR(xdrEnvelope, "base64");
@@ -784,10 +879,17 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
     }
   });
 
+  // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
+  // Returns 200 with { events: [...] } (empty array for an unknown address) and
+  // 400 when the address is not a well-formed Stellar public key (G... base32).
   app.get("/api/wallet/:address", async (req, res) => {
     try {
-      const events = await db.getWalletEvents(req.params.address);
-      res.json(events);
+      const address = req.params.address;
+      if (!/^G[A-Z2-7]{55}$/.test(address)) {
+        return res.status(400).json({ error: "Invalid wallet address format" });
+      }
+      const events = await db.getWalletEvents(address);
+      res.json({ events });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -959,130 +1061,6 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
     }
   });
 
-  // ── RPC node performance metrics ────────────────────────────────
-  // GET /api/rpc-metrics — latency history, uptime, error rate per node
-  app.get("/api/rpc-metrics", (_req, res) => {
-    try {
-      res.json(getMetrics());
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // GET /api/rpc-nodes — live health status from multi-node client (#113)
-  app.get("/api/rpc-nodes", (_req, res) => {
-    try {
-      res.json(getRpcNodeStatus());
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // ── Multi-Signature Source Code Verification ───────────────────
-
-  // POST /api/contracts/:id/source-verifications
-  // Body: { wasm_hash, signer, signature, compiler_hash }
-  app.post("/api/contracts/:id/source-verifications", writeLimiter, requireApiKey, async (req, res) => {
-    try {
-      const { wasm_hash, signer, signature, compiler_hash } = req.body;
-      if (!wasm_hash || !signer || !signature || !compiler_hash) {
-        return res.status(400).json({
-          error: "Missing wasm_hash, signer, signature, or compiler_hash",
-        });
-      }
-      await db.addSourceVerification({
-        contract_id: req.params.id,
-        wasm_hash,
-        signer,
-        signature,
-        compiler_hash,
-      });
-      res.status(201).json({ ok: true });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // GET /api/contracts/:id/source-verifications?wasm_hash=
-  app.get("/api/contracts/:id/source-verifications", async (req, res) => {
-    try {
-      const rows = await db.getSourceVerifications(req.params.id, req.query.wasm_hash || undefined);
-      res.json(rows);
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // ── Storage State-Diff Timeline ────────────────────────────────
-
-  // GET /api/contracts/:id/state-diffs?key=&limit=
-  app.get("/api/contracts/:id/state-diffs", async (req, res) => {
-    try {
-      const rows = await db.getStateDiffs(req.params.id, {
-        key: req.query.key || undefined,
-        limit: req.query.limit ? Math.min(Number(req.query.limit), 500) : 200,
-      });
-      res.json(rows);
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // ── Live TTL status for contract instance, code, and persistent storage ──
-  // GET /api/contracts/:id/ttl
-  // Queries the Soroban RPC getLedgerEntries for the contract's instance and code
-  // ledger keys, then returns expiration ledgers alongside the current ledger height.
-  app.get("/api/contracts/:id/ttl", async (req, res) => {
-    try {
-      const contractId = req.params.id;
-      const { SorobanRpc, xdr, Address } = await import("@stellar/stellar-sdk");
-      const server = new SorobanRpc.Server(RPC_URL);
-
-      // Build ledger keys for instance and code entries
-      const contractAddress = Address.fromString(contractId);
-      const instanceKey = xdr.LedgerKey.contractData(
-        new xdr.LedgerKeyContractData({
-          contract: contractAddress.toScAddress(),
-          key: xdr.ScVal.scvLedgerKeyContractInstance(),
-          durability: xdr.ContractDataDurability.persistent(),
-        }),
-      );
-
-      // Fetch instance entry first to get the WASM hash for the code key
-      const instanceResult = await server.getLedgerEntries(instanceKey);
-      const instanceEntry = instanceResult.entries?.[0] ?? null;
-
-      let instanceTTL = null;
-      let codeTTL = null;
-      let currentLedger = instanceResult.latestLedger ?? 0;
-
-      if (instanceEntry) {
-        instanceTTL = instanceEntry.liveUntilLedgerSeq ?? null;
-
-        // Extract WASM hash from the instance entry to build the code key
-        try {
-          const contractInstance = instanceEntry.val.contractData().val().instance();
-          const wasmHash = contractInstance.executable().wasmHash();
-          const resolvedCodeKey = xdr.LedgerKey.contractCode(new xdr.LedgerKeyContractCode({ hash: wasmHash }));
-          const codeResult = await server.getLedgerEntries(resolvedCodeKey);
-          const codeEntry = codeResult.entries?.[0] ?? null;
-          if (codeEntry) codeTTL = codeEntry.liveUntilLedgerSeq ?? null;
-        } catch {
-          // WASM hash extraction failed — code TTL unavailable
-        }
-      }
-
-      res.json({
-        contract_id: contractId,
-        current_ledger: currentLedger,
-        instance: { live_until_ledger: instanceTTL },
-        code: { live_until_ledger: codeTTL },
-      });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
   // ── Self-Service API Key Creation with Email Verification ─────────────────────
   
   // POST /api/keys (unauthenticated) - Create an inactive API key and send verification email
@@ -1229,6 +1207,141 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
     }
   });
 
+  // ── GET /api/gaps — ledger gap detection status ─────────────────────────────
+  // Returns pending gaps and count of gaps closed in the last 24 hours.
+  app.get("/api/gaps", async (_req, res) => {
+    try {
+      const stats = await db.getGapLogStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── RPC node performance metrics ────────────────────────────────
+  // GET /api/rpc-metrics — latency history, uptime, error rate per node
+  app.get("/api/rpc-metrics", (_req, res) => {
+    try {
+      res.json(getMetrics());
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/rpc-nodes — live health status from multi-node client (#113)
+  app.get("/api/rpc-nodes", (_req, res) => {
+    try {
+      res.json(getRpcNodeStatus());
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Multi-Signature Source Code Verification ───────────────────
+
+  // POST /api/contracts/:id/source-verifications
+  // Body: { wasm_hash, signer, signature, compiler_hash }
+  app.post("/api/contracts/:id/source-verifications", writeLimiter, requireApiKey, async (req, res) => {
+    try {
+      const { wasm_hash, signer, signature, compiler_hash } = req.body;
+      if (!wasm_hash || !signer || !signature || !compiler_hash) {
+        return res.status(400).json({
+          error: "Missing wasm_hash, signer, signature, or compiler_hash",
+        });
+      }
+      await db.addSourceVerification({
+        contract_id: req.params.id,
+        wasm_hash,
+        signer,
+        signature,
+        compiler_hash,
+      });
+      res.status(201).json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/contracts/:id/source-verifications?wasm_hash=
+  app.get("/api/contracts/:id/source-verifications", async (req, res) => {
+    try {
+      const rows = await db.getSourceVerifications(req.params.id, req.query.wasm_hash || undefined);
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Storage State-Diff Timeline ────────────────────────────────
+
+  // GET /api/contracts/:id/state-diffs?key=&limit=
+  app.get("/api/contracts/:id/state-diffs", async (req, res) => {
+    try {
+      const rows = await db.getStateDiffs(req.params.id, {
+        key: req.query.key || undefined,
+        limit: req.query.limit ? Math.min(Number(req.query.limit), 500) : 200,
+      });
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Live TTL status for contract instance, code, and persistent storage ──
+  // GET /api/contracts/:id/ttl
+  // Queries the Soroban RPC getLedgerEntries for the contract's instance and code
+  // ledger keys, then returns expiration ledgers alongside the current ledger height.
+  app.get("/api/contracts/:id/ttl", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      const { rpc: SorobanRpc, xdr, Address } = await import("@stellar/stellar-sdk");
+      const server = new SorobanRpc.Server(RPC_URL);
+
+      // Build ledger keys for instance and code entries
+      const contractAddress = Address.fromString(contractId);
+      const instanceKey = xdr.LedgerKey.contractData(
+        new xdr.LedgerKeyContractData({
+          contract: contractAddress.toScAddress(),
+          key: xdr.ScVal.scvLedgerKeyContractInstance(),
+          durability: xdr.ContractDataDurability.persistent(),
+        }),
+      );
+
+      // Fetch instance entry first to get the WASM hash for the code key
+      const instanceResult = await server.getLedgerEntries(instanceKey);
+      const instanceEntry = instanceResult.entries?.[0] ?? null;
+
+      let instanceTTL = null;
+      let codeTTL = null;
+      let currentLedger = instanceResult.latestLedger ?? 0;
+
+      if (instanceEntry) {
+        instanceTTL = instanceEntry.liveUntilLedgerSeq ?? null;
+
+        // Extract WASM hash from the instance entry to build the code key
+        try {
+          const contractInstance = instanceEntry.val.contractData().val().instance();
+          const wasmHash = contractInstance.executable().wasmHash();
+          const resolvedCodeKey = xdr.LedgerKey.contractCode(new xdr.LedgerKeyContractCode({ hash: wasmHash }));
+          const codeResult = await server.getLedgerEntries(resolvedCodeKey);
+          const codeEntry = codeResult.entries?.[0] ?? null;
+          if (codeEntry) codeTTL = codeEntry.liveUntilLedgerSeq ?? null;
+        } catch {
+          // WASM hash extraction failed — code TTL unavailable
+        }
+      }
+
+      res.json({
+        contract_id: contractId,
+        current_ledger: currentLedger,
+        instance: { live_until_ledger: instanceTTL },
+        code: { live_until_ledger: codeTTL },
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── Setup Wizard & Diagnostics Endpoints ────────────────────────────────────
   // These endpoints are disabled in production (NODE_ENV=production) because
   // they can write .env files and run migrations with no additional auth.
@@ -1302,6 +1415,13 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
     }
   });
 
+  // POST /api/setup/db-init — create/upgrade the schema only.
+  //
+  // INTENTIONALLY MINIMAL (issue #417): this handler must call db.init() and
+  // nothing else. It does NOT seed sample data. The old seed-lib.js helper
+  // (which generated fake Stellar addresses) was removed during cleanup and must
+  // never be re-introduced here — no static import, no `await import("./seed-lib.js")`.
+  // The schema-init test in test/api/setup-db-init.test.js guards this invariant.
   app.post("/api/setup/db-init", blockInProduction, async (req, res) => {
     try {
       await db.init();
@@ -1429,6 +1549,52 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
 
   // ── Batch Multi-Call Endpoints ───────────────────────────────────────
 
+  // POST /api/batch — dispatch a list of HTTP sub-requests against this API and
+  // return their results in the SAME order they were submitted. A sub-request
+  // that fails (e.g. 404) is captured as its own result entry and does NOT
+  // abort the sibling sub-requests.
+  //
+  // Body: { requests: [{ method?, path, body? }, ...] } (or a bare array).
+  // Response: [{ status, body }, ...] — one entry per submitted request, in order.
+  app.post("/api/batch", async (req, res) => {
+    try {
+      const items = Array.isArray(req.body) ? req.body : req.body?.requests;
+      if (!Array.isArray(items)) {
+        return res.status(400).json({ error: "requests must be an array" });
+      }
+
+      const base = `http://${req.headers.host}`;
+      const apiKey = req.headers["x-api-key"];
+
+      // Promise.all preserves array order; each sub-request resolves to its own
+      // { status, body } so an individual failure never rejects the batch.
+      const results = await Promise.all(
+        items.map(async (item) => {
+          try {
+            const method = String(item?.method || "GET").toUpperCase();
+            const subPath = item?.path || item?.url || "/";
+            const init = { method, headers: {} };
+            if (apiKey) init.headers["x-api-key"] = apiKey;
+            if (item?.body !== undefined && method !== "GET" && method !== "HEAD") {
+              init.headers["content-type"] = "application/json";
+              init.body = JSON.stringify(item.body);
+            }
+            const r = await fetch(base + subPath, init);
+            const contentType = r.headers.get("content-type") || "";
+            const body = contentType.includes("application/json") ? await r.json() : await r.text();
+            return { status: r.status, body };
+          } catch (e) {
+            return { status: 500, body: { error: e.message } };
+          }
+        }),
+      );
+
+      res.json(results);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // POST /api/batch/simulate — simulate full batch with per-call results
   app.post("/api/batch/simulate", async (req, res) => {
     try {
@@ -1527,3 +1693,7 @@ export async function createApi({ logDestination: _logDestination, dbOverride: _
   server.listen(PORT, () => console.log(`API listening on :${PORT}`));
   return server;
 }
+
+// `startApi` is the name used by src/index.js and the test suite; `createApi`
+// is kept for callers that pass { logDestination, dbOverride }. They are aliases.
+export { createApi as startApi };

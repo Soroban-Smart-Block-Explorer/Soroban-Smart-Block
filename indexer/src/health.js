@@ -11,7 +11,8 @@
  * Readiness: Service can handle traffic (dependencies healthy)
  */
 
-import { pool } from "./db.js";
+import { db, pool } from "./db.js";
+import { getActiveAlerts } from "./alertManager.js";
 
 // ── Health check state ────────────────────────────────────────────────────────
 let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0 };
@@ -67,9 +68,9 @@ export function reportWorkerError() {
 async function checkDatabase() {
   const start = Date.now();
   try {
-    await pool.query("SELECT 1 AS health_check");
+    await db.query("SELECT 1 AS health_check");
     const responseTime = Date.now() - start;
-    
+
     // Get pool stats
     const totalCount = pool.totalCount || 0;
     const idleCount = pool.idleCount || 0;
@@ -194,6 +195,7 @@ export async function getHealthStatus() {
 
   const indexer = checkIndexer();
   const workers = checkWorkers();
+  const activeAlerts = getActiveAlerts();
 
   // Overall status: healthy if all critical dependencies are healthy
   // Cache is optional, workers are degradable
@@ -210,6 +212,10 @@ export async function getHealthStatus() {
       cache,
       indexer,
       workers,
+    },
+    alerts: {
+      active_count: activeAlerts.length,
+      conditions: activeAlerts.map(({ condition }) => condition),
     },
   };
 }

@@ -1,4 +1,4 @@
-import { Contract, TransactionBuilder, Networks, nativeToScVal, SorobanRpc } from "@stellar/stellar-sdk";
+import { Contract, TransactionBuilder, Networks, nativeToScVal, rpc as SorobanRpc } from "@stellar/stellar-sdk";
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const DEFAULT_SOURCE_ACCOUNT =

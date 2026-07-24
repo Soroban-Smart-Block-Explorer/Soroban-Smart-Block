@@ -3,13 +3,14 @@
  */
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 import {
   parseTTLHostFunction,
   parseTTLExtension,
   extractTTLModifications,
   formatTTLExtension,
   calculateRentPaid,
+  parseTTLFromTxMeta,
 } from "../src/ttlExtensionParser.js";
 
 test("parseTTLHostFunction returns null for unsupported operations", () => {
@@ -135,4 +136,97 @@ test("calculateRentPaid converts XLM to stroops", () => {
 
 test("calculateRentPaid returns zero when no cost is present", () => {
   assert.equal(calculateRentPaid({}), 0);
+});
+
+// Closes #421 — parseTTLFromTxMeta correctly detects TTL bump ops in txMeta
+
+describe("parseTTLFromTxMeta — ttl_extended field", () => {
+  test("returns ttl_extended: true for extend_contract_instance_ttl op in txMeta", () => {
+    const txMeta = {
+      operations: [
+        {
+          function_name: "extend_contract_instance_ttl",
+          args: { extend_to: 500000, min_extension: 17280, max_extension: 34560 },
+        },
+      ],
+    };
+    const result = parseTTLFromTxMeta(txMeta);
+    assert.equal(result.ttl_extended, true);
+  });
+
+  test("returns ttl_extended: true for extend_contract_code_ttl op in txMeta", () => {
+    const txMeta = {
+      operations: [
+        {
+          function_name: "extend_contract_code_ttl",
+          args: { extend_to: 600000, min_extension: 8640, max_extension: 17280 },
+        },
+      ],
+    };
+    const result = parseTTLFromTxMeta(txMeta);
+    assert.equal(result.ttl_extended, true);
+  });
+
+  test("includes parsed fn_name and extend_to in the result", () => {
+    const txMeta = {
+      operations: [
+        {
+          function_name: "extend_contract_instance_ttl",
+          args: { extend_to: 500000, min_extension: 17280, max_extension: 34560 },
+        },
+      ],
+    };
+    const result = parseTTLFromTxMeta(txMeta);
+    assert.equal(result.fn_name, "extend_contract_instance_ttl");
+    assert.equal(result.extend_to, 500000);
+  });
+
+  test("returns ttl_extended: true for bumpFootprintExpiration op type", () => {
+    const txMeta = {
+      operations: [{ type: "bumpFootprintExpiration" }],
+    };
+    const result = parseTTLFromTxMeta(txMeta);
+    assert.equal(result.ttl_extended, true);
+  });
+
+  test("returns ttl_extended: true via nested hostFunction", () => {
+    const txMeta = {
+      operations: [
+        {
+          hostFunction: {
+            function_name: "extend_ttl",
+            args: { extend_to: 400000, min_extension: 5000, max_extension: 10000 },
+          },
+        },
+      ],
+    };
+    const result = parseTTLFromTxMeta(txMeta);
+    assert.equal(result.ttl_extended, true);
+  });
+
+  test("returns ttl_extended: false when txMeta has no bump op", () => {
+    const txMeta = {
+      operations: [
+        { type: "payment" },
+        { type: "createAccount" },
+      ],
+    };
+    const result = parseTTLFromTxMeta(txMeta);
+    assert.equal(result.ttl_extended, false);
+  });
+
+  test("returns ttl_extended: false for empty operations array", () => {
+    const result = parseTTLFromTxMeta({ operations: [] });
+    assert.equal(result.ttl_extended, false);
+  });
+
+  test("returns ttl_extended: false for null txMeta", () => {
+    const result = parseTTLFromTxMeta(null);
+    assert.equal(result.ttl_extended, false);
+  });
+
+  test("returns ttl_extended: false for undefined txMeta", () => {
+    const result = parseTTLFromTxMeta(undefined);
+    assert.equal(result.ttl_extended, false);
+  });
 });

@@ -13,6 +13,25 @@ services:
       DATABASE_URL: postgres://soroban:soroban_secret@postgres:5432/soroban_explorer
       SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
     depends_on:
-      - postgres
-    networks:
-      - soroban-net
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: soroban
+      POSTGRES_PASSWORD: soroban_secret
+      POSTGRES_DB: soroban_explorer
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soroban -d soroban_explorer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

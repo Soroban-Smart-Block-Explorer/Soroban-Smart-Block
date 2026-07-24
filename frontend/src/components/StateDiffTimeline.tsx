@@ -24,11 +24,12 @@ export default function StateDiffTimeline({ contractId }: Props) {
   const [sliderIndex, setSliderIndex] = useState(0);
   const [filterKey, setFilterKey] = useState("");
 
-  const { data: diffs = [], isLoading } = useQuery({
+  const { data: diffResponse = [], isLoading } = useQuery({
     queryKey: ["state-diffs", contractId],
     queryFn: () => api.stateDiffs(contractId),
     enabled: !!contractId,
   });
+  const diffs = Array.isArray(diffResponse) ? diffResponse : [];
 
   // Group diffs by ledger, sorted ascending
   const ledgerGroups = useMemo(() => {
@@ -48,31 +49,33 @@ export default function StateDiffTimeline({ contractId }: Props) {
     return Array.from(s).sort();
   }, [diffs]);
 
+  const maxIndex = ledgerGroups.length - 1;
+  const safeSliderIndex = Math.min(sliderIndex, Math.max(maxIndex, 0));
+  const current = ledgerGroups[safeSliderIndex];
+  const visibleEntries = current ? (filterKey ? current.entries.filter((e) => e.key === filterKey) : current.entries) : [];
+
+  // Cumulative state up to current ledger for context
+  const cumulativeState = useMemo(() => {
+    const state: Record<string, string | null> = {};
+    for (let i = 0; i <= safeSliderIndex && i < ledgerGroups.length; i++) {
+      const group = ledgerGroups[i];
+      if (!group) continue;
+      for (const d of group.entries) {
+        state[d.key] = d.new_value;
+      }
+    }
+    return state;
+  }, [ledgerGroups, safeSliderIndex]);
+
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Loading state diffs…</p>;
 
-  if (ledgerGroups.length === 0) {
+  if (!current) {
     return (
       <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
         No storage state changes recorded for this contract yet.
       </div>
     );
   }
-
-  const maxIndex = ledgerGroups.length - 1;
-  const current = ledgerGroups[sliderIndex];
-
-  const visibleEntries = filterKey ? current.entries.filter((e) => e.key === filterKey) : current.entries;
-
-  // Cumulative state up to current ledger for context
-  const cumulativeState = useMemo(() => {
-    const state: Record<string, string | null> = {};
-    for (let i = 0; i <= sliderIndex; i++) {
-      for (const d of ledgerGroups[i].entries) {
-        state[d.key] = d.new_value;
-      }
-    }
-    return state;
-  }, [ledgerGroups, sliderIndex]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -87,7 +90,7 @@ export default function StateDiffTimeline({ contractId }: Props) {
         >
           <span style={{ fontSize: 13, fontWeight: 600 }}>Block {current.ledger.toLocaleString()}</span>
           <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            {sliderIndex + 1} / {ledgerGroups.length} snapshots
+            {safeSliderIndex + 1} / {ledgerGroups.length} snapshots
           </span>
         </div>
 
@@ -95,7 +98,7 @@ export default function StateDiffTimeline({ contractId }: Props) {
           type="range"
           min={0}
           max={maxIndex}
-          value={sliderIndex}
+          value={safeSliderIndex}
           onChange={(e) => setSliderIndex(Number(e.target.value))}
           style={{ width: "100%", accentColor: "var(--accent)" }}
           aria-label="Timeline slider — scrub through block history"
@@ -111,7 +114,8 @@ export default function StateDiffTimeline({ contractId }: Props) {
               style={{
                 flex: 1,
                 height: Math.min(6, 2 + g.entries.length),
-                background: i === sliderIndex ? "var(--accent)" : i < sliderIndex ? "var(--muted)" : "var(--border)",
+                background:
+                  i === safeSliderIndex ? "var(--accent)" : i < safeSliderIndex ? "var(--muted)" : "var(--border)",
                 borderRadius: 2,
                 cursor: "pointer",
                 transition: "background 0.15s",

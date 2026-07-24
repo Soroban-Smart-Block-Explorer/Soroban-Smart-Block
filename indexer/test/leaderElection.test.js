@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getInstanceId, isLeader } from "../src/leaderElection.js";
+import { getInstanceId, isLeader } from "../src/optional/leaderElection.js";
 
 describe("getInstanceId", () => {
   it("returns a non-empty string", () => {

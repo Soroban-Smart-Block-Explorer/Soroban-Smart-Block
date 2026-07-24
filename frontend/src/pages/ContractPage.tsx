@@ -24,40 +24,22 @@ import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
 
-// Demo source shown when no verified source is uploaded
-const DEMO_SOURCE = `// Verified source not yet uploaded for this contract.
-// Example Soroban contract structure:
-
-use soroban_sdk::{contract, contractimpl, Env, Symbol, Address};
-
-#[contract]
-pub struct MyContract;
-
-#[contractimpl]
-impl MyContract {
-    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
-        from.require_auth();
-        let mut balance: i128 = env.storage().instance().get(&from).unwrap_or(0);
-        balance -= amount;
-        env.storage().instance().set(&from, &balance);
-    }
-}`;
-
-// Demo invocation tree shown when no real trace is available
-const DEMO_TREE: InvocationNode = {
-  contract: "ContractA",
-  fn: "swap",
-  children: [
-    {
-      contract: "ContractB",
-      fn: "transfer",
-      children: [{ contract: "ContractC", fn: "update_balance" }],
-    },
-    { contract: "ContractB", fn: "emit_event" },
-  ],
-};
-
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff";
+
+function EmptyState({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
+      <strong style={{ display: "block", color: "var(--text)", fontSize: 14, marginBottom: 6 }}>{title}</strong>
+      {message}
+    </div>
+  );
+}
+
+function isInvocationNode(value: unknown): value is InvocationNode {
+  if (!value || typeof value !== "object") return false;
+  const node = value as Partial<InvocationNode>;
+  return typeof node.contract === "string" && node.contract.length > 0 && typeof node.fn === "string" && node.fn.length > 0;
+}
 
 export default function ContractPage() {
   const { id = "" } = useParams();
@@ -76,9 +58,10 @@ export default function ContractPage() {
 
   const { data: events = [], isLoading: evLoading } = useQuery({
     queryKey: ["events", id],
-    queryFn: () => api.events({ contract: id }),
+    queryFn: () => api.events({ contract: id }).then((page) => page.data),
     enabled: !!id,
   });
+  const contractEvents = Array.isArray(events) ? events : [];
 
   const { data: migrationStatus } = useQuery({
     queryKey: ["migration-status", id],
@@ -90,9 +73,13 @@ export default function ContractPage() {
     api.downloadAbi(id).catch((err) => console.error("Download ABI failed:", err));
   };
 
+  const functions = meta?.functions ?? [];
+  const sourceFiles = meta?.source_files ?? [];
+  const invocationTree = (meta as any)?.invocation_tree;
+
   // A contract is considered "unverified" when the server has no registered
   // metadata for it (meta is null/404) or it has no functions defined.
-  const isUnverified = !meta || meta.functions.length === 0;
+  const isUnverified = !meta || functions.length === 0;
 
   if (metaLoading) return <p style={{ color: "var(--muted)" }}>Loading…</p>;
   if (!meta) {
@@ -142,7 +129,7 @@ export default function ContractPage() {
             {evLoading ? (
               <p style={{ color: "var(--muted)" }}>Loading…</p>
             ) : (
-              <LocalAbiEventTable events={events} localAbi={localAbi} />
+              <LocalAbiEventTable events={contractEvents} localAbi={localAbi} />
             )}
           </div>
         )}
@@ -187,8 +174,10 @@ export default function ContractPage() {
           }}
         >
           <div>
-            <h2 style={{ marginBottom: 8 }}>{meta.name}</h2>
-            <p style={{ color: "var(--muted)", marginBottom: 12 }}>{meta.description}</p>
+            <h2 style={{ marginBottom: 8 }}>{meta.name || "Unnamed Contract"}</h2>
+            <p style={{ color: "var(--muted)", marginBottom: 12 }}>
+              {meta.description || "No contract description available."}
+            </p>
             <code
               style={{
                 fontSize: 12,
@@ -404,11 +393,11 @@ export default function ContractPage() {
           {/* Live TTL expiration progress bars */}
           <TTLProgressBar contractId={id} />
 
-          {meta.functions.length > 0 && (
+          {functions.length > 0 ? (
             <div className="card">
               <h3 style={{ marginBottom: 8, fontSize: 14 }}>Functions</h3>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {meta.functions.map((f) => (
+                {functions.map((f) => (
                   <div key={f.name} className="card" style={{ padding: "8px 12px" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span className="badge">{f.name}</span>
@@ -434,6 +423,11 @@ export default function ContractPage() {
                 ))}
               </div>
             </div>
+          ) : (
+            <EmptyState
+              title="No functions available"
+              message="This contract did not return ABI function metadata yet."
+            />
           )}
 
           <div
@@ -451,9 +445,9 @@ export default function ContractPage() {
               <p style={{ color: "var(--muted)" }}>Loading…</p>
             ) : localAbi ? (
               // Re-render with local ABI descriptions
-              <LocalAbiEventTable events={events} localAbi={localAbi} />
+              <LocalAbiEventTable events={contractEvents} localAbi={localAbi} />
             ) : (
-              <EventTable events={events} />
+              <EventTable events={contractEvents} />
             )}
           </div>
         </>
@@ -463,10 +457,15 @@ export default function ContractPage() {
       {tab === "source" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <SourceVerificationBadge contractId={id} wasmHash={(meta as any).wasm_hash ?? undefined} />
-          {meta.source_files && meta.source_files.length > 0 ? (
-            <SourceFileTree files={meta.source_files} />
+          {sourceFiles.length > 0 ? (
+            <SourceFileTree files={sourceFiles} />
+          ) : meta.source ? (
+            <RustCodeViewer source={meta.source} filename={meta.source_file ?? `${id.slice(0, 8)}.rs`} />
           ) : (
-            <RustCodeViewer source={meta.source ?? DEMO_SOURCE} filename={meta.source_file ?? `${id.slice(0, 8)}.rs`} />
+            <EmptyState
+              title="No source available"
+              message="No verified source files were returned for this contract."
+            />
           )}
         </div>
       )}
@@ -476,26 +475,37 @@ export default function ContractPage() {
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <h3 style={{ fontSize: 14 }}>Simulate Contract Call</h3>
           <p style={{ color: "var(--muted)", fontSize: 13 }}>Preview execution results without spending real fees.</p>
-          {meta.functions.length > 0 && (
+          {functions.length > 0 ? (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <label style={{ color: "var(--muted)" }}>Function:</label>
               <select value={selectedFn} onChange={(e) => setSelectedFn(e.target.value)}>
                 <option value="">— select —</option>
-                {meta.functions.map((f) => (
+                {functions.map((f) => (
                   <option key={f.name} value={f.name}>
                     {f.name}
                   </option>
                 ))}
               </select>
             </div>
+          ) : (
+            <p style={{ color: "var(--muted)", fontSize: 13 }}>
+              No callable functions were returned for this contract.
+            </p>
           )}
           {selectedFn && <SimulateButton contractId={id} fnName={selectedFn} />}
-          {!selectedFn && meta.functions.length === 0 && <SimulateButton contractId={id} fnName="transfer" />}
         </div>
       )}
 
       {/* Tab: Invocation Flow — */}
-      {tab === "flow" && <InvocationFlowChart root={(meta as any).invocation_tree ?? DEMO_TREE} />}
+      {tab === "flow" &&
+        (isInvocationNode(invocationTree) ? (
+          <InvocationFlowChart root={invocationTree} />
+        ) : (
+          <EmptyState
+            title="No invocation flow available"
+            message="No cross-contract invocation trace has been recorded for this contract yet."
+          />
+        ))}
 
       {/* Tab: Privileged Roles */}
       {tab === "roles" && <PrivilegedRoles contractId={id} />}

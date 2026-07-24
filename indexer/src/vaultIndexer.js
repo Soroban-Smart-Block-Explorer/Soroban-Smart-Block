@@ -11,7 +11,7 @@
  *   - View functions: `total_assets()`, `total_supply()`, `get_underlying_asset()`
  */
 
-import { SorobanRpc, Contract, nativeToScVal } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc, Contract, nativeToScVal } from "@stellar/stellar-sdk";
 import { db } from "./db.js";
 import { publishVaultRatio } from "./wsEvents.js";
 import { withRetry } from "./rpcRetry.js";

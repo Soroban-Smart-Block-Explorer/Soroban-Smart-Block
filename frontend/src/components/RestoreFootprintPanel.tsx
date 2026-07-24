@@ -1,4 +1,4 @@
-State Archival / Restore Operation display
+// State Archival / Restore Operation display
 
 interface RevivedKey {
   type: string;

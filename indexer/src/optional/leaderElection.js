@@ -10,12 +10,13 @@
  */
 
 import { createClient } from "redis";
+import config from "./config.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const LEADER_KEY = process.env.LEADER_ELECTION_KEY || "soroban-indexer:leader";
-const LEASE_TTL_S = Number(process.env.LEADER_LEASE_TTL_S || 10);
-const RENEW_INTERVAL_MS = Number(process.env.LEADER_RENEW_INTERVAL_MS || 4_000);
-const ELECTION_POLL_MS = Number(process.env.LEADER_ELECTION_POLL_MS || 5_000);
+const REDIS_URL = config.REDIS_URL || "redis://localhost:6379";
+const LEADER_KEY = process.env.LEADER_ELECTION_KEY || config.LEADER_ELECTION_KEY;
+const LEASE_TTL_S = config.LEADER_LEASE_TTL_S;
+const RENEW_INTERVAL_MS = config.LEADER_RENEW_INTERVAL_MS;
+const ELECTION_POLL_MS = config.LEADER_ELECTION_POLL_MS;
 
 let _client = null;
 let _instanceId = null;

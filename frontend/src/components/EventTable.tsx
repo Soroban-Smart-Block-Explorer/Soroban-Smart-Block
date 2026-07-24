@@ -172,7 +172,12 @@ function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<Decode
 }
 
 export default function EventTable({ events }: Props) {
-  if (!events.length) return <p style={{ color: "var(--muted)" }}>No events found.</p>;
+  if (!events.length)
+    return (
+      <p data-testid="empty-state" style={{ color: "var(--muted)" }}>
+        No events yet.
+      </p>
+    );
 
   return (
     <div style={{ overflowX: "auto" }}>

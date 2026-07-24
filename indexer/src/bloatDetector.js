@@ -7,8 +7,9 @@
  */
 
 import { StrKey } from "@stellar/stellar-sdk";
+import config from "./config.js";
 
-export const BLOAT_THRESHOLD = Number(process.env.BLOAT_THRESHOLD ?? 50);
+export const BLOAT_THRESHOLD = config.BLOAT_THRESHOLD;
 
 /**
  * Count persistent ContractDataEntry ledger changes for a specific contract

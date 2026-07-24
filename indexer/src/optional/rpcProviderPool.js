@@ -11,16 +11,16 @@
  * rotated out, then re-admitted after a successful recovery probe.
  */
 
-import { SorobanRpc } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
+import config from "./config.js";
 
-const RPC_URLS = (process.env.SOROBAN_RPC_URLS || process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org")
-  .split(",")
-  .map((u) => u.trim())
-  .filter(Boolean);
+const RPC_URLS = config.SOROBAN_RPC_URLS.length > 0 
+  ? config.SOROBAN_RPC_URLS 
+  : [config.SOROBAN_RPC_URL];
 
-const WINDOW_SIZE = Number(process.env.RPC_HEALTH_WINDOW || 20);
-const CALL_TIMEOUT_MS = Number(process.env.RPC_CALL_TIMEOUT_MS || 1_000);
-const RECOVERY_INTERVAL_MS = Number(process.env.RPC_RECOVERY_INTERVAL_MS || 15_000);
+const WINDOW_SIZE = config.RPC_HEALTH_WINDOW;
+const CALL_TIMEOUT_MS = config.RPC_CALL_TIMEOUT_MS;
+const RECOVERY_INTERVAL_MS = config.RPC_RECOVERY_INTERVAL_MS;
 
 export class RpcProvider {
   constructor(url) {

@@ -324,7 +324,7 @@ export default function SubInvocationSearch({ onResultsChange }: Props) {
                     }}
                   >
                     {short(inv.contract_id)}
-                    {inv.is_reentrant && (
+                    {inv.has_reentrancy && (
                       <span
                         title="Reentrancy"
                         style={{ marginLeft: 4, color: "#ef4444", fontSize: 10 }}
@@ -336,7 +336,7 @@ export default function SubInvocationSearch({ onResultsChange }: Props) {
                   <td style={{ padding: "5px 12px" }}>{inv.function}</td>
                   <td style={{ padding: "5px 12px", textAlign: "center" }}>{inv.depth}</td>
                   <td style={{ padding: "5px 12px", textAlign: "right" }}>
-                    {inv.gas_cost != null ? inv.gas_cost.toLocaleString() : "—"}
+                    {inv.fee_charged != null ? inv.fee_charged.toLocaleString() : "—"}
                   </td>
                   <td style={{ padding: "5px 12px", textAlign: "right" }}>{inv.ledger}</td>
                   <td

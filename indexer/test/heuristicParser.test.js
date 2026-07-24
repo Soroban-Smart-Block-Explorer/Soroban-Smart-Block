@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { guessType, parseHeuristic } from "../src/heuristicParser.js";
+import { guessType, parseHeuristic, heuristicParser } from "../src/heuristicParser.js";
 
 // 64-char hex hash
 const HASH = "a".repeat(64);
@@ -88,5 +88,52 @@ describe("parseHeuristic", () => {
     assert.equal(results[2].type, "Amount");
     assert.equal(results[3].type, "Symbol");
     assert.equal(results[4].type, "Hash");
+  });
+});
+
+// Closes #420 — heuristicParser(ev) must never return null, undefined, or ''
+describe("heuristicParser — non-null fallback for unknown function names", () => {
+  const ADDR = "G" + "A".repeat(55);
+
+  it('returns a non-empty string for unknown function "foo_bar"', () => {
+    const ev = { function: "foo_bar", raw_topics: ["foo_bar", ADDR] };
+    const result = heuristicParser(ev);
+    assert.equal(typeof result, "string");
+    assert.ok(result.length > 0, "must not be empty string");
+    assert.notEqual(result, null);
+    assert.notEqual(result, undefined);
+  });
+
+  it('returns a non-empty string for unknown function "do_something_custom"', () => {
+    const ev = { function: "do_something_custom", raw_topics: ["do_something_custom", ADDR, "100"] };
+    const result = heuristicParser(ev);
+    assert.equal(typeof result, "string");
+    assert.ok(result.length > 0);
+  });
+
+  it('returns a non-empty string for unknown function "process_v2"', () => {
+    const ev = { function: "process_v2", raw_topics: ["process_v2"] };
+    const result = heuristicParser(ev);
+    assert.equal(typeof result, "string");
+    assert.ok(result.length > 0);
+  });
+
+  it("returns a non-empty string when function field is missing", () => {
+    const ev = { raw_topics: [] };
+    const result = heuristicParser(ev);
+    assert.equal(typeof result, "string");
+    assert.ok(result.length > 0);
+  });
+
+  it("returns a non-empty string for null input", () => {
+    const result = heuristicParser(null);
+    assert.equal(typeof result, "string");
+    assert.ok(result.length > 0);
+  });
+
+  it("description includes the function name when provided", () => {
+    const ev = { function: "stake_tokens", raw_topics: ["stake_tokens"] };
+    const result = heuristicParser(ev);
+    assert.ok(result.includes("stake_tokens"), `expected "stake_tokens" in "${result}"`);
   });
 });

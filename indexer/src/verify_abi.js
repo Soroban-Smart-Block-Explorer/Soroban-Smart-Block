@@ -1,4 +1,4 @@
-import { SorobanRpc, xdr, StrKey } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc, xdr, StrKey } from "@stellar/stellar-sdk";
 import { withRetry } from "./rpcRetry.js";
 import { parseContractSpec } from "./wasmContractSpec.js";
 

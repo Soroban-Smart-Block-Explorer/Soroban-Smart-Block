@@ -3,7 +3,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseZkHostFunctions, computeZkCostDelta } from "../src/zkHostFunctions.js";
+import { parseZkHostFunctions, computeZkCostDelta, detect } from "../src/zkHostFunctions.js";
 
 // ── parseZkHostFunctions ──────────────────────────────────────────────────────
 
@@ -106,6 +106,73 @@ describe("parseZkHostFunctions", () => {
       diagnosticEvents: [null, undefined, {}, { event: null }],
     };
     assert.equal(parseZkHostFunctions(ev), null);
+  });
+});
+
+// ── detect (issue #422) ───────────────────────────────────────────────────────
+
+// Build a txMeta whose accessor-method shape mirrors the @stellar/stellar-sdk
+// `TransactionMeta` XDR object the parser's Source 3 path consumes:
+//   txMeta.v3().sorobanMeta().diagnosticEvents()[i].event().body().v0().data().sym()
+function mockTxMeta(fnNames) {
+  const diagnosticEvents = fnNames.map((fnName) => ({
+    event: () => ({
+      body: () => ({
+        v0: () => ({
+          data: () => ({ sym: () => fnName }),
+        }),
+      }),
+    }),
+  }));
+  return {
+    v3: () => ({
+      sorobanMeta: () => ({
+        diagnosticEvents: () => diagnosticEvents,
+      }),
+    }),
+  };
+}
+
+describe("detect", () => {
+  it("returns is_zk: true with populated cost fields for a ZK txMeta XDR", () => {
+    const result = detect(mockTxMeta(["bls12_381_pairing_check"]));
+    assert.equal(result.is_zk, true);
+    assert.equal(result.calls.length, 1);
+    assert.equal(result.calls[0].fn_name, "bls12_381_pairing_check");
+    assert.ok(result.total_native > 0);
+    assert.ok(result.total_legacy > 0);
+    assert.ok(result.saved_cpu > 0);
+    assert.ok(result.saved_pct > 0);
+    assert.equal(result.total_legacy - result.total_native, result.saved_cpu);
+  });
+
+  it("aggregates cost across multiple ZK calls in one txMeta", () => {
+    const result = detect(mockTxMeta(["bn254_g1_msm", "bn254_pairing_check"]));
+    assert.equal(result.is_zk, true);
+    assert.equal(result.calls.length, 2);
+    assert.ok(result.saved_cpu > 0);
+  });
+
+  it("returns is_zk: false for a non-ZK txMeta XDR", () => {
+    const result = detect(mockTxMeta(["transfer", "mint"]));
+    assert.equal(result.is_zk, false);
+    assert.deepEqual(result.calls, []);
+    assert.equal(result.total_native, 0);
+    assert.equal(result.total_legacy, 0);
+    assert.equal(result.saved_cpu, 0);
+    assert.equal(result.saved_pct, 0);
+  });
+
+  it("returns is_zk: false for empty / missing txMeta", () => {
+    assert.equal(detect(mockTxMeta([])).is_zk, false);
+    assert.equal(detect(undefined).is_zk, false);
+    assert.equal(detect({}).is_zk, false);
+  });
+
+  it("also accepts an event-like wrapper carrying hostFunctions", () => {
+    const result = detect({ hostFunctions: ["bn254_fr_mul"] });
+    assert.equal(result.is_zk, true);
+    assert.equal(result.calls[0].fn_name, "bn254_fr_mul");
   });
 });
 

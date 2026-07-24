@@ -242,6 +242,8 @@ jobs:
         env:
           DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
           NODE_ENV: test
+          EXPLORER_CONTRACT_ID: ${{ secrets.TESTNET_CONTRACT_ID }}
+          ADMIN_SECRET: ${{ secrets.TESTNET_ADMIN_SECRET }}
 
       - name: Run API integration tests
         run: npm run test:api

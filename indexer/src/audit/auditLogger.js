@@ -8,8 +8,8 @@
  *     into an in-process queue on `res.on('finish')`. The HTTP response is
  *     sent before any DB write occurs.
  *   - createAuditLogEntry: Enqueues a single entry into the async queue.
- *   - A setInterval flush loop drains the queue every 500 ms, batching up to
- *     MAX_BATCH_SIZE rows per INSERT for efficiency.
+ *   - startAuditFlush: Starts a setInterval loop that drains the queue every
+ *     500 ms, batching up to MAX_BATCH_SIZE rows per INSERT for efficiency.
  *   - startAuditPartitionCron: Monthly cron job that pre-creates the next
  *     month's partition and drops partitions older than 90 days.
  */
@@ -85,12 +85,20 @@ async function _flushQueue() {
   }
 }
 
-// Start the flush loop immediately on module load.
-setInterval(() => {
-  _flushQueue().catch((err) => {
-    console.error('[auditLogger] Flush interval error:', err.message);
-  });
-}, FLUSH_INTERVAL_MS);
+/**
+ * Start the periodic flush loop. Only called by the indexer daemon
+ * (src/index.js) — importing this module for the middleware/entry-queue
+ * functions must not have the side effect of scheduling DB writes.
+ *
+ * @returns {NodeJS.Timeout}
+ */
+function startAuditFlush() {
+  return setInterval(() => {
+    _flushQueue().catch((err) => {
+      console.error('[auditLogger] Flush interval error:', err.message);
+    });
+  }, FLUSH_INTERVAL_MS);
+}
 
 // ── auditLoggerMiddleware ─────────────────────────────────────────────────────
 
@@ -223,4 +231,4 @@ function _parsePartitionDate(name) {
   return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
 }
 
-export { createAuditLogEntry, auditLoggerMiddleware, startAuditPartitionCron };
+export { createAuditLogEntry, auditLoggerMiddleware, startAuditPartitionCron, startAuditFlush };

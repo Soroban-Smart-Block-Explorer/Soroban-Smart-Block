@@ -12,9 +12,10 @@
 import "dotenv/config";
 import cron from "node-cron";
 import { db } from "./db.js";
+import config from "./config.js";
 
-const PRUNE_CRON = process.env.PRUNE_CRON || "0 2 * * *"; // 02:00 UTC daily
-const PRUNE_LEDGER_BUFFER = Number(process.env.PRUNE_LEDGER_BUFFER || 1000); // safety margin
+const PRUNE_CRON = config.PRUNE_CRON;
+const PRUNE_LEDGER_BUFFER = config.PRUNE_LEDGER_BUFFER;
 
 /**
  * Delete events whose storage_tiers contain only "temporary" entries that
@@ -24,7 +25,7 @@ const PRUNE_LEDGER_BUFFER = Number(process.env.PRUNE_LEDGER_BUFFER || 1000); // 
  * Soroban temporary storage has a max TTL of ~110 days (~1,382,400 ledgers at 5s/ledger).
  * We prune entries older than MAX_TEMP_TTL_LEDGERS ledgers.
  */
-const MAX_TEMP_TTL_LEDGERS = Number(process.env.MAX_TEMP_TTL_LEDGERS || 1_382_400);
+const MAX_TEMP_TTL_LEDGERS = config.MAX_TEMP_TTL_LEDGERS;
 
 async function getCurrentLedger() {
   const { rows } = await db.query("SELECT COALESCE(MAX(ledger), 0) AS max_ledger FROM events");

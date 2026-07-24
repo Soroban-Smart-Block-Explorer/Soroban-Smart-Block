@@ -6,16 +6,16 @@
  * GET /api/rpc-metrics for the frontend dashboard.
  */
 
-import { SorobanRpc } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
+import config from "./config.js";
 
-const RPC_URLS = (process.env.SOROBAN_RPC_URLS || process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org")
-  .split(",")
-  .map((u) => u.trim())
-  .filter(Boolean);
+const RPC_URLS = config.SOROBAN_RPC_URLS.length > 0 
+  ? config.SOROBAN_RPC_URLS 
+  : [config.SOROBAN_RPC_URL];
 
-const PROBE_INTERVAL_MS = Number(process.env.METRICS_PROBE_INTERVAL_MS || 15_000);
+const PROBE_INTERVAL_MS = config.METRICS_PROBE_INTERVAL_MS;
 // Keep last N samples per node
-const MAX_SAMPLES = Number(process.env.METRICS_MAX_SAMPLES || 120);
+const MAX_SAMPLES = config.METRICS_MAX_SAMPLES;
 
 /** @type {Map<string, { latencies: number[], errors: number, total: number, lastLedger: number }>} */
 const store = new Map(RPC_URLS.map((url) => [url, { latencies: [], errors: 0, total: 0, lastLedger: 0 }]));

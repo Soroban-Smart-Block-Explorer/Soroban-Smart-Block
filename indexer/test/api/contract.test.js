@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import fs from "fs";
 import path from "path";
 import yaml from "yaml";
@@ -9,9 +10,10 @@ import request from "supertest";
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
 process.env.DATABASE_URL = DB_URL;
 process.env.API_KEY = "test-api-key";
+process.env.VERIFY_ABI = "false";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
 
 // Load specification
 const specPath = path.resolve(process.cwd(), "../docs/api/openapi.yaml");
@@ -205,19 +207,21 @@ describe("OpenAPI Contract Validation Tests", () => {
     expect(() => validateResponse("/api/contracts", "POST", 409, res.body)).not.toThrow();
   });
 
-  it("should validate POST /api/contracts - 422 Response", async () => {
+  it("should validate POST /api/contracts - 400 Response", async () => {
     const res = await request(app)
       .post("/api/contracts")
       .set("x-api-key", "test-api-key")
       .send({
         id: "C4",
       });
-    expect(res.status).toBe(422);
-    expect(() => validateResponse("/api/contracts", "POST", 422, res.body)).not.toThrow();
+    expect(res.status).toBe(400);
+    expect(() => validateResponse("/api/contracts", "POST", 400, res.body)).not.toThrow();
   });
 
   it("should validate GET /api/wallet/{address} - 200 Response", async () => {
-    const res = await request(app).get(`/api/wallet/${wallet1}`);
+    // A well-formed but unseeded Stellar public key (G + 55 base32 chars).
+    const validAddress = "G" + "A".repeat(55);
+    const res = await request(app).get(`/api/wallet/${validAddress}`);
     expect(res.status).toBe(200);
     expect(() => validateResponse("/api/wallet/{address}", "GET", 200, res.body)).not.toThrow();
   });

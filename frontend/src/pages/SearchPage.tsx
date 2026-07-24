@@ -105,7 +105,7 @@ export default function SearchPage() {
 
       {data && !isLoading && data.suggestions.length > 0 && <Suggestions suggestions={data.suggestions} />}
 
-      {data && !isLoading && <Results data={filtered} />}
+      {data && !isLoading && <Results data={filtered} query={data.query} />}
     </div>
   );
 }
@@ -165,11 +165,11 @@ function Suggestions({ suggestions }: { suggestions: SearchResponse["suggestions
   );
 }
 
-function Results({ data }: { data: FilteredSearchResults }) {
+function Results({ data, query }: { data: FilteredSearchResults; query: string }) {
   if (!data.contracts.length && !data.events.length && !data.wallets.length) {
     return (
       <div className="card">
-        No results found. Try a token symbol, event function, address, transaction hash, or description text.
+        No results for <code>{query}</code>. Try a token symbol, event function, address, transaction hash, or description text.
       </div>
     );
   }

@@ -15,10 +15,11 @@
  */
 
 import { createClient } from "redis";
+import config from "./config.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const DEDUP_TTL_S = Number(process.env.KAFKA_BUS_DEDUP_TTL_S || 7 * 24 * 3600);
-const EVENT_TTL_S = Number(process.env.KAFKA_BUS_EVENT_TTL_S || 7 * 24 * 3600);
+const REDIS_URL = config.REDIS_URL || "redis://localhost:6379";
+const DEDUP_TTL_S = config.KAFKA_BUS_DEDUP_TTL_S;
+const EVENT_TTL_S = config.KAFKA_BUS_EVENT_TTL_S;
 
 if (process.env.KAFKA_BROKERS) {
   console.log(

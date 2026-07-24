@@ -10,8 +10,9 @@
  */
 
 import { db } from "./db.js";
+import config from "./config.js";
 
-const REFRESH_INTERVAL_MS = Number(process.env.GAS_GUZZLERS_INTERVAL_MS || 5 * 60 * 1000); // 5 min
+const REFRESH_INTERVAL_MS = config.GAS_GUZZLERS_INTERVAL_MS;
 const TOP_N = 10;
 
 /** @type {GasGuzzlerEntry[]} */

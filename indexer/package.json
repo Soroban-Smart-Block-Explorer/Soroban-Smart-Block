@@ -5,13 +5,13 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js test/api/*.test.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand test/api/*.test.js test/reorgWorker.test.js",
     "test:decoder": "node --test tests/decoder.test.js",
     "test:scval": "node --test tests/scval.test.js",
     "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/decoder.test.js tests/scval.test.js"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "12.3.0",
+    "@stellar/stellar-sdk": "^14.6.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dotenv": "16.4.5",
@@ -30,7 +30,8 @@
     "stripe": "^14.0.0",
     "swagger-ui-express": "^5.0.1",
     "ws": "^8.21.0",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

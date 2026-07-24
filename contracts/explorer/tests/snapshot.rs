@@ -29,7 +29,7 @@ fn test_contract_registration_snapshot() {
 
     explorer.register_contract(&admin, &contract_id, &meta);
 
-    let fetched = explorer.get_contract(&contract_id).unwrap();
+    let fetched = explorer.get_contract(&contract_id);
 
     // Validate state hasn't drifted via standard asserts as proxy for insta snapshots
     assert_eq!(fetched.name, String::from_str(&env, "SnapshotTestContract"));

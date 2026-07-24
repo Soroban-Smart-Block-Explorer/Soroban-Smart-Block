@@ -15,6 +15,7 @@
  */
 
 import crypto from "crypto";
+import config from "./config.js";
 
 // ── TTL configuration by cache type ──────────────────────────────────────────
 // l1/l2 in seconds; l3 is the Cache-Control header string for CDN/browser.
@@ -34,9 +35,9 @@ export function getTTL(type) {
 
 // ── L1: LRU in-memory cache ───────────────────────────────────────────────────
 
-const L1_MAX = Number(process.env.CACHE_L1_MAX ?? 2000);
+const L1_MAX = config.CACHE_L1_MAX;
 // XFetch tuning: higher beta = more aggressive early recomputes
-const XFETCH_BETA = Number(process.env.CACHE_XFETCH_BETA ?? 1.0);
+const XFETCH_BETA = config.CACHE_XFETCH_BETA;
 
 class LRUCache {
   constructor(maxSize) {

@@ -25,6 +25,22 @@ function isResourceLimitExceeded(ev) {
 }
 
 /**
+ * JSON.stringify that survives BigInt values (i128/u64 amounts from
+ * scValToNative) by serializing them as decimal strings, and strips
+ * NUL characters (\u0000) which PostgreSQL text/jsonb columns reject.
+ */
+function safeStringify(value) {
+  const json = JSON.stringify(value, (_, v) => (typeof v === "bigint" ? v.toString() : v));
+  return json ? json.replace(/\\u0000/g, "") : json;
+}
+
+/** Strip NUL characters that PostgreSQL rejects in text columns. */
+function stripNul(str) {
+  // eslint-disable-next-line no-control-regex -- intentionally strips NUL bytes
+  return String(str).replace(/\u0000/g, "");
+}
+
+/**
  * Extract resource usage costs from the Soroban RPC event's transaction metadata.
  *
  * The Soroban RPC event object may carry a `feeCharged` field directly, and
@@ -88,7 +104,7 @@ const NATIVE_SAC_IDS = new Set([
  * Decode a raw Soroban RPC event into a human-readable record.
  * Uses the ABI template when available; falls back to a generic description.
  */
-export async function decode(ev) {
+export async function decode(ev, { currentAbi = false } = {}) {
   const contractId = ev.contractId;
   const topics = ev.topic.map((t) => scValToNative(t));
   const data = scValToNative(ev.value);
@@ -106,8 +122,8 @@ export async function decode(ev) {
         ledger: ev.ledger,
         tx_hash: ev.txHash,
         description: wrapUnwrap.description,
-        raw_topics: topics.map(String),
-        raw_data: JSON.stringify(data),
+        raw_topics: topics.map((t) => stripNul(t)),
+        raw_data: safeStringify(data),
         ...extractGasCosts(ev),
       };
     }
@@ -115,9 +131,11 @@ export async function decode(ev) {
 
   // Look up registered ABI for richer description
   // Use versioned lookup: find the ABI version active at the event's ledger
-  const meta = await db
-    .getContractMetaByLedger(contractId, ev.ledger)
-    .catch(() => null) ?? await db.getContractMeta(contractId).catch(() => null);
+  const meta = currentAbi
+    ? await db.getContractMeta(contractId).catch(() => null)
+    : await db
+        .getContractMetaByLedger(contractId, ev.ledger)
+        .catch(() => null) ?? await db.getContractMeta(contractId).catch(() => null);
   const fnAbi = meta?.functions?.find((f) => f.name === fnName);
 
   // Check if this contract is a registered vault
@@ -137,8 +155,8 @@ export async function decode(ev) {
     const tempDecoded = {
       contract_id: contractId,
       function: fnName,
-      raw_topics: topics.map(String),
-      raw_data: JSON.stringify(data),
+      raw_topics: topics.map((t) => stripNul(t)),
+      raw_data: safeStringify(data),
     };
     description = decodeRwaEvent(tempDecoded, meta);
   }
@@ -162,8 +180,8 @@ export async function decode(ev) {
     ledger: ev.ledger,
     tx_hash: ev.txHash,
     description,
-    raw_topics: topics.map(String),
-    raw_data: JSON.stringify(data),
+    raw_topics: topics.map((t) => stripNul(t)),
+    raw_data: safeStringify(data),
     ...(isSac && { sac_asset: assetCode }),
     is_clawback: fnName === "clawback",
     is_resource_limit_exceeded: isResourceLimitExceeded(ev),
@@ -205,7 +223,7 @@ export async function decode(ev) {
  * mint on native SAC = Classic XLM → Soroban (wrap)
  * burn on native SAC = Soroban → Classic XLM (unwrap)
  */
-function nativeXlmDescription(fnName, args, data) {
+export function nativeXlmDescription(fnName, args, data) {
   if (fnName === "mint") {
     const [to, amount] = args;
     const amt = amount ?? data;
@@ -247,7 +265,14 @@ function vaultDescription(fn, args, data, contractName, vaultMeta) {
   }
 }
 
-function buildDescription(fn, args, data, contractName) {
+/**
+ * Build a human-readable description from decoded ABI-matched function arguments.
+ *
+ * SEP-41 transfer format:
+ *   "Address {short-from} transferred {amount} {token} to {short-to} on {contractName}"
+ * where short addresses are truncated to "AAAAAA…ZZZZ" (6 + 4 chars).
+ */
+export function buildDescription(fn, args, data, contractName) {
   switch (fn) {
     case "swap": {
       const [from, amtIn, tokenIn, amtOut, tokenOut] = args;

@@ -58,7 +58,7 @@ pub const DEFAULT_MAX_EVENTS: u32 = 50_000;
 /// ABI-like metadata for a registered contract.
 #[allow(missing_docs)]
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ContractMeta {
     /// Schema version for forward compatibility.
     pub version: u32,
@@ -75,7 +75,7 @@ pub struct ContractMeta {
 /// Describes one callable function so the explorer can decode calls.
 #[allow(missing_docs)]
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FunctionAbi {
     pub name: Symbol,
     pub description: String,
@@ -85,7 +85,7 @@ pub struct FunctionAbi {
 /// One parameter definition.
 #[allow(missing_docs)]
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParamDef {
     pub name: Symbol,
     pub kind: Symbol,
@@ -238,6 +238,10 @@ impl ExplorerContract {
         {
             panic_with_error!(&env, Error::ContractPaused);
         }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
         let key = DataKey::Contract(contract_id.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, Error::AlreadyExists);
@@ -326,12 +330,11 @@ impl ExplorerContract {
         );
     }
 
-    /// Fetch the latest registered metadata for a contract.
-    /// Returns `None` if the contract has never been registered.
-    pub fn get_contract(env: Env, contract_id: BytesN<32>) -> Option<ContractMeta> {
+    pub fn get_contract(env: Env, contract_id: BytesN<32>) -> Result<ContractMeta, Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Contract(contract_id))
+            .ok_or(Error::NotFound)
     }
 
     /// Fetch a specific historical ABI version.
@@ -393,7 +396,7 @@ impl ExplorerContract {
     /// Only the admin may call this.
     pub fn submit_event(env: Env, caller: Address, input: EventInput) {
         caller.require_auth();
-        if input.function.is_empty() {
+        if input.function == Symbol::new(&env, "") {
             panic_with_error!(&env, Error::InvalidInput);
         }
         if env
@@ -576,8 +579,24 @@ mod tests {
 
         let cid: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
         client.register_contract(&admin, &cid, &make_meta(&env, "StellarSwap", &admin));
-        let fetched = client.get_contract(&cid).unwrap();
+        let fetched = client.get_contract(&cid);
         assert_eq!(fetched.name, String::from_str(&env, "StellarSwap"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_register_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[50u8; 32]);
+        client.register_contract(
+            &stranger,
+            &cid,
+            &make_meta(&env, "UnauthorizedReg", &stranger),
+        );
     }
 
     #[test]
@@ -631,6 +650,30 @@ mod tests {
 
         let empty = client.get_events(&10u64, &5u32);
         assert_eq!(empty.len(), 0);
+    }
+
+    // Boundary check for `get_events`: a page requested from the middle of the
+    // log must honour both the `start` offset and the `limit` cap, returning
+    // exactly `min(limit, total - start)` events beginning at `start`.
+    #[test]
+    fn test_get_events_pagination() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[4u8; 32]);
+        let base = make_input(&env, &cid);
+
+        for _ in 0..5 {
+            client.submit_event(&admin, &base);
+        }
+        assert_eq!(client.event_count(), 5u64);
+
+        // start = 2, limit = 2 -> events with seq 2 and 3.
+        let page = client.get_events(&2u64, &2u32);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get(0).unwrap().seq, 2);
+        assert_eq!(page.get(1).unwrap().seq, 3);
     }
 
     #[test]
@@ -740,8 +783,9 @@ mod tests {
 
         let owner = Address::generate(&env);
         let cid: BytesN<32> = BytesN::from_array(&env, &[25u8; 32]);
+        // Only the admin can register; meta.registered_by marks the owner for future updates.
         let meta_v0 = make_meta(&env, "MyContract", &owner);
-        client.register_contract(&owner, &cid, &meta_v0);
+        client.register_contract(&admin, &cid, &meta_v0);
 
         let meta_v1 = ContractMeta {
             version: 2,
@@ -750,7 +794,7 @@ mod tests {
         };
         client.update_contract(&owner, &cid, &meta_v1);
 
-        let updated = client.get_contract(&cid).unwrap();
+        let updated = client.get_contract(&cid);
         assert_eq!(updated.version, 2);
         assert_eq!(updated.abi_version, 1);
     }
@@ -782,19 +826,6 @@ mod tests {
         assert!(env.events().all().len() > before);
     }
 
-    #[test]
-    #[should_panic]
-    fn test_submit_event_rejects_empty_function_name() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.init(&admin, &0u32);
-
-        let cid: BytesN<32> = BytesN::from_array(&env, &[24u8; 32]);
-        let mut input = make_input(&env, &cid);
-        input.function = Symbol::new(&env, "");
-        client.submit_event(&admin, &input);
-    }
-
     // ── ABI versioning (#272) ─────────────────────────────────────────────────
 
     #[test]
@@ -810,7 +841,7 @@ mod tests {
         };
         client.register_contract(&admin, &cid, &meta);
 
-        let fetched = client.get_contract(&cid).unwrap();
+        let fetched = client.get_contract(&cid);
         assert_eq!(fetched.abi_version, 0);
 
         let v0 = client.get_contract_version(&cid, &0u32).unwrap();
@@ -833,14 +864,14 @@ mod tests {
             ..meta_v0.clone()
         };
         client.update_contract(&admin, &cid, &meta_v1);
-        assert_eq!(client.get_contract(&cid).unwrap().abi_version, 1);
+        assert_eq!(client.get_contract(&cid).abi_version, 1);
 
         let meta_v2 = ContractMeta {
             abi_version: 2,
             ..meta_v0
         };
         client.update_contract(&admin, &cid, &meta_v2);
-        assert_eq!(client.get_contract(&cid).unwrap().abi_version, 2);
+        assert_eq!(client.get_contract(&cid).abi_version, 2);
 
         assert!(client.get_contract_version(&cid, &0u32).is_some());
         assert!(client.get_contract_version(&cid, &1u32).is_some());
@@ -874,13 +905,25 @@ mod tests {
     }
 
     #[test]
-    fn test_get_contract_returns_none_for_missing() {
+    fn test_get_contract_not_found() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.init(&admin, &0u32);
 
         let cid: BytesN<32> = BytesN::from_array(&env, &[33u8; 32]);
-        assert!(client.get_contract(&cid).is_none());
+        assert!(matches!(
+            client.try_get_contract(&cid),
+            Err(Ok(crate::Error::NotFound))
+        ));
+    }
+
+    #[test]
+    fn test_get_latest_contract_returns_none_for_missing() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[33u8; 32]);
         assert!(client.get_latest_contract(&cid).is_none());
         assert!(client.get_contract_version(&cid, &0u32).is_none());
     }
@@ -895,10 +938,10 @@ mod tests {
 
         let cid: BytesN<32> = BytesN::from_array(&env, &[40u8; 32]);
         client.register_contract(&admin, &cid, &make_meta(&env, "ToRemove", &admin));
-        assert!(client.get_contract(&cid).is_some());
+        assert!(client.try_get_contract(&cid).is_ok());
 
         client.deregister_contract(&admin, &cid);
-        assert!(client.get_contract(&cid).is_none());
+        assert!(client.try_get_contract(&cid).is_err());
     }
 
     #[test]
@@ -909,9 +952,9 @@ mod tests {
 
         let registrant = Address::generate(&env);
         let cid: BytesN<32> = BytesN::from_array(&env, &[41u8; 32]);
-        client.register_contract(&registrant, &cid, &make_meta(&env, "RegOwned", &registrant));
+        client.register_contract(&admin, &cid, &make_meta(&env, "RegOwned", &registrant));
         client.deregister_contract(&registrant, &cid);
-        assert!(client.get_contract(&cid).is_none());
+        assert!(client.try_get_contract(&cid).is_err());
     }
 
     #[test]
@@ -924,7 +967,7 @@ mod tests {
         let registrant = Address::generate(&env);
         let stranger = Address::generate(&env);
         let cid: BytesN<32> = BytesN::from_array(&env, &[42u8; 32]);
-        client.register_contract(&registrant, &cid, &make_meta(&env, "Secure", &registrant));
+        client.register_contract(&admin, &cid, &make_meta(&env, "Secure", &registrant));
         client.deregister_contract(&stranger, &cid);
     }
 

@@ -1,29 +1,38 @@
-const pino = require('pino');
-const { v4: uuidv4 } = require('uuid');
+import { randomUUID } from "node:crypto";
 
-const logLevel = process.env.LOG_LEVEL || 'info';
+const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const currentLevel = LEVELS[process.env.LOG_LEVEL] ?? LEVELS.info;
 
-const pinoConfig = {
-  level: logLevel,
-  base: { service: 'indexer', pid: process.pid },
-  timestamp: pino.stdTimeFunctions.isoTime,
-};
-
-let logger;
-
-if (process.env.NODE_ENV === 'development') {
-  const pinoPretty = require('pino-pretty');
-  logger = pino(pinoConfig, pinoPretty());
-} else {
-  logger = pino(pinoConfig);
+function write(levelName, obj, msg) {
+  if ((LEVELS[levelName] ?? 0) < currentLevel) return;
+  const entry = {
+    level: levelName,
+    time: new Date().toISOString(),
+    service: "indexer",
+    pid: process.pid,
+    ...(typeof obj === "string" ? { msg: obj } : obj),
+    ...(msg !== undefined ? { msg } : {}),
+  };
+  const line = JSON.stringify(entry);
+  if (levelName === "error" || levelName === "warn") {
+    process.stderr.write(line + "\n");
+  } else {
+    process.stdout.write(line + "\n");
+  }
 }
 
-function createCorrelatedLogger() {
-  const correlationId = uuidv4();
-  return logger.child({ correlationId });
+function makeLogger(ctx = {}) {
+  return {
+    debug: (obj, msg) => write("debug", { ...ctx, ...(typeof obj === "string" ? { msg: obj } : obj) }, msg),
+    info:  (obj, msg) => write("info",  { ...ctx, ...(typeof obj === "string" ? { msg: obj } : obj) }, msg),
+    warn:  (obj, msg) => write("warn",  { ...ctx, ...(typeof obj === "string" ? { msg: obj } : obj) }, msg),
+    error: (obj, msg) => write("error", { ...ctx, ...(typeof obj === "string" ? { msg: obj } : obj) }, msg),
+    child: (extra) => makeLogger({ ...ctx, ...extra }),
+  };
 }
 
-module.exports = {
-  logger,
-  createCorrelatedLogger,
-};
+export const logger = makeLogger();
+
+export function createCorrelatedLogger() {
+  return logger.child({ correlationId: randomUUID() });
+}

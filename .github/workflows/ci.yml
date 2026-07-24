@@ -39,23 +39,126 @@ jobs:
         run: cargo fmt --check
 
       - name: clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build (wasm32)
         run: cargo build --target wasm32-unknown-unknown --release -p soroban-explorer-contract
 
-      - name: Test — explorer contract
-        run: cargo test -p soroban-explorer-contract
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
 
-      - name: Test — ticket contract
+      - name: Test — explorer contract with coverage
+        run: |
+          cargo llvm-cov -p soroban-explorer-contract --lcov --output-path lcov-explorer.info
+          cargo llvm-cov report -p soroban-explorer-contract --summary-only | tee coverage_summary_explorer.txt
+
+      - name: Check explorer coverage threshold (80%)
+        run: |
+          COVERAGE=$(grep '^TOTAL' coverage_summary_explorer.txt | grep -oP '[\d.]+(?=%)' | sed -n '3p')
+          COVERAGE=${COVERAGE:-0}
+          echo "Explorer contract line coverage: ${COVERAGE}%"
+          awk -v cov="$COVERAGE" 'BEGIN { 
+            if (cov+0 < 80) { 
+              print "FAIL: explorer coverage " cov "% < 80%"; 
+              exit 1 
+            } else { 
+              print "PASS: explorer coverage " cov "%" 
+            } 
+          }'
+
+      - name: Upload explorer coverage to CodeCov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov-explorer.info
+          flags: explorer-contract
+          name: explorer-coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Test — ticket contract with coverage
         working-directory: contracts/ticket
-        run: cargo test --features testutils --release
+        run: |
+          cargo llvm-cov --features testutils --release --lcov --output-path lcov-ticket.info
+          cargo llvm-cov report --release --summary-only | tee coverage_summary_ticket.txt
+
+      - name: Check ticket coverage threshold (85%)
+        working-directory: contracts/ticket
+        run: |
+          COVERAGE=$(grep '^TOTAL' coverage_summary_ticket.txt | grep -oP '[\d.]+(?=%)' | sed -n '3p')
+          COVERAGE=${COVERAGE:-0}
+          echo "Ticket contract line coverage: ${COVERAGE}%"
+          awk -v cov="$COVERAGE" 'BEGIN { 
+            if (cov+0 < 85) { 
+              print "FAIL: ticket coverage " cov "% < 85%"; 
+              exit 1 
+            } else { 
+              print "PASS: ticket coverage " cov "%" 
+            } 
+          }'
+
+      - name: Upload ticket coverage to CodeCov
+        uses: codecov/codecov-action@v4
+        with:
+          files: contracts/ticket/lcov-ticket.info
+          flags: ticket-contract
+          name: ticket-coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ── Migrations ────────────────────────────────────────────────────────────
+  # Closes #425 — verify every SQL migration applies cleanly on a fresh
+  # PostgreSQL 16 instance, in order, with no missing-table or type conflicts.
+  migrations:
+    name: Migrations (fresh PostgreSQL 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install indexer deps
+        run: npm ci
+        working-directory: indexer
+
+      - name: Apply all migrations on a blank database
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5433/postgres
+        run: node src/migrate.js
+        working-directory: indexer
 
   # ── Services ──────────────────────────────────────────────────────────────
   services:
     name: Services (indexer + frontend)
     runs-on: ubuntu-latest
     needs: contracts
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: soroban
+          POSTGRES_PASSWORD: soroban_secret
+          POSTGRES_DB: soroban_explorer
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
 
@@ -78,22 +181,34 @@ jobs:
 
       - name: Install deps
         run: |
-          cd indexer && npm install
+          cd indexer && npm ci
           cd ../frontend && npm ci
 
       - name: Lockfile drift check
         run: |
-          if ! git diff --exit-code indexer/package-lock.json; then
-            echo "::error::indexer/package-lock.json is out of sync — run 'npm install' in indexer/ and commit it."
+          if ! git diff --exit-code indexer/package-lock.json frontend/package-lock.json; then
+            echo "::error::A package-lock.json is out of sync — run 'npm install' in the relevant directory and commit the updated lockfile."
             exit 1
           fi
 
       - name: Validate OpenAPI spec
-        run: npx -y @apidevtools/swagger-parser-cli validate docs/api/openapi.yaml
+        run: npx -y @apidevtools/swagger-cli validate docs/api/openapi.yaml
 
       - name: Indexer tests
-        run: npm test
+        run: npm test -- --coverage --coverageReporters=lcov
         working-directory: indexer
+        env:
+          TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
+
+      - name: Upload indexer coverage to CodeCov
+        uses: codecov/codecov-action@v4
+        with:
+          files: indexer/coverage/lcov.info
+          flags: indexer
+          name: indexer-coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
       - name: Frontend typecheck + build
         run: npm run build
         working-directory: frontend

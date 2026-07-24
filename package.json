@@ -7,6 +7,7 @@
     "setup": "node scripts/setup.js",
     "doctor": "node scripts/doctor.js",
     "configure-branch-protection": "node scripts/configure-branch-protection.js --branch main",
+    "deploy:contract": "node scripts/deploy-contract.js",
     "dev": "make dev",
     "prepare": "husky"
   },

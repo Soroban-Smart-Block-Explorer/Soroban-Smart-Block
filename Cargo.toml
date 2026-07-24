@@ -2,10 +2,6 @@
 resolver = "2"
 members  = ["contracts/explorer"]
 
-
-[workspace.dependencies]
-soroban-sdk = { version = "25.0.2" }
-
 [profile.release]
 opt-level = "z"
 overflow-checks = true

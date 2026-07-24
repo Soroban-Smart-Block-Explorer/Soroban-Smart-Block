@@ -19,7 +19,14 @@ export default function EventPage() {
   });
 
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Loading…</p>;
-  if (!ev) return <p>Event not found.</p>;
+  if (!ev) return (
+  <div style={{ textAlign: "center", marginTop: "2rem" }}>
+    <p>Event not found.</p>
+    <Link to="/" style={{ color: "var(--primary)", textDecoration: "underline" }}>
+      Back to events
+    </Link>
+  </div>
+);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

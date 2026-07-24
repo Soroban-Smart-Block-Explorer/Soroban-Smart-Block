@@ -16,15 +16,17 @@
  *   8. REORG_DETECTED      — chain reorganization detected (ledger hash mismatch)
  */
 
+import config from "./config.js";
+
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL ?? "";
 const PAGERDUTY_ROUTING_KEY = process.env.PAGERDUTY_ROUTING_KEY ?? "";
 const PAGERDUTY_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue";
 
-const GAP_THRESHOLD = Number(process.env.ALERT_GAP_THRESHOLD ?? 3);
-const DLQ_MAX_SIZE = Number(process.env.ALERT_DLQ_MAX_SIZE ?? 100);
-const MIN_THROUGHPUT = Number(process.env.ALERT_MIN_THROUGHPUT ?? 1);
-const MAX_HEAP_MB = Number(process.env.ALERT_MAX_HEAP_MB ?? 512);
-const INDEXER_STALL_MS = Number(process.env.ALERT_INDEXER_STALL_MS ?? 30_000);
+const GAP_THRESHOLD = config.ALERT_GAP_THRESHOLD;
+const DLQ_MAX_SIZE = config.ALERT_DLQ_MAX_SIZE;
+const MIN_THROUGHPUT = config.ALERT_MIN_THROUGHPUT;
+const MAX_HEAP_MB = config.ALERT_MAX_HEAP_MB;
+const INDEXER_STALL_MS = config.ALERT_INDEXER_STALL_MS;
 
 export const ALERT_CONDITIONS = {
   INDEXER_DOWN: "INDEXER_DOWN",
@@ -120,9 +122,15 @@ export function resolveAlert(condition) {
   }
 }
 
-/** Return the list of currently active alert conditions with their fire timestamps. */
+/** Return the list of currently active alert conditions with their durations. */
 export function getActiveAlerts() {
-  return Array.from(_active.entries()).map(([condition, firedAt]) => ({ condition, firedAt }));
+  const now = Date.now();
+
+  return Array.from(_active.entries()).map(([condition, firedAt]) => ({
+    condition,
+    firedAt: new Date(firedAt).toISOString(),
+    durationMs: Math.max(0, now - firedAt),
+  }));
 }
 
 // ── Condition checkers ────────────────────────────────────────────────────────

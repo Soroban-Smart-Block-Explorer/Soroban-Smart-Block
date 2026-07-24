@@ -121,6 +121,92 @@ The pre-push hook (`.husky/pre-push`) runs the contract checks automatically on 
 
 ---
 
+## ABI Format
+
+`register_contract` and `update_contract` both take a `meta: ContractMeta` argument. This is the JSON shape the CLI / SDK invocation must serialize.
+
+### `ContractMeta` struct fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `version` | `u32` | Schema version for forward compatibility. Set to `1` for the current schema. |
+| `abi_version` | `u32` | Ignored on input -- the contract sets this internally (`0` on first registration, incremented on each `update_contract`). Send `0`. |
+| `min_ledger` | `u32` | Ignored on input -- set internally to the ledger sequence at write time. Send `0`. |
+| `name` | `String` | Human-readable contract name. |
+| `description` | `String` | Human-readable contract description. |
+| `functions` | `Vec<FunctionAbi>` | List of callable functions (see below). |
+| `registered_by` | `Address` | Stellar address of the registering caller. Must match `caller`. |
+
+### `FunctionAbi` struct fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | `Symbol` | Function name as it appears on-chain (max 32 chars, Soroban `Symbol` rules apply). |
+| `description` | `String` | Human-readable description of what the function does. |
+| `params` | `Vec<ParamDef>` | Ordered list of parameters (see below). |
+
+### `ParamDef` struct fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | `Symbol` | Parameter name. |
+| `kind` | `Symbol` | Parameter type, e.g. "Address", "i128", "u32", "String", "Bool". |
+
+### Nesting
+
+`ContractMeta.functions` is an array of `FunctionAbi`. Each `FunctionAbi.params` is an array of `ParamDef`. There is no further nesting:
+
+```
+ContractMeta
+|-- functions: [FunctionAbi, FunctionAbi, ...]
+    |-- params: [ParamDef, ParamDef, ...]
+```
+
+### Example: registering a simple SEP-41 token contract
+
+```json
+{
+  "caller": "GABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234",
+  "contract_id": "ba5eba11f00dca7f00dca7f00dca7f00dca7f00dca7f00dca7f00dca7f00dca",
+  "meta": {
+    "version": 1,
+    "abi_version": 0,
+    "min_ledger": 0,
+    "name": "ExampleToken",
+    "description": "A SEP-41 compliant fungible token contract.",
+    "registered_by": "GABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234",
+    "functions": [
+      {
+        "name": "transfer",
+        "description": "Transfers an amount of tokens from one address to another.",
+        "params": [
+          { "name": "from", "kind": "Address" },
+          { "name": "to", "kind": "Address" },
+          { "name": "amount", "kind": "i128" }
+        ]
+      },
+      {
+        "name": "balance",
+        "description": "Returns the token balance of the given address.",
+        "params": [
+          { "name": "id", "kind": "Address" }
+        ]
+      },
+      {
+        "name": "mint",
+        "description": "Mints new tokens to the given address. Admin only.",
+        "params": [
+          { "name": "to", "kind": "Address" },
+          { "name": "amount", "kind": "i128" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Note: `abi_version` and `min_ledger` are accepted in the payload for schema completeness but are always overwritten by the contract on `register_contract` -- send `0` for both.
+
 ## Common pitfalls
 
 | Mistake | Consequence | Correct approach |

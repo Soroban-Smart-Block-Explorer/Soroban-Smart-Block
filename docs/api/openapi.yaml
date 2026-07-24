@@ -16,9 +16,10 @@ paths:
   /health:
     get:
       summary: Comprehensive health check endpoint
+      security: []
       description: |
         Returns detailed health status of the API and all dependencies including
-        database, cache, indexer sync status, and background workers.
+        database, cache, indexer sync status, background workers, and active alerts.
         
         Status codes:
         - 200: Service is healthy or degraded (can handle traffic)
@@ -40,11 +41,50 @@ paths:
           content:
             application/json:
               schema:
+                oneOf:
+                  - $ref: "#/components/schemas/HealthStatus"
+                  - $ref: "#/components/schemas/HealthErrorStatus"
+
+  /api/health:
+    get:
+      summary: Comprehensive health check endpoint
+      security: []
+      description: |
+        API-prefixed alias for `/health`. Returns dependency health and a summary
+        of active alert conditions.
+      responses:
+        "200":
+          description: Service is healthy or degraded
+          content:
+            application/json:
+              schema:
                 $ref: "#/components/schemas/HealthStatus"
+        "503":
+          description: Service is unhealthy (critical dependencies failed)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/HealthStatus"
+                  - $ref: "#/components/schemas/HealthErrorStatus"
+
+  /api/alerts:
+    get:
+      summary: List active alert conditions
+      security: []
+      description: Returns the process-local alert conditions currently firing.
+      responses:
+        "200":
+          description: Current active alert state, including an all-clear response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertList"
 
   /health/live:
     get:
       summary: Liveness probe
+      security: []
       description: |
         Kubernetes-style liveness check. Returns 200 if the service is running
         and should not be restarted. This endpoint does not check dependencies.
@@ -59,6 +99,7 @@ paths:
   /health/ready:
     get:
       summary: Readiness probe
+      security: []
       description: |
         Kubernetes-style readiness check. Returns 200 if the service can handle
         traffic (dependencies are healthy). Returns 503 if dependencies are down.
@@ -75,14 +116,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadinessStatus"
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
 
   /api/events:
     get:
-      summary: List contract events (offset pagination)
-      description: Returns a list of decoded events using page-based pagination.
+      summary: List contract events (keyset pagination)
+      description: >-
+        Returns a stable page of decoded events using keyset (seq-based)
+        pagination. Pass the `next_cursor` value from the previous response
+        as `after_seq` to fetch the next page; `next_cursor` is null when no
+        further pages exist.
       parameters:
         - name: contract
           in: query
@@ -106,25 +148,37 @@ paths:
             enum: [soroban, classic]
             example: "soroban"
           description: Filter by transaction type
-        - name: page
+        - name: after_seq
           in: query
           required: false
           schema:
             type: integer
-            default: 1
-            example: 1
-          description: Page number (starts at 1)
+            example: 42
+          description: Event seq cursor (`next_cursor` from the previous page); omit for the first page
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 25
+            maximum: 200
+            example: 25
+          description: Max number of items to return (max 200)
       responses:
         "200":
-          description: Array of decoded events
+          description: Paginated events with next_cursor
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DecodedEvent"
+                $ref: "#/components/schemas/CursorPaginatedEvents"
         "400":
           description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid limit or after_seq value
           content:
             application/json:
               schema:
@@ -293,6 +347,33 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/admin/alerts/{condition}/resolve:
+    post:
+      summary: Resolve an active alert condition
+      description: Clears a process-local alert condition through the existing alert manager.
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: condition
+          in: path
+          required: true
+          description: Alert condition to resolve
+          schema:
+            $ref: "#/components/schemas/AlertCondition"
+      responses:
+        "200":
+          description: Resolution result; `resolved` is false when the condition was not active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertResolveResult"
+        "401":
+          description: Missing or invalid admin bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/contracts:
     post:
       summary: Register contract ABI metadata
@@ -362,13 +443,17 @@ paths:
           description: Wallet address
       responses:
         "200":
-          description: Array of events matching the wallet address
+          description: Events matching the wallet address (empty array if none)
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DecodedEvent"
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DecodedEvent"
         "400":
           description: Invalid wallet address format
           content:
@@ -447,11 +532,15 @@ components:
       type: http
       scheme: bearer
       description: Bearer token auth support for future key management.
+    AdminBearerAuth:
+      type: http
+      scheme: bearer
+      description: Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
 
   schemas:
     HealthStatus:
       type: object
-      required: [status, timestamp, dependencies]
+      required: [status, timestamp, dependencies, alerts]
       properties:
         status:
           type: string
@@ -475,6 +564,92 @@ components:
               $ref: "#/components/schemas/IndexerHealth"
             workers:
               $ref: "#/components/schemas/WorkerHealth"
+        alerts:
+          $ref: "#/components/schemas/AlertSummary"
+
+    HealthErrorStatus:
+      type: object
+      required: [status, error, timestamp, alerts]
+      properties:
+        status:
+          type: string
+          enum: [unhealthy]
+        error:
+          type: string
+          description: Unexpected health-check failure
+        timestamp:
+          type: string
+          format: date-time
+        alerts:
+          $ref: "#/components/schemas/AlertSummary"
+
+    AlertCondition:
+      type: string
+      enum:
+        - INDEXER_DOWN
+        - LEDGER_GAP
+        - DB_FAILURE
+        - RESOURCE_CONSTRAINT
+        - ALL_RPC_DOWN
+        - LOW_THROUGHPUT
+        - DLQ_THRESHOLD
+        - REORG_DETECTED
+
+    ActiveAlert:
+      type: object
+      required: [condition, firedAt, durationMs]
+      properties:
+        condition:
+          $ref: "#/components/schemas/AlertCondition"
+        firedAt:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp when the alert became active
+          example: "2026-07-17T12:00:00.000Z"
+        durationMs:
+          type: integer
+          minimum: 0
+          description: Milliseconds the alert has remained active
+          example: 47000
+
+    AlertList:
+      type: object
+      required: [active, count]
+      properties:
+        active:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActiveAlert"
+        count:
+          type: integer
+          minimum: 0
+          example: 1
+
+    AlertSummary:
+      type: object
+      required: [active_count, conditions]
+      properties:
+        active_count:
+          type: integer
+          minimum: 0
+          example: 1
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AlertCondition"
+
+    AlertResolveResult:
+      type: object
+      required: [condition, resolved]
+      properties:
+        condition:
+          type: string
+          description: Condition supplied by the operator
+          example: "LEDGER_GAP"
+        resolved:
+          type: boolean
+          description: Whether the condition was active before the request
+          example: true
 
     DatabaseHealth:
       type: object

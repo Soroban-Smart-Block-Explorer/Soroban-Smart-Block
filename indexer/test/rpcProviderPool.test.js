@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { RpcProvider } from "../src/rpcProviderPool.js";
+import { RpcProvider } from "../src/optional/rpcProviderPool.js";
 
 describe("RpcProvider health metrics", () => {
   it("uptime is 1 with no recorded outcomes", () => {

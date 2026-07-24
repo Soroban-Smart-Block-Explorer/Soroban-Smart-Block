@@ -116,3 +116,33 @@ export function calculateRentPaid(extensionOp) {
   if (!extensionOp || extensionOp.costXlm == null) return 0;
   return Math.round(extensionOp.costXlm * 10_000_000);
 }
+
+/**
+ * Scan a txMeta object (decoded TransactionMeta or plain JS shape) for any
+ * BumpFootprintExpiration / TTL extension operations.
+ *
+ * Returns { ttl_extended: true, ...parsed } when a bump op is found,
+ * or { ttl_extended: false } when the txMeta contains no bump op.
+ *
+ * @param {object|null} txMeta  Transaction metadata; may be null/undefined.
+ * @returns {{ ttl_extended: boolean, fn_name?: string, extend_to?: number|null, min_extension?: number|null, max_extension?: number|null }}
+ */
+export function parseTTLFromTxMeta(txMeta) {
+  if (!txMeta) return { ttl_extended: false };
+
+  const operations = Array.isArray(txMeta.operations) ? txMeta.operations : [];
+
+  for (const op of operations) {
+    const parsed = parseTTLHostFunction(op?.hostFunction ?? op?.host_function ?? op);
+    if (parsed) {
+      return { ttl_extended: true, ...parsed };
+    }
+    // Also handle raw XDR operation type names for BumpFootprintExpiration
+    const opType = op?.type ?? op?.operationType ?? "";
+    if (opType === "bumpFootprintExpiration" || opType === "BUMP_FOOTPRINT_EXPIRATION") {
+      return { ttl_extended: true };
+    }
+  }
+
+  return { ttl_extended: false };
+}

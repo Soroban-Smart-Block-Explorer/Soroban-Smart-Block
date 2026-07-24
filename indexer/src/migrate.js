@@ -63,3 +63,20 @@ export async function runMigrations(pool) {
   if (ran === 0) console.log("[migrations] schema up to date");
   return ran;
 }
+
+// ── CLI entry point ───────────────────────────────────────────────────────────
+// `node src/migrate.js` applies all pending migrations against DATABASE_URL and
+// exits 0 on success / 1 on failure. Used by the CI migration check (see #425).
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const { default: pg } = await import("pg");
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    await runMigrations(pool);
+    process.exitCode = 0;
+  } catch (err) {
+    console.error(`[migrations] ${err.message}`);
+    process.exitCode = 1;
+  } finally {
+    await pool.end();
+  }
+}

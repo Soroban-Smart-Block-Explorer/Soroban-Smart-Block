@@ -99,6 +99,12 @@ make deploy     # deploy to testnet, prints CONTRACT_ID
 
 Copy the printed contract ID into `.env` as `EXPLORER_CONTRACT_ID`.
 
+#### Deployed Contracts
+
+| Network | Contract ID | Explorer |
+|---|---|---|
+| Testnet | `CDA2ZCIB3ETZNFNQP4NS3SIEW5XCF7DKP5UWN4Y33F5FV34JA2CGAJ44` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDA2ZCIB3ETZNFNQP4NS3SIEW5XCF7DKP5UWN4Y33F5FV34JA2CGAJ44) |
+
 ### 3. Start the indexer + API
 
 ```bash

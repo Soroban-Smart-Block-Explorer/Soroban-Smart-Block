@@ -1,12 +1,13 @@
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
-import schema from "./decodedEvent.schema.json" assert { type: "json" };
+import schema from "./decodedEvent.schema.json" with { type: "json" };
 import { decoderSchemaViolationsTotal } from "./metrics.js";
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
 const validate = ajv.compile(schema);
 
+// eslint-disable-next-line no-control-regex -- intentionally strips control characters
 const INVALID_HTML_OR_CONTROL = /[\u0000-\u001F\u007F-\u009F]/g;
 const HTML_TAGS = /<[^>]*>/g;
 

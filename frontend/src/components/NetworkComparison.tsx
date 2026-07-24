@@ -21,16 +21,26 @@ export default function NetworkComparison({ contractId }: { contractId: string }
     queryFn: () => api.networkComparison(contractId),
     enabled: !!contractId,
   });
+  const statuses = Array.isArray(data?.statuses) ? data.statuses : [];
 
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Checking networks…</p>;
   if (error) return <p style={{ color: "#ef4444" }}>Failed to load network comparison.</p>;
-  if (!data) return null;
+  if (statuses.length === 0) {
+    return (
+      <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
+        <strong style={{ display: "block", color: "var(--text)", fontSize: 14, marginBottom: 6 }}>
+          No network data available
+        </strong>
+        No deployment status was returned for this contract.
+      </div>
+    );
+  }
 
   return (
     <div className="card">
       <h3 style={{ marginBottom: 12, fontSize: 14 }}>Network Deployment Status</h3>
 
-      {data.hasVersionMismatch && (
+      {data?.hasVersionMismatch && (
         <div
           style={{
             background: "rgba(239,68,68,0.1)",
@@ -62,7 +72,7 @@ export default function NetworkComparison({ contractId }: { contractId: string }
             </tr>
           </thead>
           <tbody>
-            {data.statuses.map((s) => (
+            {statuses.map((s) => (
               <tr key={s.network} style={{ borderBottom: "1px solid var(--border)" }}>
                 <td style={td}>
                   <span style={{ textTransform: "capitalize", fontWeight: 500 }}>{s.network}</span>

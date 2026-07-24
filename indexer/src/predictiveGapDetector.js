@@ -13,8 +13,10 @@
  *   - Stateless analysis function for use in periodic monitoring loops
  */
 
-const GAP_THRESHOLD = Number(process.env.PREDICTIVE_GAP_THRESHOLD ?? 3);
-const HISTORY_SIZE = Number(process.env.PREDICTIVE_HISTORY_SIZE ?? 50);
+import config from "./config.js";
+
+const GAP_THRESHOLD = config.PREDICTIVE_GAP_THRESHOLD;
+const HISTORY_SIZE = config.PREDICTIVE_HISTORY_SIZE;
 
 let _history = [];
 let _lastLedger = 0;

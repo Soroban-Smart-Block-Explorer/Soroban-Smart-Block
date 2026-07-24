@@ -38,6 +38,8 @@ export default function AddressConnectionGraph({ contractId }: Props) {
     queryFn: () => api.addressGraph(contractId),
     enabled: !!contractId,
   });
+  const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
+  const edges = Array.isArray(data?.edges) ? data.edges : [];
 
   useEffect(() => {
     if (!data || !containerRef.current) return;
@@ -50,14 +52,14 @@ export default function AddressConnectionGraph({ contractId }: Props) {
       }
 
       const elements = [
-        ...data.nodes.map((n) => ({
+        ...nodes.map((n) => ({
           data: {
             id: n.id,
             label: n.label.length > 12 ? `${n.label.slice(0, 6)}…${n.label.slice(-4)}` : n.label,
             type: n.type,
           },
         })),
-        ...data.edges.map((e, i) => ({
+        ...edges.map((e, i) => ({
           data: {
             id: `e${i}`,
             source: e.source,
@@ -123,8 +125,16 @@ export default function AddressConnectionGraph({ contractId }: Props) {
 
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Loading graph…</p>;
   if (error) return <p style={{ color: "#ef4444" }}>Failed to load address graph.</p>;
-  if (!data || data.nodes.length === 0)
-    return <p style={{ color: "var(--muted)" }}>No connections found for this contract.</p>;
+  if (nodes.length === 0) {
+    return (
+      <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
+        <strong style={{ display: "block", color: "var(--text)", fontSize: 14, marginBottom: 6 }}>
+          No address graph data available
+        </strong>
+        No wallet or contract connections were returned for this contract.
+      </div>
+    );
+  }
 
   return (
     <div className="card">
@@ -183,7 +193,7 @@ export default function AddressConnectionGraph({ contractId }: Props) {
         }}
       />
       <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
-        Scroll to zoom · Drag to pan · {data.nodes.length} nodes · {data.edges.length} connections
+        Scroll to zoom · Drag to pan · {nodes.length} nodes · {edges.length} connections
       </p>
     </div>
   );
