@@ -1,4 +1,4 @@
--- Migration 007: Email verification for self-service API key creation
+-- Migration 010: Email verification for self-service API key creation
 
 -- Add email verification fields to api_keys table
 ALTER TABLE api_keys
