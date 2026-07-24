@@ -152,11 +152,24 @@ export interface ContractMeta {
   version: number;
   name: string;
   description: string;
-  functions: { name: string; description: string }[];
+  functions: { name: string; description: string; args?: { name: string; type: string }[] }[];
+  registered_by?: string;
+  is_rwa?: boolean;
+  rwa_type?: string | null;
+  min_ledger?: number;
+  created_at?: string;
   source?: string;
   source_file?: string;
   source_files?: SourceFile[];
   dependency_advisory?: DependencyAdvisory | null;
+}
+
+export interface ContractStats {
+  total_events: number;
+  unique_callers: number;
+  first_seen_ledger: number | null;
+  last_seen_ledger: number | null;
+  events_per_day: { date: string; count: number }[];
 }
 
 export interface ContractListItem {
@@ -440,6 +453,7 @@ export const api = {
   },
   zkCosts: (seq: number) => get<{ calls: ZkHostCall[]; delta: ZkCostDelta | null }>(`/events/${seq}/zk-costs`),
   contract: (id: string) => get<ContractMeta>(`/contracts/${id}`),
+  contractStats: (id: string) => get<ContractStats>(`/contracts/${id}/stats`),
   listContracts: (page = 1, limit = 25) => {
     const q = new URLSearchParams();
     q.set("page", String(page));
@@ -448,7 +462,7 @@ export const api = {
   },
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
-  wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
+  wallet: (address: string) => get<{ events: DecodedEvent[] }>(`/wallet/${address}`),
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),

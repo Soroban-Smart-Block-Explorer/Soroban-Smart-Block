@@ -14,6 +14,7 @@ import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTr
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus } from "./rpcMultiNode.js";
+import { cacheHitTotal, cacheMissTotal } from "./metrics.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
 import { geoIpRateLimiter } from "./rateLimit/geoIpLimiter.js";
@@ -103,6 +104,7 @@ function makeCache(cacheType, getKey) {
 
     const cached = await cacheGet(key, cacheType);
     if (cached !== null) {
+      cacheHitTotal.inc({ cache: cacheType });
       const etag = generateETag(cached);
       if (req.headers["if-none-match"] === etag) {
         recordCachedLatency(Date.now() - start);
@@ -116,6 +118,7 @@ function makeCache(cacheType, getKey) {
       recordAccess(key);
       return res.json(cached);
     }
+    cacheMissTotal.inc({ cache: cacheType });
 
     // Miss: intercept res.json to cache the successful response
     const originalJson = res.json.bind(res);
@@ -607,6 +610,21 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
+  // GET /api/contracts/:id/stats — event totals, unique callers, and a 30-day
+  // daily trend for the contract stats widget (#536). Cached for 5 minutes.
+  app.get(
+    "/api/contracts/:id/stats",
+    makeCache("contract_stats", (req) => `contracts:stats:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const stats = await db.getContractStats(req.params.id);
+        res.json(stats);
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
     try {
@@ -881,18 +899,23 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
   // Returns 200 with { events: [...] } (empty array for an unknown address) and
   // 400 when the address is not a well-formed Stellar public key (G... base32).
-  app.get("/api/wallet/:address", async (req, res) => {
-    try {
-      const address = req.params.address;
-      if (!/^G[A-Z2-7]{55}$/.test(address)) {
-        return res.status(400).json({ error: "Invalid wallet address format" });
+  // Cached for 60s (#534) — invalidated in index.js whenever new events are indexed.
+  app.get(
+    "/api/wallet/:address",
+    makeCache("wallet", (req) => `wallet:events:${req.params.address}`),
+    async (req, res) => {
+      try {
+        const address = req.params.address;
+        if (!/^G[A-Z2-7]{55}$/.test(address)) {
+          return res.status(400).json({ error: "Invalid wallet address format" });
+        }
+        const events = await db.getWalletEvents(address);
+        res.json({ events });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
       }
-      const events = await db.getWalletEvents(address);
-      res.json({ events });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
+    },
+  );
 
   // GET /api/tokens/:id/holders — sorted list of addresses and their token balances
   app.get("/api/tokens/:id/holders", async (req, res) => {

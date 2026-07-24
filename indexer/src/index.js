@@ -196,6 +196,8 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   decoded.fee_bump = feeBump;
   decoded.archival_info = archivalInfo;
   await db.upsertEventValidated(decoded);
+  // Bust wallet event caches (#534) — any new event may reference a wallet address.
+  cacheInvalidate("wallet:events:*").catch(() => {});
 
   // Persist per-key state diffs for the timeline.
   const diffs = extractStateDiffs(rawSorobanEvent, decoded);
