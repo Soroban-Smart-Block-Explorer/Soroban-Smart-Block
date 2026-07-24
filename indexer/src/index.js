@@ -211,7 +211,7 @@ let shutdown = false;
 
 async function run() {
   await db.init();
-  const server = startApi();
+  const server = await startApi();
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
   warmCache().catch((e) => console.warn("[daemon] cache warm failed:", e.message));
