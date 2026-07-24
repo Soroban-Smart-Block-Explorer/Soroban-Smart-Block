@@ -36,6 +36,7 @@ import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
 import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
 import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
+import { runIntegrityChecks } from "./routes/admin.js";
 
 const RPC_URL = config.SOROBAN_RPC_URL;
 const START_LEDGER = config.START_LEDGER;
@@ -292,6 +293,15 @@ let ledgersSinceReorgCheck = 0;
 
 async function run() {
   await db.init();
+  void runIntegrityChecks()
+    .then((result) => {
+      if (result.ok) {
+        logger.info("startup integrity check passed");
+      } else {
+        logger.warn({ failed: result.failed }, "startup integrity check failed");
+      }
+    })
+    .catch((err) => logger.warn({ err: err.message }, "startup integrity check failed to run"));
   const server = startApi();
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
@@ -409,6 +419,7 @@ async function run() {
 
       _cursor = latestLedger + 1;
       await db.saveCursor(_cursor);
+      await db.saveLastIndexedLedger(latestLedger);
     } catch (err) {
       logger.error({ err: err.message, ledger: _cursor }, "indexer error");
       rpcErrors.inc({ type: err.code ?? "unknown" });

@@ -17,6 +17,11 @@ export const db = {
   /** Run all pending SQL migrations from indexer/migrations/. */
   async init() {
     await runMigrations(pool);
+    await pool.query(
+      `INSERT INTO daemon_state (key, value)
+       VALUES ('cursor', '0'), ('last_indexed_ledger', '0')
+       ON CONFLICT (key) DO NOTHING`,
+    );
   },
 
   async getMaxLedger() {
@@ -25,17 +30,30 @@ export const db = {
   },
 
   // ── daemon cursor persistence ──────────────────────────────────
-  async saveCursor(ledger) {
+  async saveDaemonState(key, value) {
     await pool.query(
-      `INSERT INTO daemon_state (key, value) VALUES ('cursor', $1)
-       ON CONFLICT (key) DO UPDATE SET value = $1`,
-      [String(ledger)],
+      `INSERT INTO daemon_state (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = $2`,
+      [key, String(value)],
     );
+  },
+
+  async saveCursor(ledger) {
+    await this.saveDaemonState('cursor', ledger);
   },
 
   async loadCursor() {
     const { rows } = await pool.query("SELECT value FROM daemon_state WHERE key = 'cursor'");
     return rows[0] ? Number(rows[0].value) : null;
+  },
+
+  async saveLastIndexedLedger(ledger) {
+    await this.saveDaemonState('last_indexed_ledger', ledger);
+  },
+
+  async getLastIndexedLedger() {
+    const { rows } = await pool.query("SELECT value FROM daemon_state WHERE key = 'last_indexed_ledger'");
+    return rows[0] ? Number(rows[0].value) : 0;
   },
 
   // ── ledger reorganization state ───────────────────────────────
