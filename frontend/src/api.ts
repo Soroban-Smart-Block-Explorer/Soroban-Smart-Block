@@ -214,6 +214,20 @@ export interface SearchResponse {
   suggestions: SearchSuggestion[];
 }
 
+export interface HorizonBalance {
+  asset_type: string;
+  asset_code?: string;
+  asset_issuer?: string;
+  balance: string;
+}
+
+export interface HorizonAccount {
+  id: string;
+  account_id: string;
+  sequence: string;
+  balances: HorizonBalance[];
+}
+
 export interface BurnAlert {
   contractId: string;
   ledger: number;
@@ -448,7 +462,8 @@ export const api = {
   },
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
-  wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
+  wallet: (address: string) =>
+    get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(`/wallet/${address}`),
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),

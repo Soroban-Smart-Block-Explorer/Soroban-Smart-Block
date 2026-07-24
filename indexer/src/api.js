@@ -879,16 +879,22 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
 
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
-  // Returns 200 with { events: [...] } (empty array for an unknown address) and
-  // 400 when the address is not a well-formed Stellar public key (G... base32).
+  // Returns 200 with { events: [...], horizon_account?: {...} } (empty array for an
+  // unknown address) and 400 when the address is not a well-formed Stellar public key
+  // (G... base32). When Horizon is reachable, includes the account's native XLM balance.
   app.get("/api/wallet/:address", async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
         return res.status(400).json({ error: "Invalid wallet address format" });
       }
-      const events = await db.getWalletEvents(address);
-      res.json({ events });
+      const [events, horizon_account] = await Promise.all([
+        db.getWalletEvents(address),
+        fetch(`${config.HORIZON_URL}/accounts/${address}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+      ]);
+      res.json({ events, horizon_account: horizon_account ?? null });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

@@ -3,14 +3,45 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import EventTable from "../components/EventTable";
 
+const VALID_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+
 export default function WalletPage() {
   const { address = "" } = useParams();
 
-  const { data: events = [], isLoading } = useQuery({
+  const isValidAddress = VALID_ADDRESS_RE.test(address);
+
+  const { data, isLoading } = useQuery({
     queryKey: ["wallet", address],
     queryFn: () => api.wallet(address),
-    enabled: !!address,
+    enabled: !!address && isValidAddress,
   });
+
+  const events = data?.events ?? [];
+  const horizonAccount = data?.horizon_account ?? null;
+  const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
+
+  if (address && !isValidAddress) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <div className="card">
+          <h2 style={{ marginBottom: 4 }}>Wallet History</h2>
+          <code
+            style={{
+              fontSize: 12,
+              color: "var(--muted)",
+              wordBreak: "break-all",
+            }}
+          >
+            {address}
+          </code>
+        </div>
+
+        <div className="card">
+          <p style={{ color: "#ef4444" }}>Invalid wallet address format</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -26,6 +57,13 @@ export default function WalletPage() {
           {address}
         </code>
       </div>
+
+      {xlmBalance && (
+        <div className="card">
+          <h3 style={{ marginBottom: 4 }}>XLM Balance</h3>
+          <p style={{ fontSize: 18, fontWeight: 600 }}>{xlmBalance.balance} XLM</p>
+        </div>
+      )}
 
       <div className="card">
         {isLoading ? (
