@@ -23,8 +23,20 @@ import RwaMetadataDisplay from "../components/RwaMetadataDisplay";
 import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
+import WasmBuildMetadataPanel from "../components/WasmBuildMetadataPanel";
+import UpgradeHistoryTimeline from "../components/UpgradeHistoryTimeline";
 
-type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff";
+type Tab =
+  | "overview"
+  | "source"
+  | "simulate"
+  | "flow"
+  | "roles"
+  | "networks"
+  | "graph"
+  | "call-graph"
+  | "state-diff"
+  | "upgrades";
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
@@ -145,7 +157,9 @@ export default function ContractPage() {
     { key: "roles", label: "Privileged Roles" },
     { key: "networks", label: "Networks" },
     { key: "graph", label: "Address Graph" },
+    { key: "call-graph", label: "Call Graph" },
     { key: "state-diff", label: "State Timeline" },
+    { key: "upgrades", label: "Upgrade History" },
   ];
 
   return (
@@ -393,6 +407,9 @@ export default function ContractPage() {
           {/* Live TTL expiration progress bars */}
           <TTLProgressBar contractId={id} />
 
+          {/* WASM build metadata (hash, compiler, SDK version, size) */}
+          <WasmBuildMetadataPanel contractId={id} />
+
           {functions.length > 0 ? (
             <div className="card">
               <h3 style={{ marginBottom: 8, fontSize: 14 }}>Functions</h3>
@@ -516,8 +533,14 @@ export default function ContractPage() {
       {/* Tab: Address Connection Graph — */}
       {tab === "graph" && <AddressConnectionGraph contractId={id} />}
 
+      {/* Tab: Sub-invocation Call Graph — #540 */}
+      {tab === "call-graph" && <AddressConnectionGraph contractId={id} variant="call-graph" />}
+
       {/* Tab: State-Diff Timeline — */}
       {tab === "state-diff" && <StateDiffTimeline contractId={id} />}
+
+      {/* Tab: Upgrade History Timeline — #538 */}
+      {tab === "upgrades" && <UpgradeHistoryTimeline contractId={id} />}
     </div>
   );
 }

@@ -129,6 +129,7 @@ function parseEnvMetaSection(payload) {
  * @param {Buffer|Uint8Array} wasm
  * @returns {{
  *   wasm_hash: string,           // SHA-256 hex of the raw bytes
+ *   size_bytes: number,          // raw WASM binary size in bytes
  *   sdk_version: string|null,    // e.g. "v21.1.0" from contractenvmetav0
  *   compiler: string|null,       // e.g. "rustc 1.78.0"
  *   optimizer: string|null,      // e.g. "wasm-opt 116"
@@ -142,6 +143,7 @@ export function extractBuildMetadata(wasm) {
 
   const meta = {
     wasm_hash: createHash("sha256").update(buf).digest("hex"),
+    size_bytes: buf.length,
     sdk_version: null,
     compiler: null,
     optimizer: null,

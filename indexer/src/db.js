@@ -642,26 +642,46 @@ export const db = {
   },
 
   // Circuit breaker status tracking
-  async updateCircuitBreakerStatus(contractId, isPaused, ledger) {
-    await pool.query(`UPDATE contracts SET is_paused = $1, pause_status_ledger = $2 WHERE id = $3`, [
-      isPaused,
-      ledger,
-      contractId,
-    ]);
+  async updateCircuitBreakerStatus(contractId, isPaused, ledger, txHash = null) {
+    await pool.query(
+      `UPDATE contracts
+       SET is_paused = $1,
+           pause_status_ledger = $2,
+           pause_trigger_tx_hash = CASE WHEN $1 THEN $3 ELSE NULL END,
+           pause_trigger_event_seq = CASE WHEN $1 THEN (
+             SELECT seq FROM events WHERE tx_hash = $3 AND contract_id = $4 ORDER BY seq DESC LIMIT 1
+           ) ELSE NULL END
+       WHERE id = $4`,
+      [isPaused, ledger, txHash, contractId],
+    );
   },
 
   async getCircuitBreakerStatus(contractId) {
     const { rows } = await pool.query(
-      `SELECT has_circuit_breaker, is_paused, pause_status_ledger FROM contracts WHERE id = $1`,
+      `SELECT has_circuit_breaker, is_paused, pause_status_ledger, pause_trigger_tx_hash, pause_trigger_event_seq
+       FROM contracts WHERE id = $1`,
       [contractId],
     );
-    return (
-      rows[0] ?? {
-        has_circuit_breaker: false,
-        is_paused: false,
-        pause_status_ledger: null,
-      }
-    );
+    const row = rows[0] ?? {
+      has_circuit_breaker: false,
+      is_paused: false,
+      pause_status_ledger: null,
+      pause_trigger_tx_hash: null,
+      pause_trigger_event_seq: null,
+    };
+    return {
+      ...row,
+      // Derived from the pause/unpause events the indexer has observed.
+      // "HALF-OPEN" is reserved for a future timer-based auto-reset — the
+      // detector only flips between these two states today.
+      status: row.is_paused ? "OPEN" : "CLOSED",
+      // The detector trips as soon as a single pause event is observed
+      // (no failure-count threshold is tracked yet).
+      trigger_threshold: row.has_circuit_breaker ? 1 : null,
+      // No automatic reset timer exists — recovery requires an explicit
+      // unpause/resume call, so this is always null today.
+      auto_reset_at: null,
+    };
   },
 
   async getMigrationStatus(contractId) {
@@ -857,6 +877,7 @@ export const db = {
   async upsertWasmBuildMetadata({
     wasm_hash,
     contract_id,
+    size_bytes,
     sdk_version,
     compiler,
     optimizer,
@@ -868,10 +889,11 @@ export const db = {
   }) {
     await pool.query(
       `INSERT INTO wasm_build_metadata
-         (wasm_hash, contract_id, sdk_version, compiler, optimizer, repository, commit, producers, ledger, tx_hash)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         (wasm_hash, contract_id, size_bytes, sdk_version, compiler, optimizer, repository, commit, producers, ledger, tx_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        ON CONFLICT (wasm_hash) DO UPDATE SET
          contract_id = COALESCE(EXCLUDED.contract_id, wasm_build_metadata.contract_id),
+         size_bytes  = COALESCE(EXCLUDED.size_bytes,  wasm_build_metadata.size_bytes),
          sdk_version = COALESCE(EXCLUDED.sdk_version, wasm_build_metadata.sdk_version),
          compiler    = COALESCE(EXCLUDED.compiler,    wasm_build_metadata.compiler),
          optimizer   = COALESCE(EXCLUDED.optimizer,   wasm_build_metadata.optimizer),
@@ -881,6 +903,7 @@ export const db = {
       [
         wasm_hash,
         contract_id ?? null,
+        size_bytes ?? null,
         sdk_version ?? null,
         compiler ?? null,
         optimizer ?? null,
@@ -939,6 +962,24 @@ export const db = {
     );
     return rows.map((r) => ({
       caller: r.caller,
+      callee: r.callee,
+      call_count: Number(r.call_count),
+    }));
+  },
+
+  /** top callee contracts invoked by a single contract, most-called first. */
+  async getContractCallGraph(contractId, limit = 10) {
+    const { rows } = await pool.query(
+      `SELECT s.contract_id AS callee, COUNT(*) AS call_count
+       FROM sub_invocations s
+       JOIN events e ON e.tx_hash = s.parent_tx_hash
+       WHERE e.contract_id = $1 AND s.contract_id <> $1
+       GROUP BY s.contract_id
+       ORDER BY call_count DESC
+       LIMIT $2`,
+      [contractId, limit],
+    );
+    return rows.map((r) => ({
       callee: r.callee,
       call_count: Number(r.call_count),
     }));
