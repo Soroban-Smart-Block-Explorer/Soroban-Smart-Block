@@ -294,9 +294,236 @@ export function buildDescription(fn, args, data, contractName) {
       const [admin, from, amount, token] = args;
       return `CLAWBACK: ${amount} ${token ?? ""} recovered from ${fmt(from)} by authority ${fmt(admin)} on ${contractName}`;
     }
+
+    // ── SEP-41 approve / allowance (issues #561) ──────────────────────────
+    case "approve":
+    case "set_allowance":
+    case "increase_allowance":
+    case "decrease_allowance": {
+      return buildAllowanceDescription(fn, args, data, contractName);
+    }
+
+    // ── NFT transfer / mint / burn (issue #562) ───────────────────────────
+    case "mint_nft":
+    case "burn_nft":
+    case "create":
+    case "list_nft": {
+      return buildNftDescription(fn, args, data, contractName);
+    }
+
+    // ── AMM liquidity (issue #563) ────────────────────────────────────────
+    case "add_liquidity":
+    case "provide_liquidity":
+    case "remove_liquidity":
+    case "withdraw_liquidity": {
+      return buildLiquidityDescription(fn, args, data, contractName);
+    }
+
     default:
+      // NFT transfer detection: transfer event that carries a token_id field
+      // (u64 / number) is treated as an NFT transfer rather than a fungible
+      // token transfer (issue #562 detection heuristic).
+      if (fn === "transfer") {
+        const [from, to, amount, token] = args;
+        const tokenId = args.find(
+          (a) => typeof a === "bigint" || (typeof a === "number" && Number.isInteger(a) && a >= 0)
+        );
+        if (tokenId !== undefined && tokenId !== amount) {
+          return buildNftDescription("transfer", args, data, contractName);
+        }
+        return `Address ${fmt(from)} transferred ${amount} ${token ?? ""} to ${fmt(to)} on ${contractName}`;
+      }
       return genericDescription(fn, args, data, contractName);
   }
+}
+
+// ── SEP-41 allowance helpers (issue #561) ─────────────────────────────────────
+
+/**
+ * Produces human-readable descriptions for SEP-41 approve/allowance events.
+ *
+ * Approve with amount > 0:
+ *   "GA… approved GB… to spend up to 500 USDC (expires ledger #N)"
+ *   "GA… approved GB… to spend up to 500 USDC (no expiry)"  (when expiration_ledger is 0/null)
+ * Revoke (amount === 0 or 0n):
+ *   "GA… revoked GB…'s allowance to spend USDC"
+ * increase_allowance:
+ *   "GA… increased GB…'s allowance by 100 USDC"
+ * decrease_allowance:
+ *   "GA… decreased GB…'s allowance by 100 USDC"
+ *
+ * Argument order follows the SEP-41 spec:
+ *   approve(from, spender, amount, expiration_ledger)
+ *   set_allowance(from, spender, amount, expiration_ledger)
+ *   increase_allowance(from, spender, amount)
+ *   decrease_allowance(from, spender, amount)
+ *
+ * @param {string} fn         Function name
+ * @param {any[]}  args       Decoded arguments (topics[1..] or data)
+ * @param {any}    _data      Raw decoded data (unused but kept for signature parity)
+ * @param {string} contractName  Display label for the contract / token symbol
+ */
+function buildAllowanceDescription(fn, args, _data, contractName) {
+  // Normalise: pull from data object if args arrived as a single object
+  let from, spender, amount, expirationLedger, token;
+
+  if (args.length === 1 && typeof args[0] === "object" && args[0] !== null) {
+    // Data packed into a map (scvMap → native object)
+    ({ from, spender, amount, expiration_ledger: expirationLedger, token } = args[0]);
+  } else {
+    [from, spender, amount, expirationLedger, token] = args;
+  }
+
+  // Token label: use explicit token arg, or fall back to the contract label
+  const tokenLabel = token ?? contractName;
+
+  const owner = fmt(from);
+  const spenderFmt = fmt(spender);
+
+  if (fn === "increase_allowance") {
+    return `${owner} increased ${spenderFmt}'s allowance by ${amount ?? "?"} ${tokenLabel}`;
+  }
+  if (fn === "decrease_allowance") {
+    return `${owner} decreased ${spenderFmt}'s allowance by ${amount ?? "?"} ${tokenLabel}`;
+  }
+
+  // approve / set_allowance
+  const isRevoke =
+    amount === 0 ||
+    amount === 0n ||
+    amount === "0" ||
+    (amount != null && Number(amount) === 0);
+
+  if (isRevoke) {
+    return `${owner} revoked ${spenderFmt}'s allowance to spend ${tokenLabel}`;
+  }
+
+  const expiry =
+    !expirationLedger || expirationLedger === 0 || expirationLedger === 0n
+      ? "no expiry"
+      : `expires ledger #${expirationLedger}`;
+
+  return `${owner} approved ${spenderFmt} to spend up to ${amount} ${tokenLabel} (${expiry})`;
+}
+
+// ── NFT helpers (issue #562) ──────────────────────────────────────────────────
+
+/**
+ * Produces human-readable descriptions for NFT events.
+ *
+ * transfer (NFT):  "GA… transferred NFT #1234 (collection: Stellar Punks) to GB…"
+ * mint_nft:        "GA… minted NFT #1234 from collection CTEST… at ledger #N"
+ * burn_nft:        "GA… burned NFT #1234"
+ * create:          "GA… created NFT #1234 on COLLECTION"
+ * list_nft:        "GA… listed NFT #1234 for AMOUNT on COLLECTION"
+ *
+ * Arg order heuristic:
+ *   transfer(from, to, token_id, collection?)
+ *   mint_nft(to, token_id, ledger?, collection?)
+ *   burn_nft(from, token_id)
+ *   create(from, token_id, collection?)
+ *   list_nft(from, token_id, amount?, collection?)
+ */
+function buildNftDescription(fn, args, _data, contractName) {
+  // Helper to locate a token_id: a u64-range integer / bigint that is NOT a
+  // Stellar address (addresses are 56-char strings starting with G/C).
+  const findTokenId = (arr) =>
+    arr.find(
+      (a) =>
+        (typeof a === "bigint" && a >= 0n) ||
+        (typeof a === "number" && Number.isInteger(a) && a >= 0 && a < Number.MAX_SAFE_INTEGER)
+    );
+
+  switch (fn) {
+    case "transfer": {
+      const [from, to] = args;
+      const tokenId = findTokenId(args.slice(2)) ?? findTokenId(args);
+      const collection = args.find((a) => typeof a === "string" && a.length > 10 && a !== from && a !== to);
+      const collectionStr = collection ? ` (collection: ${collection})` : "";
+      return `${fmt(from)} transferred NFT #${tokenId ?? "?"}${collectionStr} to ${fmt(to)}`;
+    }
+    case "mint_nft": {
+      const [to] = args;
+      const tokenId = findTokenId(args.slice(1));
+      const ledger = args.find((a) => typeof a === "number" && a > 1_000_000);
+      const collection = args.find(
+        (a) => typeof a === "string" && a.length > 10 && a !== to && a !== String(ledger)
+      );
+      const ledgerStr = ledger ? ` at ledger #${ledger}` : "";
+      const collStr = collection ? ` from collection ${fmt(collection)}` : ` on ${contractName}`;
+      return `${fmt(to)} minted NFT #${tokenId ?? "?"}${collStr}${ledgerStr}`;
+    }
+    case "burn_nft": {
+      const [from] = args;
+      const tokenId = findTokenId(args.slice(1));
+      return `${fmt(from)} burned NFT #${tokenId ?? "?"}`;
+    }
+    case "create": {
+      const [from] = args;
+      const tokenId = findTokenId(args.slice(1));
+      return `${fmt(from)} created NFT #${tokenId ?? "?"} on ${contractName}`;
+    }
+    case "list_nft": {
+      const [from] = args;
+      const tokenId = findTokenId(args.slice(1));
+      const amount = args.find((a) => (typeof a === "bigint" || typeof a === "number") && a !== tokenId);
+      const amtStr = amount != null ? ` for ${amount}` : "";
+      return `${fmt(from)} listed NFT #${tokenId ?? "?"}${amtStr} on ${contractName}`;
+    }
+    default:
+      return genericDescription(fn, args, _data, contractName);
+  }
+}
+
+// ── AMM liquidity helpers (issue #563) ───────────────────────────────────────
+
+/**
+ * Produces human-readable descriptions for AMM liquidity events.
+ *
+ * add_liquidity / provide_liquidity:
+ *   "GA… added 100 XLM + 50 USDC to XLM/USDC pool (received 70.7 LP tokens)"
+ *   (LP token portion omitted if not present in the event)
+ *
+ * remove_liquidity / withdraw_liquidity:
+ *   "GA… removed 70.7 LP tokens from XLM/USDC pool (received 100 XLM + 49.8 USDC)"
+ *
+ * Arg order heuristic (AMM events are not standardised, so we detect by type):
+ *   provide: (from, token_a, amount_a, token_b, amount_b, lp_amount?)
+ *   remove:  (from, lp_amount, token_a, amount_a, token_b, amount_b)
+ */
+function buildLiquidityDescription(fn, args, _data, contractName) {
+  const isAdd = fn === "add_liquidity" || fn === "provide_liquidity";
+
+  // Find the provider address (first G/C address)
+  const from = args.find((a) => typeof a === "string" && (a.startsWith("G") || a.startsWith("C")));
+
+  // Collect all string tokens and numeric amounts in order
+  const tokens = args.filter(
+    (a) => typeof a === "string" && a !== from && a.length >= 3 && a.length <= 12
+  );
+  const amounts = args.filter(
+    (a) => (typeof a === "bigint" && a >= 0n) || (typeof a === "number" && a >= 0)
+  );
+
+  const tokenA = tokens[0] ?? "token_a";
+  const tokenB = tokens[1] ?? "token_b";
+  const amountA = amounts[0] ?? "?";
+  const amountB = amounts[1] ?? "?";
+  const lpAmount = amounts[2]; // optional third amount = LP tokens
+
+  const poolLabel = `${tokenA}/${tokenB} pool`;
+  const provider = fmt(from);
+
+  if (isAdd) {
+    const lpStr = lpAmount != null ? ` (received ${lpAmount} LP tokens)` : "";
+    return `${provider} added ${amountA} ${tokenA} + ${amountB} ${tokenB} to ${poolLabel}${lpStr}`;
+  }
+
+  // remove / withdraw: LP tokens are the first amount, received tokens follow
+  const lpAmt = amounts[0] ?? "?";
+  const recvA = amounts[1] ?? "?";
+  const recvB = amounts[2] ?? "?";
+  return `${provider} removed ${lpAmt} LP tokens from ${poolLabel} (received ${recvA} ${tokenA} + ${recvB} ${tokenB})`;
 }
 
 function genericDescription(fn, args, data, contractId) {
@@ -314,4 +541,46 @@ function fmtXlm(amount) {
   // SAC amounts are in stroops (1 XLM = 10_000_000 stroops)
   const n = Number(amount);
   return isNaN(n) ? String(amount) : (n / 1e7).toLocaleString(undefined, { maximumFractionDigits: 7 });
+}
+
+// ── Batch decoder (issue #564) ────────────────────────────────────────────────
+
+/**
+ * Given an array of decoded event objects that share the same tx_hash, produce
+ * an aggregate human-readable description for the batch.
+ *
+ * Rules:
+ *  • Single-event arrays → returns null (caller leaves batch_description NULL)
+ *  • Two events          → "GA… {verb1} then {verb2} in one transaction"
+ *  • Three or more       → "GA… performed {n} operations in one transaction:
+ *                           {verb1}; {verb2}; …"
+ *
+ * The "from" address is taken from the first event whose description starts
+ * with a recognisable address pattern (GAAA…).
+ *
+ * @param {Array<{description: string, function: string}>} events
+ *   Decoded events sorted by sequence / topic order within the transaction.
+ * @returns {string|null}  Aggregate description, or null for single-event txs.
+ */
+export function batchDescription(events) {
+  if (!Array.isArray(events) || events.length <= 1) return null;
+
+  // Extract a short verb from each event description.
+  // e.g. "GAAAAA…AAAA approved …" → "approved …" (strip leading address token)
+  const verbs = events.map((ev) => {
+    const desc = ev.description ?? ev.function ?? "unknown operation";
+    // Strip a leading "Address GAAA…ZZZZ " or "GAAA…ZZZZ " prefix
+    return desc.replace(/^(Address\s+)?[GC][A-Z0-9]{5}…[A-Z0-9]{4}\s+/, "").trim();
+  });
+
+  // Try to extract the initiating address from the first event
+  const addrMatch = (events[0].description ?? "").match(/([GC][A-Z0-9]{5}…[A-Z0-9]{4})/);
+  const actor = addrMatch ? addrMatch[1] : "An address";
+
+  if (events.length === 2) {
+    return `${actor} ${verbs[0]} then ${verbs[1]} in one transaction`;
+  }
+
+  const verbList = verbs.join("; ");
+  return `${actor} performed ${events.length} operations in one transaction: ${verbList}`;
 }
