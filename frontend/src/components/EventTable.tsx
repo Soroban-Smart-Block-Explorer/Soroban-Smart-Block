@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import type { DecodedEvent } from "../api";
 import FiatValue from "./FiatValue";
+import AssetLogo from "./AssetLogo";
 import { getGasAlert } from "./GasLimitAlert";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
 
@@ -61,11 +62,31 @@ function parseTransfer(description: string): { amount: number; symbol: string } 
   return isNaN(amount) ? null : { amount, symbol: m[2].toUpperCase() };
 }
 
+/** Extract the destination asset code/issuer from a classic payment's raw_data JSON, if present. */
+function parseClassicAsset(ev: DecodedEvent): { code: string; issuer: string | null } | null {
+  if (ev.type !== "classic" || !ev.raw_data) return null;
+  try {
+    const op = JSON.parse(ev.raw_data);
+    if (!op.asset_code) return null;
+    return { code: op.asset_code, issuer: op.asset_issuer ?? null };
+  } catch {
+    return null;
+  }
+}
+
 interface Props {
   events: DecodedEvent[];
 }
 
-function FunctionBadge({ fn }: { fn: string }) {
+function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
+  if (isClassic) {
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span className="badge classic">Classic</span>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>{fn}</span>
+      </span>
+    );
+  }
   if (fn === "wrap_native") {
     return (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -196,14 +217,23 @@ export default function EventTable({ events }: Props) {
           </tr>
         </thead>
         <tbody>
-          {events.map((ev) => (
-            <tr key={ev.seq} style={{ borderBottom: "1px solid var(--border)" }}>
+          {events.map((ev) => {
+            const isClassic = ev.type === "classic";
+            const classicAsset = parseClassicAsset(ev);
+            return (
+            <tr
+              key={ev.seq}
+              style={{
+                borderBottom: "1px solid var(--border)",
+                background: isClassic ? "rgba(139,148,158,0.06)" : undefined,
+              }}
+            >
               <td style={td}>
                 <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
               </td>
               <td style={td}>{ev.ledger.toLocaleString()}</td>
               <td style={td}>
-                <FunctionBadge fn={ev.function} />
+                <FunctionBadge fn={ev.function} isClassic={isClassic} />
               </td>
               <td
                 style={{
@@ -240,6 +270,7 @@ export default function EventTable({ events }: Props) {
                 {ev.ttl_extension && <TTLExtensionBadge ext={ev.ttl_extension} />}
                 {ev.factory_deployment && <FactoryDeploymentBadge deployment={ev.factory_deployment} />}
                 {ev.sac_side_effect && <SacSideEffectBadge kind={ev.sac_side_effect} />}
+                {classicAsset && <AssetLogo code={classicAsset.code} issuer={classicAsset.issuer} />}
                 <LinkedDescription text={ev.description} />
                 {ev.function === "transfer" &&
                   (() => {
@@ -264,7 +295,8 @@ export default function EventTable({ events }: Props) {
                   })()}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>

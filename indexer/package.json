@@ -8,7 +8,8 @@
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand test/api/*.test.js test/reorgWorker.test.js",
     "test:decoder": "node --test tests/decoder.test.js",
     "test:scval": "node --test tests/scval.test.js",
-    "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/decoder.test.js tests/scval.test.js"
+    "test:classic": "node --test tests/decoderClassic.test.js tests/horizonClient.test.js",
+    "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/decoder.test.js tests/scval.test.js tests/decoderClassic.test.js tests/horizonClient.test.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",

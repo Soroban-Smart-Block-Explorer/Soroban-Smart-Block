@@ -45,6 +45,7 @@ import { formatAmount } from "./formatAmount.js";
 import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
+import { resolveAsset } from "./horizonClient.js";
 
 function requestIdMiddleware(req, _res, next) {
   req.id = req.headers["x-request-id"] || randomUUID();
@@ -889,6 +890,34 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
       const events = await db.getWalletEvents(address);
       res.json({ events });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/assets/:issuer/:code — classic asset name + logo, resolved from the
+  // issuer's stellar.toml and cached in the assets table (#546)
+  app.get("/api/assets/:issuer/:code", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      if (!/^G[A-Z2-7]{55}$/.test(issuer)) {
+        return res.status(400).json({ error: "Invalid asset issuer format" });
+      }
+
+      let asset = await db.getAsset(code, issuer);
+      if (!asset) {
+        const resolved = await resolveAsset(code, issuer).catch(() => null);
+        asset = {
+          code,
+          issuer,
+          name: resolved?.name ?? null,
+          domain: resolved?.domain ?? null,
+          logo_url: resolved?.logo_url ?? null,
+        };
+        await db.upsertAsset(asset).catch(() => {});
+      }
+
+      res.json(asset);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

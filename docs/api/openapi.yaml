@@ -473,6 +473,48 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/assets/{issuer}/{code}:
+    get:
+      summary: Resolve a classic asset's display name and logo
+      description: >-
+        Returns the asset's name and logo URL, resolved from the issuer's
+        stellar.toml and cached in the assets table. Resolves on first
+        request when not yet cached.
+      parameters:
+        - name: issuer
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+          description: Strkey account ID of the asset issuer
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "USDC"
+          description: Asset code
+      responses:
+        "200":
+          description: Resolved asset metadata (name/domain/logo_url are null when unresolved)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          description: Invalid issuer format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/search:
     get:
       summary: Search contracts, events, wallets, and suggestions
@@ -862,6 +904,34 @@ components:
         is_clawback:
           type: boolean
           example: false
+        type:
+          type: string
+          enum: [soroban, classic]
+          example: "soroban"
+          description: Event category — "classic" for Horizon payment/path-payment operations, "soroban" otherwise.
+
+    Asset:
+      type: object
+      required: [code, issuer]
+      properties:
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        name:
+          type: string
+          nullable: true
+          example: "Centre Consortium"
+        domain:
+          type: string
+          nullable: true
+          example: "centre.io"
+        logo_url:
+          type: string
+          nullable: true
+          example: "https://centre.io/logo.png"
 
     CursorPaginatedEvents:
       type: object
