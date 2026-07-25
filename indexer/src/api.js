@@ -14,6 +14,7 @@ import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTr
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus } from "./rpcMultiNode.js";
+import { resolveAsset } from "./horizonClient.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
 import { geoIpRateLimiter } from "./rateLimit/geoIpLimiter.js";
@@ -944,6 +945,21 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/assets/:issuer/:code — classic Stellar asset metadata via Horizon
+  app.get(
+    "/api/assets/:issuer/:code",
+    makeCache("asset_metadata", (req) => `assets:${req.params.issuer}:${req.params.code}`),
+    async (req, res) => {
+      try {
+        const asset = await resolveAsset(req.params.issuer, req.params.code);
+        if (!asset) return res.status(404).json({ error: "Asset not found" });
+        res.json(asset);
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
   // ── cursor-based pagination endpoint ────────────────────────────
   // GET /api/v1/events?contract=&fn=&type=&after=&limit=
   // `after` is the opaque seq cursor returned as `next_cursor` in the previous page.
@@ -1139,6 +1155,39 @@ export function createApi({ logDestination, dbOverride } = {}) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Contract Stats ────────────────────────────────────────────
+
+  // GET /api/contracts/:id/stats — event/caller counts + 30-day activity sparkline
+  app.get(
+    "/api/contracts/:id/stats",
+    makeCache("stats", (req) => `contracts:stats:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const [stats, eventsPerDay] = await Promise.all([
+          db.getContractStats(req.params.id),
+          db.getContractEventsByDay(req.params.id, 30),
+        ]);
+        res.json({ ...stats, events_per_day: eventsPerDay });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
+  // GET /api/contracts/:id/storage-tiers — write counts by storage durability tier
+  app.get(
+    "/api/contracts/:id/storage-tiers",
+    makeCache("stats", (req) => `contracts:storage-tiers:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const tiers = await db.getContractStorageTiers(req.params.id);
+        res.json(tiers);
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
 
   // ── Live TTL status for contract instance, code, and persistent storage ──
   // GET /api/contracts/:id/ttl

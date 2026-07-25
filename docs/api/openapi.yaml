@@ -347,6 +347,104 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/stats:
+    get:
+      summary: Get contract event and caller statistics
+      description: |
+        Returns aggregate event counts, unique caller counts, and a 30-day daily
+        activity series for a contract. Cached for 5 minutes.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+          description: Contract ID
+      responses:
+        "200":
+          description: Contract statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractStats"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/storage-tiers:
+    get:
+      summary: Get storage-tier write breakdown for a contract
+      description: |
+        Returns write counts grouped by storage durability tier (temporary,
+        persistent, instance) aggregated across all indexed events for the
+        contract.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+          description: Contract ID
+      responses:
+        "200":
+          description: Storage-tier write counts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StorageTierCounts"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/assets/{issuer}/{code}:
+    get:
+      summary: Resolve classic Stellar asset metadata
+      description: |
+        Resolves a classic (non-Soroban) Stellar asset via the Horizon API.
+        Results are cached for 24 hours since asset metadata rarely changes.
+      parameters:
+        - name: issuer
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "GA22K667OGPC3R32NRJTNQG4KWT2OFGHNNGZ2JQMSIGLT7AFHVIOMJ43"
+          description: Stellar account ID that issued the asset
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "USDC"
+          description: Asset code
+      responses:
+        "200":
+          description: Resolved asset metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetMetadata"
+        "404":
+          description: Asset not found for the given issuer/code pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/admin/alerts/{condition}/resolve:
     post:
       summary: Resolve an active alert condition
@@ -1040,3 +1138,73 @@ components:
               type:
                 type: string
                 example: "address"
+
+    ContractStats:
+      type: object
+      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day]
+      properties:
+        total_events:
+          type: integer
+          example: 1204
+        unique_callers:
+          type: integer
+          example: 87
+        first_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1000001
+        last_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1050320
+        events_per_day:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyEventCount"
+
+    DailyEventCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-07-25"
+        count:
+          type: integer
+          example: 42
+
+    StorageTierCounts:
+      type: object
+      required: [temporary, persistent, instance]
+      properties:
+        temporary:
+          type: integer
+          example: 30
+        persistent:
+          type: integer
+          example: 50
+        instance:
+          type: integer
+          example: 3
+
+    AssetMetadata:
+      type: object
+      required: [name, code, issuer, decimals, domain]
+      properties:
+        name:
+          type: string
+          example: "USDC"
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA22K667OGPC3R32NRJTNQG4KWT2OFGHNNGZ2JQMSIGLT7AFHVIOMJ43"
+        decimals:
+          type: integer
+          example: 7
+        domain:
+          type: string
+          nullable: true
+          example: "centre.io"

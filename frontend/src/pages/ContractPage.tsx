@@ -23,6 +23,8 @@ import RwaMetadataDisplay from "../components/RwaMetadataDisplay";
 import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
+import InvocationFrequencyChart from "../components/InvocationFrequencyChart";
+import StorageTierStackedBar from "../components/StorageTierStackedBar";
 
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff";
 
@@ -392,6 +394,12 @@ export default function ContractPage() {
 
           {/* Live TTL expiration progress bars */}
           <TTLProgressBar contractId={id} />
+
+          {/* Invocation frequency (last 30 days) */}
+          <InvocationFrequencyChart contractId={id} />
+
+          {/* Storage writes by durability tier */}
+          <StorageTierStackedBar contractId={id} />
 
           {functions.length > 0 ? (
             <div className="card">

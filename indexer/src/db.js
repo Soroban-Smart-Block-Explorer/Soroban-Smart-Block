@@ -852,6 +852,86 @@ export const db = {
     return rows;
   },
 
+  // ── Contract stats (#541) ────────────────────────────────────────────────────
+
+  /**
+   * Aggregate event/caller counts for a contract, backing GET /api/contracts/:id/stats.
+   * Relies on idx_events_contract_caller (migration 010) to stay fast at scale.
+   * @param {string} contractId
+   * @returns {Promise<{ total_events: number, unique_callers: number, first_seen_ledger: number|null, last_seen_ledger: number|null }>}
+   */
+  async getContractStats(contractId) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total_events,
+              COUNT(DISTINCT caller_address) AS unique_callers,
+              MIN(ledger) AS first_seen_ledger,
+              MAX(ledger) AS last_seen_ledger
+       FROM events WHERE contract_id = $1`,
+      [contractId],
+    );
+    const row = rows[0];
+    return {
+      total_events: Number(row.total_events),
+      unique_callers: Number(row.unique_callers),
+      first_seen_ledger: row.first_seen_ledger != null ? Number(row.first_seen_ledger) : null,
+      last_seen_ledger: row.last_seen_ledger != null ? Number(row.last_seen_ledger) : null,
+    };
+  },
+
+  /**
+   * Daily event counts for a contract over the trailing `days` days (including
+   * today), oldest first. Days with no events are zero-filled so callers get a
+   * fixed-length series to render a sparkline/bar chart from.
+   * @param {string} contractId
+   * @param {number} [days=30]
+   * @returns {Promise<{ date: string, count: number }[]>}
+   */
+  async getContractEventsByDay(contractId, days = 30) {
+    const safeDays = Math.min(Math.max(Number(days) || 30, 1), 365);
+    const { rows } = await pool.query(
+      `SELECT d::date AS date, COUNT(e.seq)::INT AS count
+       FROM generate_series(CURRENT_DATE - ($2::int - 1), CURRENT_DATE, interval '1 day') AS d
+       LEFT JOIN events e
+         ON e.contract_id = $1
+         AND e.created_at >= d
+         AND e.created_at < d + interval '1 day'
+       GROUP BY d
+       ORDER BY d ASC`,
+      [contractId, safeDays],
+    );
+    return rows.map((r) => ({
+      date: r.date.toISOString().slice(0, 10),
+      count: Number(r.count),
+    }));
+  },
+
+  // ── Storage tier breakdown (#543) ────────────────────────────────────────────
+
+  /**
+   * Aggregate storage-tier write counts for a contract from the per-event
+   * storage_tiers JSONB column (populated by storageTierClassifier.js).
+   * Backs GET /api/contracts/:id/storage-tiers.
+   * @param {string} contractId
+   * @returns {Promise<{ temporary: number, persistent: number, instance: number }>}
+   */
+  async getContractStorageTiers(contractId) {
+    const { rows } = await pool.query(
+      `SELECT
+         COALESCE(SUM(jsonb_array_length(COALESCE(storage_tiers->'temporary',  '[]'::jsonb))), 0) AS temporary,
+         COALESCE(SUM(jsonb_array_length(COALESCE(storage_tiers->'persistent', '[]'::jsonb))), 0) AS persistent,
+         COALESCE(SUM(jsonb_array_length(COALESCE(storage_tiers->'instance',   '[]'::jsonb))), 0) AS instance
+       FROM events
+       WHERE contract_id = $1 AND storage_tiers IS NOT NULL`,
+      [contractId],
+    );
+    const row = rows[0];
+    return {
+      temporary: Number(row.temporary),
+      persistent: Number(row.persistent),
+      instance: Number(row.instance),
+    };
+  },
+
   // ── WASM build metadata ────────────────────────────────────────────────────
 
   async upsertWasmBuildMetadata({

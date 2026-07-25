@@ -325,6 +325,28 @@ export interface ContractTTL {
   code: { live_until_ledger: number | null };
 }
 
+// Daily event count entry (contract stats sparkline / bar chart)
+export interface DailyEventCount {
+  date: string; // YYYY-MM-DD
+  count: number;
+}
+
+// Contract event/caller statistics — GET /api/contracts/:id/stats
+export interface ContractStats {
+  total_events: number;
+  unique_callers: number;
+  first_seen_ledger: number | null;
+  last_seen_ledger: number | null;
+  events_per_day: DailyEventCount[];
+}
+
+// Storage-tier write counts — GET /api/contracts/:id/storage-tiers
+export interface StorageTierCounts {
+  temporary: number;
+  persistent: number;
+  instance: number;
+}
+
 export interface CircuitBreakerStatus {
   has_circuit_breaker: boolean;
   is_paused: boolean;
@@ -507,6 +529,12 @@ export const api = {
 
   // live TTL status (instance + code expiration ledgers)
   contractTTL: (id: string) => get<ContractTTL>(`/contracts/${id}/ttl`),
+
+  // event/caller stats + 30-day activity series
+  contractStats: (id: string) => get<ContractStats>(`/contracts/${id}/stats`),
+
+  // storage-tier write breakdown
+  contractStorageTiers: (id: string) => get<StorageTierCounts>(`/contracts/${id}/storage-tiers`),
 
   // state-diff timeline
   stateDiffs: (id: string, key?: string) => {
