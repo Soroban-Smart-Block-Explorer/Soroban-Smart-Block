@@ -121,6 +121,13 @@ export interface DecodedEvent {
   sac_side_effect?: "account_created" | "trustline_opened";
   // Factory deployment trace
   factory_deployment?: FactoryDeploymentTree;
+  // #566: Failed transaction tracking
+  is_failed?: boolean;
+  failure_reason?: string | null;
+  // #565: Decoded flag (false when no ABI matched)
+  decoded?: boolean;
+  // Batch decoder: aggregate description for multi-event transactions
+  batch_description?: string | null;
 }
 
 export interface SourceFile {

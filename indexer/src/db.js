@@ -86,9 +86,10 @@ export const db = {
    *           after_seq?: number, limit?: number }} opts
    *   after_seq — the `seq` of the last event on the previous page (opaque cursor).
    *               Omit (or pass 0) for the first page.
+   * @param {boolean} [failed]  Filter by failure status (#566)
    * @returns {{ data: object[], next_cursor: number|null }}
    */
-  async getEventsCursor({ contract, fn, type, after_seq = 0, limit = 25 } = {}) {
+  async getEventsCursor({ contract, fn, type, after_seq = 0, limit = 25, failed } = {}) {
     const conditions = [];
     const params = [];
 
@@ -105,6 +106,12 @@ export const db = {
     }
     if (type === "classic") {
       conditions.push(`(contract_id IS NULL OR contract_id = '')`);
+    }
+    // #566: filter failed events
+    if (failed === true) {
+      conditions.push(`is_failed = TRUE`);
+    } else if (failed === false) {
+      conditions.push(`is_failed = FALSE`);
     }
 
     // Keyset: fetch rows with seq < after_seq (descending) or all rows for first page
@@ -134,8 +141,9 @@ export const db = {
       `INSERT INTO events
          (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data,
           cpu_instructions, mem_bytes, fee_charged, is_high_bloat_risk, upgrade_info, storage_tiers, is_clawback,
-          footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls, abi_version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+          footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls, abi_version,
+          is_failed, failure_reason, batch_description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
        ON CONFLICT DO NOTHING`,
       [
         ev.contract_id,
@@ -158,7 +166,22 @@ export const db = {
         ev.archival_info ? JSON.stringify(ev.archival_info) : null,
         ev.zk_host_calls ? JSON.stringify(ev.zk_host_calls) : null,
         ev.abi_version ?? 0,
+        ev.is_failed ?? false,
+        ev.failure_reason ?? null,
+        ev.batch_description ?? null,
       ],
+    );
+  },
+
+  /**
+   * Update the batch_description for a single event (the first in a multi-event tx).
+   * @param {number} seq         Event sequence number
+   * @param {string} description Aggregate batch description
+   */
+  async upsertBatchDescription(seq, description) {
+    await pool.query(
+      `UPDATE events SET batch_description = $1 WHERE seq = $2 AND batch_description IS NULL`,
+      [description, seq],
     );
   },
 

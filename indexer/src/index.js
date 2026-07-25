@@ -129,7 +129,7 @@ export async function loadTransactionContext(
     },
   } = {},
 ) {
-  const context = { feeBump: null, archivalInfo: null };
+  const context = { feeBump: null, archivalInfo: null, failureReason: null };
   if (!txHash) return context;
 
   try {
@@ -140,6 +140,15 @@ export async function loadTransactionContext(
       if (restore.isRestoreOp) context.archivalInfo = restore;
     }
 
+    // #566: Extract failure reason for failed transactions
+    if (txResult?.status === "FAILED") {
+      try {
+        context.failureReason = await extractFailure(txResult);
+      } catch {
+        /* non-fatal */
+      }
+    }
+
     try {
       const status =
         txResult?.status === "SUCCESS" ? "success" : txResult?.status === "FAILED" ? "failed" : "pending";
@@ -147,7 +156,7 @@ export async function loadTransactionContext(
         tx_hash: txHash,
         status,
         ledger: txResult?.ledger ?? null,
-        error: await extractFailure(txResult),
+        error: context.failureReason,
       });
     } catch {
       /* non-fatal transaction-status enrichment */
@@ -171,9 +180,9 @@ export async function loadTransactionContext(
  * @returns {Promise<object>} the decoded event that was persisted
  */
 export async function processSingleEvent(rawSorobanEvent, context = undefined) {
-  const { feeBump, archivalInfo } = context ?? (await loadTransactionContext(rawSorobanEvent.txHash));
+  const { feeBump, archivalInfo, failureReason } = context ?? (await loadTransactionContext(rawSorobanEvent.txHash));
   const decodeStart = Date.now();
-  const decoded = await decode(rawSorobanEvent);
+  const decoded = await decode(rawSorobanEvent, { failureReason });
   const contractMeta = await db.getContractMeta(rawSorobanEvent.contractId).catch(() => null);
   decoded.abi_version = Number(contractMeta?.abi_version ?? 0);
   decodeLatency.observe(Date.now() - decodeStart);
@@ -195,6 +204,11 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   decoded.storage_tiers = classifyStorageWrites(rawSorobanEvent);
   decoded.fee_bump = feeBump;
   decoded.archival_info = archivalInfo;
+  // #566: Persist failure reason for failed transactions
+  if (failureReason) {
+    decoded.is_failed = true;
+    decoded.failure_reason = failureReason;
+  }
   await db.upsertEventValidated(decoded);
 
   // Persist per-key state diffs for the timeline.
@@ -224,6 +238,32 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
 
   console.log(`[${rawSorobanEvent.ledger}] ${decoded.function}: ${decoded.description}`);
   return decoded;
+}
+
+/**
+ * Build an aggregate description for a batch of events sharing the same tx_hash.
+ * Example: "GA… approved USDC spend then swapped 100 USDC → 98 XLM in one transaction"
+ *
+ * @param {object[]} events  Array of decoded events for the same tx_hash
+ * @returns {string|null}    Aggregate description, or null if ≤1 event
+ */
+export function buildBatchDescription(events) {
+  if (!events || events.length <= 1) return null;
+
+  const descriptions = events.map((ev) => ev.description).filter(Boolean);
+  if (descriptions.length === 0) return null;
+
+  // Shorten contract addresses in descriptions for readability
+  const shortened = descriptions.map((d) => {
+    return d.replace(/\b[A-Z][A-Z0-9]{54,}\b/g, (addr) => {
+      if (addr.length <= 12) return addr;
+      return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+    });
+  });
+
+  // Join with " then " for a readable sequence
+  const combined = shortened.join(" then ");
+  return `${combined} in one transaction`;
 }
 
 /**
@@ -262,6 +302,27 @@ async function indexLedger(ledger) {
 
     for (const ev of res.events) {
       await processSingleEvent(ev, transactionContextCache.get(ev.txHash));
+    }
+
+    // Batch decoder: group events by tx_hash and build aggregate descriptions
+    const eventsByTx = new Map();
+    for (const ev of res.events) {
+      if (!ev.txHash) continue;
+      if (!eventsByTx.has(ev.txHash)) eventsByTx.set(ev.txHash, []);
+      eventsByTx.get(ev.txHash).push(ev);
+    }
+    for (const [txHash, txEvents] of eventsByTx) {
+      if (txEvents.length <= 1) continue;
+      const batchDesc = buildBatchDescription(
+        txEvents.map((e) => ({ description: e.description ?? e.function })),
+      );
+      if (batchDesc) {
+        // Update the first event in the batch with the aggregate description
+        const firstSeq = txEvents[0].seq;
+        if (firstSeq) {
+          db.upsertBatchDescription(firstSeq, batchDesc).catch(() => {});
+        }
+      }
     }
 
     // Scan transactions for UploadContractWasm operations (non-blocking)

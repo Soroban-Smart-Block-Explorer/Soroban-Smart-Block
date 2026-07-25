@@ -46,9 +46,11 @@ describe("decoder — SEP-41 transfer description", () => {
 
   it("description contains the amount", () => {
     const desc = buildDescription("transfer", [FROM, TO, AMOUNT_I128, TOKEN], null, CONTRACT_LABEL);
+    // #568: amount is formatted using 7-decimal token formatting by default
+    // 100000000 raw → "10" displayed (100000000 / 10^7 = 10)
     assert.ok(
-      desc.includes(String(AMOUNT_I128)),
-      `expected amount "${AMOUNT_I128}" in "${desc}"`
+      desc.includes("10"),
+      `expected formatted amount in "${desc}"`
     );
   });
 
