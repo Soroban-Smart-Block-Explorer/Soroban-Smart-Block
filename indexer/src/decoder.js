@@ -294,6 +294,23 @@ export function buildDescription(fn, args, data, contractName) {
       const [admin, from, amount, token] = args;
       return `CLAWBACK: ${amount} ${token ?? ""} recovered from ${fmt(from)} by authority ${fmt(admin)} on ${contractName}`;
     }
+    case "stake":
+    case "lock":
+    case "deposit_stake": {
+      const [addr, amount, duration] = args;
+      if (duration != null && duration !== 0) {
+        return `${fmt(addr)} staked ${fmtXlm(amount)} XLM for ${duration} days on ${contractName}`;
+      }
+      return `${fmt(addr)} staked ${fmtXlm(amount)} XLM on ${contractName}`;
+    }
+    case "unstake":
+    case "unlock": {
+      const [addr, amount, rewards] = args;
+      if (rewards != null && rewards !== 0) {
+        return `${fmt(addr)} unstaked ${fmtXlm(amount)} XLM + ${fmtXlm(rewards)} XLM rewards on ${contractName}`;
+      }
+      return `${fmt(addr)} unstaked ${fmtXlm(amount)} XLM on ${contractName}`;
+    }
     default:
       return genericDescription(fn, args, data, contractName);
   }
