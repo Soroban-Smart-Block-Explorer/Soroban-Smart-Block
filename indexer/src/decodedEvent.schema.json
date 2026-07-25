@@ -93,6 +93,22 @@
     "abi_version": {
       "type": "integer",
       "minimum": 0
+    },
+    "decoded": {
+      "type": "boolean",
+      "description": "Whether the event was successfully decoded by a known ABI."
+    },
+    "is_failed": {
+      "type": "boolean",
+      "description": "Whether the originating transaction failed."
+    },
+    "failure_reason": {
+      "type": ["string", "null"],
+      "description": "Human-readable failure reason from the failed transaction."
+    },
+    "batch_description": {
+      "type": ["string", "null"],
+      "description": "Aggregate description when multiple events share the same tx_hash."
     }
   }
 }

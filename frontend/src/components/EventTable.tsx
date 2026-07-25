@@ -171,6 +171,34 @@ function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<Decode
   );
 }
 
+/** Badge for multi-event transactions (#batch decoder). */
+function BatchTxBadge({ txHash }: { txHash: string }) {
+  return (
+    <Link
+      to={`/tx/${txHash}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 8px",
+        background: "rgba(16,185,129,0.12)",
+        border: "1px solid #10b981",
+        borderRadius: 4,
+        fontSize: 11,
+        color: "#34d399",
+        whiteSpace: "nowrap",
+        marginRight: 6,
+        verticalAlign: "middle",
+        fontWeight: 600,
+        textDecoration: "none",
+      }}
+      title={`Multi-event transaction: ${txHash}`}
+    >
+      ⊞ Batch tx
+    </Link>
+  );
+}
+
 export default function EventTable({ events }: Props) {
   if (!events.length)
     return (
@@ -240,6 +268,7 @@ export default function EventTable({ events }: Props) {
                 {ev.ttl_extension && <TTLExtensionBadge ext={ev.ttl_extension} />}
                 {ev.factory_deployment && <FactoryDeploymentBadge deployment={ev.factory_deployment} />}
                 {ev.sac_side_effect && <SacSideEffectBadge kind={ev.sac_side_effect} />}
+                {ev.batch_description && ev.tx_hash && <BatchTxBadge txHash={ev.tx_hash} />}
                 <LinkedDescription text={ev.description} />
                 {ev.function === "transfer" &&
                   (() => {

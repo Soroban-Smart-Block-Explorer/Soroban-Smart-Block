@@ -6,6 +6,9 @@ import { decodeRwaEvent } from "./rwaDecoder.js";
 import { parseHeuristic } from "./heuristicParser.js";
 import { parseTTLHostFunction, formatTTLExtension } from "./ttlExtensionParser.js";
 import { parseZkHostFunctions, computeZkCostDelta } from "./zkHostFunctions.js";
+import { formatAmount } from "./formatAmount.js";
+import { fetchDecimals } from "./sep41Metadata.js";
+import { loadPlugins, runPlugins } from "./decoderPlugins.js";
 
 // Result codes that indicate the block compute budget was exhausted.
 const RESOURCE_LIMIT_CODES = new Set([
@@ -13,6 +16,15 @@ const RESOURCE_LIMIT_CODES = new Set([
   "txResourceLimitExceeded",
   "RESOURCE_LIMIT_EXCEEDED",
 ]);
+
+/**
+ * In-memory cache mapping contractId → decimals.
+ * Populated lazily on first encounter of each SEP-41 token contract
+ * via an on-chain decimals() call. The RPC call is only made once per
+ * contract across multiple events (satisfies #568 acceptance criteria).
+ * Falls back to 7 when the contract does not implement decimals().
+ */
+const tokenDecimalsCache = new Map();
 
 /**
  * Returns true when the transaction was dropped because the block's total
@@ -101,10 +113,25 @@ const NATIVE_SAC_IDS = new Set([
 ]);
 
 /**
+ * Format a token amount using the appropriate number of decimals.
+ * Uses formatAmount from formatAmount.js for BigInt-safe formatting.
+ */
+function fmtTokenAmount(amount, decimals = 7) {
+  if (amount == null) return "?";
+  try {
+    return formatAmount(amount, decimals);
+  } catch {
+    return String(amount);
+  }
+}
+
+/**
  * Decode a raw Soroban RPC event into a human-readable record.
  * Uses the ABI template when available; falls back to a generic description.
+ * @param {object} ev  Raw Soroban RPC event
+ * @param {object} [opts]  Options: { failureReason, currentAbi }
  */
-export async function decode(ev, { currentAbi = false } = {}) {
+export async function decode(ev, { currentAbi = false, failureReason = null } = {}) {
   const contractId = ev.contractId;
   const topics = ev.topic.map((t) => scValToNative(t));
   const data = scValToNative(ev.value);
@@ -149,9 +176,23 @@ export async function decode(ev, { currentAbi = false } = {}) {
       ? `${assetCode} (SAC:${contractId.slice(0, 8)}…)`
       : (meta?.name ?? contractId);
 
-  // Try RWA decoder first
+  // #567: Run community plugins before built-in decoders
+  let isDecoded = true;
   let description = null;
-  if (meta) {
+  try {
+    const pluginResult = await runPlugins(ev, topics.slice(1), data, contractId);
+    if (pluginResult) {
+      description = pluginResult.description;
+      if (pluginResult.function) {
+        // Plugin override function name (e.g. "batch_approve_and_swap")
+      }
+    }
+  } catch (err) {
+    console.error("[decoderPlugins] plugin threw:", err.message);
+  }
+
+  // Try RWA decoder first (if no plugin matched)
+  if (!description && meta) {
     const tempDecoded = {
       contract_id: contractId,
       function: fnName,
@@ -163,11 +204,30 @@ export async function decode(ev, { currentAbi = false } = {}) {
 
   // Fall back to standard decoders
   if (!description) {
+    // #568: Fetch decimals for token amount formatting
+    let decimals = 7;
+    if (!tokenDecimalsCache.has(contractId)) {
+      try {
+        decimals = await fetchDecimals(contractId);
+        tokenDecimalsCache.set(contractId, decimals);
+      } catch {
+        decimals = 7;
+      }
+    } else {
+      decimals = tokenDecimalsCache.get(contractId);
+    }
+
     description = vaultMeta
       ? vaultDescription(fnName, topics.slice(1), data, contractLabel, vaultMeta)
       : fnAbi
-        ? buildDescription(fnName, topics.slice(1), data, contractLabel)
+        ? buildDescription(fnName, topics.slice(1), data, contractLabel, { decimals })
         : genericDescription(fnName, topics.slice(1), data, contractLabel);
+  }
+
+  // #565: XDR pretty-print fallback for unrecognised event types
+  if (!fnAbi && !vaultMeta && !meta && !description) {
+    description = xdrFallbackDescription(fnName, topics.slice(1), data, contractId);
+    isDecoded = false;
   }
 
   // Attach heuristic params when no ABI was available
@@ -187,6 +247,10 @@ export async function decode(ev, { currentAbi = false } = {}) {
     is_resource_limit_exceeded: isResourceLimitExceeded(ev),
     ...extractGasCosts(ev),
     ...(heuristicParams && { heuristic_params: heuristicParams }),
+    // #566: Attach failure reason for failed transactions
+    ...(failureReason && { is_failed: true, failure_reason: failureReason }),
+    // #565: Mark undecoded events
+    ...(!isDecoded && { decoded: false }),
   };
 
   // Protocol 26: detect TTL extension host function calls on this event
@@ -271,32 +335,52 @@ function vaultDescription(fn, args, data, contractName, vaultMeta) {
  * SEP-41 transfer format:
  *   "Address {short-from} transferred {amount} {token} to {short-to} on {contractName}"
  * where short addresses are truncated to "AAAAAA…ZZZZ" (6 + 4 chars).
+ *
+ * @param {string} fn        Function name
+ * @param {any[]}  args      Decoded arguments (after topic[0])
+ * @param {any}    data      Raw decoded data
+ * @param {string} contractName  Display label for the contract
+ * @param {object} [opts]    Options: { decimals } for token formatting (#568)
  */
-export function buildDescription(fn, args, data, contractName) {
+export function buildDescription(fn, args, data, contractName, opts = {}) {
+  const decimals = opts.decimals ?? 7;
   switch (fn) {
     case "swap": {
       const [from, amtIn, tokenIn, amtOut, tokenOut] = args;
-      return `Address ${fmt(from)} swapped ${amtIn} ${tokenIn} → ${amtOut} ${tokenOut} on ${contractName}`;
+      return `Address ${fmt(from)} swapped ${fmtTokenAmount(amtIn, decimals)} ${tokenIn} → ${fmtTokenAmount(amtOut, decimals)} ${tokenOut} on ${contractName}`;
     }
     case "transfer": {
       const [from, to, amount, token] = args;
-      return `Address ${fmt(from)} transferred ${amount} ${token ?? ""} to ${fmt(to)} on ${contractName}`;
+      return `Address ${fmt(from)} transferred ${fmtTokenAmount(amount, decimals)} ${token ?? ""} to ${fmt(to)} on ${contractName}`;
     }
     case "mint": {
       const [to, amount, token] = args;
-      return `${amount} ${token ?? ""} minted to ${fmt(to)} on ${contractName}`;
+      return `${fmtTokenAmount(amount, decimals)} ${token ?? ""} minted to ${fmt(to)} on ${contractName}`;
     }
     case "burn": {
       const [from, amount, token] = args;
-      return `${amount} ${token ?? ""} burned from ${fmt(from)} on ${contractName}`;
+      return `${fmtTokenAmount(amount, decimals)} ${token ?? ""} burned from ${fmt(from)} on ${contractName}`;
     }
     case "clawback": {
       const [admin, from, amount, token] = args;
-      return `CLAWBACK: ${amount} ${token ?? ""} recovered from ${fmt(from)} by authority ${fmt(admin)} on ${contractName}`;
+      return `CLAWBACK: ${fmtTokenAmount(amount, decimals)} ${token ?? ""} recovered from ${fmt(from)} by authority ${fmt(admin)} on ${contractName}`;
     }
     default:
       return genericDescription(fn, args, data, contractName);
   }
+}
+
+/**
+ * #565: XDR pretty-print fallback for unrecognised event types.
+ * Produces a human-readable description when no ABI or built-in decoder matched.
+ */
+function xdrFallbackDescription(fnName, args, data, contractId) {
+  const argStr = args.map((a) => {
+    if (a == null) return "null";
+    if (typeof a === "string" && a.length > 20) return `${a.slice(0, 6)}…${a.slice(-4)}`;
+    return String(a);
+  }).join(", ");
+  return `${fnName}(${argStr}) called on ${contractId.slice(0, 12)}…`;
 }
 
 function genericDescription(fn, args, data, contractId) {

@@ -300,7 +300,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Existing endpoints ──────────────────────────────────────────────────────
 
-  // GET /api/events?contract=&fn=&type=&after_seq=&limit=
+  // GET /api/events?contract=&fn=&type=&after_seq=&limit=&failed=
   // Keyset (cursor) pagination — `after_seq` is the `next_cursor` value from
   // the previous page (omit for the first page). Responds with
   // { data: Event[], next_cursor: number|null } (#490).
@@ -324,10 +324,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
       next();
     },
     makeCache("events_list", (req) => {
-      const { contract = "", fn = "", type = "" } = req.query;
+      const { contract = "", fn = "", type = "", failed = "" } = req.query;
       const after = Number(req.query.after_seq) || 0;
       const limit = Number(req.query.limit) || 25;
-      return `events:list:${contract}:${fn}:${after}:${limit}:${type}`;
+      return `events:list:${contract}:${fn}:${after}:${limit}:${type}:${failed}`;
     }),
     async (req, res) => {
       try {
@@ -336,15 +336,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
         const type = req.query.type || undefined;
         const after_seq = req.query.after_seq ? Number(req.query.after_seq) : 0;
         const limit = req.query.limit ? Number(req.query.limit) : 25;
+        // #566: filter failed events with ?failed=true
+        const failed = req.query.failed === "true" ? true : req.query.failed === "false" ? false : undefined;
 
-        const result = await db.getEventsCursor({ contract, fn, type, after_seq, limit });
+        const result = await db.getEventsCursor({ contract, fn, type, after_seq, limit, failed });
 
         // Predictive pre-fetch: next page if user is paginating
         if (result.next_cursor !== null) {
-          const key = `events:list:${contract ?? ""}:${fn ?? ""}:${after_seq}:${limit}:${type ?? ""}`;
+          const key = `events:list:${contract ?? ""}:${fn ?? ""}:${after_seq}:${limit}:${type ?? ""}:${failed ?? ""}`;
           schedulePrefetch(key, {
-            [`events:list:${contract ?? ""}:${fn ?? ""}:${result.next_cursor}:${limit}:${type ?? ""}`]: () =>
-              db.getEventsCursor({ contract, fn, type, after_seq: result.next_cursor, limit }),
+            [`events:list:${contract ?? ""}:${fn ?? ""}:${result.next_cursor}:${limit}:${type ?? ""}:${failed ?? ""}`]: () =>
+              db.getEventsCursor({ contract, fn, type, after_seq: result.next_cursor, limit, failed }),
           });
         }
         res.json(result);
