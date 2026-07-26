@@ -143,7 +143,7 @@ async function lookupKeyInDb(rawKey) {
   const { rows } = await pool.query(
     `SELECT id, name, key_hash, tier, rate_limit, daily_limit,
             allowed_ips, allowed_endpoints, expires_at,
-            revoked, last_used_at, usage_count
+            revoked, verified, last_used_at, usage_count
      FROM   api_keys
      WHERE  key_prefix = $1`,
     [prefix],
@@ -284,6 +284,11 @@ async function apiKeyAuthenticator(req, res, next) {
     // Revoked check.
     if (keyRecord.revoked) {
       return res.status(401).json({ error: 'API key revoked' });
+    }
+
+    // Verification check - unverified keys cannot authenticate
+    if (keyRecord.verified === false) {
+      return res.status(401).json({ error: 'API key not verified. Please check your email to verify your key.' });
     }
 
     // Expiry check.

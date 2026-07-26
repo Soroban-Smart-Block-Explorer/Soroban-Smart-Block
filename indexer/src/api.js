@@ -7,7 +7,7 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
-import { db } from "./db.js";
+import { db, pool } from "./db.js";
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
@@ -42,6 +42,7 @@ import { registry } from "./metrics.js";
 import pg from "pg";
 import { getBurnAlerts } from "./burnDetector.js";
 import { formatAmount } from "./formatAmount.js";
+import { sendVerificationEmail, isConfigured } from "./emailService.js";
 import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
@@ -1175,6 +1176,152 @@ export function createApi({ logDestination, dbOverride } = {}) {
       const alerts = getBurnAlerts(req.query.contract || undefined);
       res.json(alerts);
     } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Self-Service API Key Creation with Email Verification ─────────────────────
+  
+  // POST /api/keys (unauthenticated) - Create an inactive API key and send verification email
+  app.post("/api/keys", async (req, res) => {
+    try {
+      const { name, email } = req.body;
+
+      // Validate required fields
+      if (!name || typeof name !== 'string' || name.trim() === '') {
+        return res.status(400).json({ error: 'name is required and must be a non-empty string' });
+      }
+      if (!email || typeof email !== 'string' || !email.includes('@')) {
+        return res.status(400).json({ error: 'email is required and must be a valid email address' });
+      }
+
+      // Check if email service is configured
+      if (!isConfigured()) {
+        return res.status(503).json({ error: 'Email service not configured. Contact administrator.' });
+      }
+
+      // Import crypto and bcrypt for key generation
+      const crypto = (await import('crypto')).default;
+      const bcrypt = (await import('bcryptjs')).default;
+
+      // Generate verification token
+      const verificationToken = crypto.randomBytes(32).toString('hex');
+      const verificationExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+      // Generate API key
+      const rawKey = crypto.randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      const keyPrefix = rawKey.slice(0, 8);
+      const keyHash = await bcrypt.hash(rawKey, 12);
+
+      // Insert inactive key with verification data
+      const { rows } = await pool.query(
+        `INSERT INTO api_keys
+           (name, email, key_hash, key_prefix, tier, verified, verification_token, verification_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, name, email, key_prefix, tier, verified, created_at`,
+        [name.trim(), email.trim().toLowerCase(), keyHash, keyPrefix, 'free', false, verificationToken, verificationExpiresAt]
+      );
+
+      // Build verification URL
+      const baseUrl = process.env.API_BASE_URL || `http://localhost:${PORT}`;
+      const verificationUrl = `${baseUrl}/api/keys/verify?token=${verificationToken}`;
+
+      // Send verification email
+      await sendVerificationEmail({
+        email: email.trim(),
+        keyName: name.trim(),
+        verificationUrl
+      });
+
+      // Return success message (do NOT return the key or verification token)
+      res.status(201).json({
+        message: 'API key created successfully. Please check your email to verify and activate your key.',
+        keyId: rows[0].id,
+        keyPrefix: rows[0].key_prefix,
+        email: rows[0].email,
+        verified: rows[0].verified
+      });
+    } catch (e) {
+      console.error('[POST /api/keys] Error:', e);
+      if (e.message.includes('duplicate key') || e.message.includes('unique constraint')) {
+        return res.status(409).json({ error: 'An API key for this email already exists and is pending verification.' });
+      }
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/keys/verify?token= - Verify email and activate the key, return the full key once
+  app.get("/api/keys/verify", async (req, res) => {
+    try {
+      const { token } = req.query;
+
+      if (!token || typeof token !== 'string') {
+        return res.status(400).json({ error: 'token is required' });
+      }
+
+      // Look up the key by verification token
+      const { rows } = await pool.query(
+        `SELECT id, name, email, key_hash, key_prefix, tier, verified, verification_expires_at
+         FROM api_keys
+         WHERE verification_token = $1`,
+        [token]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Invalid verification token' });
+      }
+
+      const keyRecord = rows[0];
+
+      // Check if already verified
+      if (keyRecord.verified) {
+        return res.status(400).json({ error: 'This API key has already been verified' });
+      }
+
+      // Check if token has expired
+      if (new Date(keyRecord.verification_expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Verification token has expired. Please request a new API key.' });
+      }
+
+      // Activate the key by setting verified = true and clearing the verification token
+      await pool.query(
+        `UPDATE api_keys
+         SET verified = TRUE,
+             verification_token = NULL,
+             verification_expires_at = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [keyRecord.id]
+      );
+
+      // Since this is the only time we return the full key, we need to reconstruct it
+      // We can't retrieve the original raw key from the hash, so we need to generate a new one
+      // and update the record. This is a security trade-off for the one-time display requirement.
+      const crypto = (await import('crypto')).default;
+      const bcrypt = (await import('bcryptjs')).default;
+      
+      const newRawKey = crypto.randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      const newKeyPrefix = newRawKey.slice(0, 8);
+      const newKeyHash = await bcrypt.hash(newRawKey, 12);
+
+      await pool.query(
+        `UPDATE api_keys
+         SET key_hash = $1, key_prefix = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [newKeyHash, newKeyPrefix, keyRecord.id]
+      );
+
+      // Return the full key (this is the only time it will be shown)
+      res.json({
+        message: 'API key verified and activated successfully. Save this key securely - it will not be shown again.',
+        key: newRawKey,
+        keyId: keyRecord.id,
+        name: keyRecord.name,
+        email: keyRecord.email,
+        tier: keyRecord.tier
+      });
+    } catch (e) {
+      console.error('[GET /api/keys/verify] Error:', e);
       res.status(500).json({ error: e.message });
     }
   });
