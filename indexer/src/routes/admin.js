@@ -76,6 +76,82 @@ const CONTRACT_COLUMNS = [
   'created_at',
 ];
 
+async function runIntegrityChecks() {
+  const failed = [];
+
+  const { rows: gapRows } = await pool.query(
+    `SELECT COUNT(*)::int AS gap_count
+     FROM (
+       SELECT seq,
+              LAG(seq) OVER (ORDER BY seq) AS previous_seq
+       FROM events
+     ) AS ordered
+     WHERE seq - previous_seq > 1`,
+  );
+  if (Number(gapRows[0]?.gap_count ?? 0) > 0) {
+    failed.push({ check: 'seq_gap', details: { gap_count: Number(gapRows[0].gap_count) } });
+  }
+
+  const { rows: ledgerOrderRows } = await pool.query(
+    `SELECT COUNT(*)::int AS non_monotonic_count
+     FROM (
+       SELECT seq,
+              ledger,
+              LAG(ledger) OVER (ORDER BY seq) AS previous_ledger
+       FROM events
+     ) AS ordered
+     WHERE previous_ledger IS NOT NULL
+       AND ledger < previous_ledger`,
+  );
+  if (Number(ledgerOrderRows[0]?.non_monotonic_count ?? 0) > 0) {
+    failed.push({ check: 'ledger_monotonicity', details: { non_monotonic_count: Number(ledgerOrderRows[0].non_monotonic_count) } });
+  }
+
+  const { rows: maxLedgerRows } = await pool.query(
+    `SELECT COALESCE(MAX(ledger), 0)::bigint AS max_ledger FROM events`,
+  );
+  const { rows: lastIndexedRows } = await pool.query(
+    `SELECT COALESCE((SELECT value FROM daemon_state WHERE key = 'last_indexed_ledger'), '0') AS value`,
+  );
+  const maxLedger = Number(maxLedgerRows[0]?.max_ledger ?? 0);
+  const lastIndexedLedger = Number(lastIndexedRows[0]?.value ?? 0);
+  if (lastIndexedLedger !== maxLedger) {
+    failed.push({ check: 'last_indexed_ledger', details: { expected: maxLedger, actual: lastIndexedLedger } });
+  }
+
+  const { rows: txRangeRows } = await pool.query(
+    `SELECT COALESCE(MIN(ledger), 0)::bigint AS min_ledger,
+            COALESCE(MAX(ledger), 0)::bigint AS max_ledger
+     FROM events`,
+  );
+  const minLedger = Number(txRangeRows[0]?.min_ledger ?? 0);
+  const maxLedgerForTx = Number(txRangeRows[0]?.max_ledger ?? 0);
+  const { rows: hashCountRows } = await pool.query(
+    `SELECT COUNT(*)::int AS ledger_hash_count
+     FROM ledger_hashes
+     WHERE ledger >= $1
+       AND ledger <= $2`,
+    [minLedger, maxLedgerForTx],
+  );
+  const ledgerHashCount = Number(hashCountRows[0]?.ledger_hash_count ?? 0);
+  if (ledgerHashCount > 0 && maxLedgerForTx > 0) {
+    const { rows: txCountRows } = await pool.query(
+      `SELECT COUNT(DISTINCT tx_hash)::int AS distinct_tx_hashes
+       FROM events
+       WHERE tx_hash IS NOT NULL
+         AND ledger >= $1
+         AND ledger <= $2`,
+      [minLedger, maxLedgerForTx],
+    );
+    const distinctTxHashes = Number(txCountRows[0]?.distinct_tx_hashes ?? 0);
+    if (distinctTxHashes !== ledgerHashCount) {
+      failed.push({ check: 'ledger_hash_count', details: { distinct_tx_hashes: distinctTxHashes, ledger_hash_count: ledgerHashCount } });
+    }
+  }
+
+  return failed.length ? { ok: false, failed } : { ok: true };
+}
+
 function rowsToCsv(rows, columns) {
   if (!rows.length) return columns.join(',') + '\n';
   const escape = (v) => {
@@ -89,6 +165,8 @@ function rowsToCsv(rows, columns) {
   const body = rows.map((r) => columns.map((c) => escape(r[c])).join(',')).join('\n');
   return header + '\n' + body + '\n';
 }
+
+export { runIntegrityChecks };
 
 // ── Router factory ────────────────────────────────────────────────────────────
 
@@ -166,6 +244,19 @@ export default function registerAdminRoutes(app) {
   // Apply admin auth to all routes on this router.
   router.use(adminAuthMiddleware);
 
+  // ── GET /api/admin/integrity ─────────────────────────────────────────────
+  router.get('/integrity', async (_req, res) => {
+    try {
+      const result = await runIntegrityChecks();
+      if (result.ok) {
+        return res.json({ ok: true });
+      }
+      return res.json(result);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── POST /api/admin/alerts/:condition/resolve ─────────────────────────────
   router.post('/alerts/:condition/resolve', (req, res) => {
     const { condition } = req.params;
@@ -235,8 +326,7 @@ export default function registerAdminRoutes(app) {
   // ── GET /api/admin/api-keys/:id/usage ─────────────────────────────────────
   router.get('/api-keys/:id/usage', async (req, res) => {
     try {
-      const days = Number(req.query.days) || 30;
-      const usage = await getKeyUsage(req.params.id, days);
+      const usage = await getKeyUsage(req.params.id);
       res.json(usage);
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -484,6 +574,139 @@ export default function registerAdminRoutes(app) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── POST /api/admin/abi/import-github ────────────────────────────────────
+  // Issue #520 — bulk ABI import from a GitHub repo.
+  //
+  // Accepts: { repo: 'owner/repo', path: 'contracts/', ref: 'main' }
+  // Returns: { imported: N, skipped: M, errors: [...] }
+  //
+  // Rate-limited to 1 call per 10 minutes per repo (in-process Map — no Redis
+  // dependency required). Files are validated against contractRegistry.schema.json.
+  // Importing the same repo twice is idempotent — upsert only changed fields.
+  {
+    // Per-repo rate-limit state: repo → next-allowed-time (ms epoch)
+    const importCooldowns = new Map();
+    const IMPORT_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+    const GITHUB_API = 'https://api.github.com';
+
+    function githubHeaders() {
+      const h = {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'SorobanBlockExplorer/1.0',
+      };
+      const token = process.env.GITHUB_TOKEN;
+      if (token) h.Authorization = `Bearer ${token}`;
+      return h;
+    }
+
+    /** Validate a parsed ABI JSON object against contractRegistry.schema.json rules. */
+    function validateAbiEntry(entry) {
+      if (!entry || typeof entry !== 'object') return 'entry must be an object';
+      if (!entry.contractId || typeof entry.contractId !== 'string') return 'missing contractId';
+      if (!/^C[A-Z2-7]{55}$/.test(entry.contractId)) return 'contractId must be a 56-char C… strkey';
+      if (!entry.name || typeof entry.name !== 'string') return 'missing name';
+      if (entry.name.length > 100) return 'name exceeds 100 chars';
+      if (entry.description && entry.description.length > 500) return 'description exceeds 500 chars';
+      if (entry.functions !== undefined && !Array.isArray(entry.functions)) return 'functions must be an array';
+      return null; // valid
+    }
+
+    router.post('/abi/import-github', async (req, res) => {
+      try {
+        const { repo, path: repoPath = 'contracts/', ref = 'main' } = req.body ?? {};
+
+        if (!repo || typeof repo !== 'string' || !repo.includes('/')) {
+          return res.status(400).json({ error: 'repo must be in owner/repo format' });
+        }
+
+        // Rate-limit check
+        const now = Date.now();
+        const nextAllowed = importCooldowns.get(repo) ?? 0;
+        if (now < nextAllowed) {
+          const waitSec = Math.ceil((nextAllowed - now) / 1000);
+          return res.status(429).json({
+            error: `Rate limited. Try again in ${waitSec}s.`,
+            retry_after: waitSec,
+          });
+        }
+        importCooldowns.set(repo, now + IMPORT_COOLDOWN_MS);
+
+        const [owner, repoName] = repo.split('/');
+        const normalizedPath = (repoPath ?? '').replace(/^\/|\/$/g, '');
+        const dirUrl = `${GITHUB_API}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/${normalizedPath}?ref=${encodeURIComponent(ref)}`;
+
+        // Fetch directory listing
+        let entries;
+        try {
+          const dirRes = await fetch(dirUrl, { headers: githubHeaders() });
+          if (!dirRes.ok) {
+            const body = await dirRes.text();
+            return res.status(502).json({ error: `GitHub API error: ${dirRes.status}`, detail: body.slice(0, 200) });
+          }
+          entries = await dirRes.json();
+        } catch (fetchErr) {
+          return res.status(502).json({ error: `Failed to reach GitHub: ${fetchErr.message}` });
+        }
+
+        if (!Array.isArray(entries)) {
+          return res.status(400).json({ error: 'Path does not point to a directory or returned unexpected data' });
+        }
+
+        const jsonFiles = entries.filter((e) => e.type === 'file' && e.name.endsWith('.json'));
+
+        let imported = 0;
+        let skipped = 0;
+        const errors = [];
+
+        for (const file of jsonFiles) {
+          try {
+            const rawRes = await fetch(file.download_url, { headers: githubHeaders() });
+            if (!rawRes.ok) {
+              errors.push({ file: file.name, error: `HTTP ${rawRes.status}` });
+              continue;
+            }
+            const entry = await rawRes.json();
+
+            // Schema validation
+            const validationError = validateAbiEntry(entry);
+            if (validationError) {
+              errors.push({ file: file.name, error: validationError });
+              skipped++;
+              continue;
+            }
+
+            // Idempotent upsert — only changed fields are updated (protocol_type auto-tagged)
+            await db.upsertContractMeta({
+              id: entry.contractId,
+              name: entry.name,
+              description: entry.description ?? null,
+              functions: entry.functions ?? [],
+              registered_by: `github:${repo}`,
+              protocol_type: entry.protocol_type ?? undefined,
+              version: entry.version ?? 1,
+              abi_version: entry.abi_version ?? 0,
+              min_ledger: entry.min_ledger ?? 0,
+            });
+            imported++;
+          } catch (err) {
+            errors.push({ file: file.name, error: err.message });
+          }
+        }
+
+        // Release cooldown early if nothing was fetched (e.g., empty directory)
+        if (jsonFiles.length === 0) {
+          importCooldowns.delete(repo);
+        }
+
+        res.json({ imported, skipped, errors, total_files: jsonFiles.length });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+  }
 
   // Mount the router under /api/admin
   app.use('/api/admin', router);
