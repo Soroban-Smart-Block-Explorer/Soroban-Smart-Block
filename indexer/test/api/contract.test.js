@@ -180,6 +180,12 @@ describe("OpenAPI Contract Validation Tests", () => {
     expect(() => validateResponse("/api/contracts/{id}", "GET", 404, res.body)).not.toThrow();
   });
 
+  it("should validate GET /api/contracts/{id}/stats - 200 Response", async () => {
+    const res = await request(app).get("/api/contracts/C1/stats");
+    expect(res.status).toBe(200);
+    expect(() => validateResponse("/api/contracts/{id}/stats", "GET", 200, res.body)).not.toThrow();
+  });
+
   it("should validate POST /api/contracts - 201 Response", async () => {
     const res = await request(app)
       .post("/api/contracts")

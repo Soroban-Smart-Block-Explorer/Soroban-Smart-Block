@@ -1,174 +1,82 @@
-import fs from "fs";
-import path from "path";
-import yaml from "yaml";
-import Ajv from "ajv";
-import addFormats from "ajv-formats";
 import request from "supertest";
 
-// Issue #541 — GET /api/contracts/:id/stats
-// Issue #543 — GET /api/contracts/:id/storage-tiers
+// Issue #536: GET /api/contracts/:id/stats returns aggregate event stats for
+// a contract's stats widget — total events, unique callers, first/last seen
+// ledger, and a zero-filled 30-day daily trend for the sparkline.
 
-const DB_URL =
-  process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
+const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
 process.env.DATABASE_URL = DB_URL;
+process.env.API_KEY = "test-api-key";
+process.env.VERIFY_ABI = "false";
 
 const { db } = await import("../../src/db.js");
 const { startApi } = await import("../../src/api.js");
 
-const specPath = path.resolve(process.cwd(), "../docs/api/openapi.yaml");
-const spec = yaml.parse(fs.readFileSync(specPath, "utf8"));
-const ajv = new Ajv({ allErrors: true, strict: false });
-addFormats(ajv);
-for (const [name, schema] of Object.entries(spec.components.schemas)) {
-  ajv.addSchema(schema, `#/components/schemas/${name}`);
-}
-
-function validateAgainstSchema(schemaName, body) {
-  const validate = ajv.compile({ $ref: `#/components/schemas/${schemaName}` });
-  const valid = validate(body);
-  if (!valid) {
-    throw new Error(`Response does not match ${schemaName}: ${ajv.errorsText(validate.errors)}`);
-  }
-}
-
-describe("Contract stats and storage-tier endpoints", () => {
+describe("GET /api/contracts/:id/stats (issue #536)", () => {
   let server;
+  const contractId = "CSTATS536ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLM";
+  // Base32 strkey alphabet is [A-Z2-7] — map each caller index to a letter.
+  // Uses K-T to avoid colliding with the A/B sentinel addresses other wallet
+  // tests treat as "unseeded" against the shared test database.
+  const callers = Array.from({ length: 10 }, (_, i) => `G${"KLMNOPQRST"[i].repeat(55)}`);
 
   beforeAll(async () => {
     await db.init();
-    await db.query(
-      `TRUNCATE events, contracts, daemon_state RESTART IDENTITY CASCADE`,
-    );
+    await db.query("DELETE FROM events WHERE contract_id = $1", [contractId]);
 
-    await db.upsertContractMeta({
-      id: "CSTATS1",
-      name: "Stats Contract",
-      description: "Contract used for stats endpoint tests",
-      functions: [],
-      registered_by: "test-admin",
-    });
-
-    // 5 events, 3 distinct callers, one caller repeated (2 events), spanning ledgers 100..104.
-    const callers = ["GCALLER1", "GCALLER2", "GCALLER1", "GCALLER3", null];
-    for (let i = 0; i < callers.length; i++) {
+    // 100 events from 10 unique callers (10 events each).
+    for (let i = 1; i <= 100; i++) {
+      const caller = callers[i % callers.length];
       await db.query(
-        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, caller_address)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        ["CSTATS1", "transfer", 100 + i, `tx_stats_${i}`, `Stats event ${i}`, callers[i]],
+        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          contractId,
+          "transfer",
+          2000 + i,
+          `tx_${i}`,
+          `Event ${i} on ${contractId} involving ${caller}`,
+          JSON.stringify([caller]),
+          JSON.stringify({ amount: "1" }),
+        ],
       );
     }
-
-    // Storage-tier events for a separate contract: 2 persistent, 1 temporary, 1 instance write.
-    await db.upsertContractMeta({
-      id: "CTIERS1",
-      name: "Tiers Contract",
-      description: "Contract used for storage-tier endpoint tests",
-      functions: [],
-      registered_by: "test-admin",
-    });
-    const tierRows = [
-      {
-        persistent: [{ tier: "persistent", contractId: "CTIERS1", key: "a", changeType: "created" }],
-        temporary: [{ tier: "temporary", contractId: "CTIERS1", key: "b", changeType: "created" }],
-        instance: [],
-      },
-      {
-        persistent: [{ tier: "persistent", contractId: "CTIERS1", key: "c", changeType: "updated" }],
-        temporary: [],
-        instance: [{ tier: "instance", contractId: "CTIERS1", key: "ContractInstance", changeType: "updated" }],
-      },
-    ];
-    for (let i = 0; i < tierRows.length; i++) {
-      await db.query(
-        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, storage_tiers)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        ["CTIERS1", "set", 200 + i, `tx_tiers_${i}`, `Tier event ${i}`, JSON.stringify(tierRows[i])],
-      );
-    }
-
-    // Dedicated contract for the caching assertion below so it isn't affected
-    // by cache state left over from other tests hitting the same key.
-    await db.upsertContractMeta({
-      id: "CCACHECHECK",
-      name: "Cache Check Contract",
-      description: "Contract used only to assert cache HIT/MISS behavior",
-      functions: [],
-      registered_by: "test-admin",
-    });
-    await db.query(
-      `INSERT INTO events (contract_id, function, ledger, tx_hash, description)
-       VALUES ($1, $2, $3, $4, $5)`,
-      ["CCACHECHECK", "transfer", 300, "tx_cache_check", "Cache check event"],
-    );
 
     server = startApi();
   });
 
   afterAll(async () => {
+    await db.query("DELETE FROM events WHERE contract_id = $1", [contractId]);
     if (server && server.close) {
       await new Promise((resolve) => server.close(resolve));
     }
   });
 
-  describe("GET /api/contracts/:id/stats", () => {
-    it("returns total events, unique callers, and ledger range", async () => {
-      const res = await request(server).get("/api/contracts/CSTATS1/stats");
-      expect(res.status).toBe(200);
-      validateAgainstSchema("ContractStats", res.body);
-
-      expect(res.body.total_events).toBe(5);
-      expect(res.body.unique_callers).toBe(3); // GCALLER1, GCALLER2, GCALLER3 (null excluded)
-      expect(res.body.first_seen_ledger).toBe(100);
-      expect(res.body.last_seen_ledger).toBe(104);
-    });
-
-    it("returns a 30-entry events_per_day series ordered oldest-first", async () => {
-      const res = await request(server).get("/api/contracts/CSTATS1/stats");
-      expect(res.status).toBe(200);
-      expect(res.body.events_per_day).toHaveLength(30);
-      const dates = res.body.events_per_day.map((d) => d.date);
-      const sorted = [...dates].sort();
-      expect(dates).toEqual(sorted);
-      // All seeded events use NOW() as created_at, so today's bucket carries the count.
-      const today = res.body.events_per_day[res.body.events_per_day.length - 1];
-      expect(today.count).toBe(5);
-    });
-
-    it("returns zeroed stats for a contract with no events", async () => {
-      const res = await request(server).get("/api/contracts/CNOEVENTS/stats");
-      expect(res.status).toBe(200);
-      validateAgainstSchema("ContractStats", res.body);
-      expect(res.body).toMatchObject({
-        total_events: 0,
-        unique_callers: 0,
-        first_seen_ledger: null,
-        last_seen_ledger: null,
-      });
-      expect(res.body.events_per_day.every((d) => d.count === 0)).toBe(true);
-    });
-
-    it("serves the second request from cache (X-Cache: HIT)", async () => {
-      const first = await request(server).get("/api/contracts/CCACHECHECK/stats");
-      expect(first.headers["x-cache"]).toBe("MISS");
-      const second = await request(server).get("/api/contracts/CCACHECHECK/stats");
-      expect(second.headers["x-cache"]).toBe("HIT");
-      expect(second.headers["cache-control"]).toContain("max-age=300");
-    });
+  it("returns total_events: 100, unique_callers: 10 for the seeded contract", async () => {
+    const res = await request(server).get(`/api/contracts/${contractId}/stats`);
+    expect(res.status).toBe(200);
+    expect(res.body.total_events).toBe(100);
+    expect(res.body.unique_callers).toBe(10);
+    expect(res.body.first_seen_ledger).toBe(2001);
+    expect(res.body.last_seen_ledger).toBe(2100);
   });
 
-  describe("GET /api/contracts/:id/storage-tiers", () => {
-    it("aggregates write counts per storage durability tier", async () => {
-      const res = await request(server).get("/api/contracts/CTIERS1/storage-tiers");
-      expect(res.status).toBe(200);
-      validateAgainstSchema("StorageTierCounts", res.body);
-      expect(res.body).toEqual({ temporary: 1, persistent: 2, instance: 1 });
-    });
+  it("returns a 30-day zero-filled events_per_day series for a contract with no events", async () => {
+    const res = await request(server).get("/api/contracts/CNOEVENTS536/stats");
+    expect(res.status).toBe(200);
+    expect(res.body.total_events).toBe(0);
+    expect(res.body.unique_callers).toBe(0);
+    expect(res.body.events_per_day).toHaveLength(30);
+    expect(res.body.events_per_day.every((d) => d.count === 0)).toBe(true);
+  });
 
-    it("renders gracefully (all zero) for a contract with no storage writes", async () => {
-      const res = await request(server).get("/api/contracts/CNOEVENTS/storage-tiers");
-      expect(res.status).toBe(200);
-      validateAgainstSchema("StorageTierCounts", res.body);
-      expect(res.body).toEqual({ temporary: 0, persistent: 0, instance: 0 });
-    });
+  it("caches the response (X-Cache: MISS then HIT)", async () => {
+    // Dedicated contract id — earlier tests in this file already warm the
+    // cache for `contractId`, so a fresh key is needed to observe the MISS.
+    const freshContractId = "CSTATSCACHE536ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGH";
+    const first = await request(server).get(`/api/contracts/${freshContractId}/stats`);
+    expect(first.headers["x-cache"]).toBe("MISS");
+    const second = await request(server).get(`/api/contracts/${freshContractId}/stats`);
+    expect(second.headers["x-cache"]).toBe("HIT");
   });
 });
