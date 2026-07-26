@@ -19,7 +19,7 @@ const SetupPage = lazy(() => import("./pages/SetupPage"));
 const BatchMultiCall = lazy(() => import("./pages/BatchMultiCall"));
 const SubInvocationPage = lazy(() => import("./pages/SubInvocationPage"));
 const RateLimitDashboard = lazy(() => import("./pages/RateLimitDashboard"));
-const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
+const NftGallery = lazy(() => import("./pages/NftGallery"));
 
 function Fallback() {
   return <p style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>Loading…</p>;
@@ -49,6 +49,7 @@ export default function App() {
             <Route path="/batch" element={<BatchMultiCall />} />
             <Route path="/sub-invocations" element={<SubInvocationPage />} />
             <Route path="/admin/rate-limits" element={<RateLimitDashboard />} />
+            <Route path="/nft/:contractId" element={<NftGallery />} />
           </Routes>
         </Suspense>
       </main>

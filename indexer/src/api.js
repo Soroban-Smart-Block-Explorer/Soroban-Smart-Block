@@ -998,6 +998,60 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── NFT endpoints ────────────────────────────────────────────────
+
+  // GET /api/tokens/:contractId/nfts
+  //   ?owner=<address>  — filter to tokens owned by this address
+  //   &page=<n>         — 1-indexed page number (default 1)
+  //   &limit=<n>        — results per page, max 200 (default 50)
+  //
+  // Returns a paginated list of all minted NFT token IDs with their
+  // current owner, on-chain metadata, and last transfer ledger.
+  app.get("/api/tokens/:contractId/nfts", async (req, res) => {
+    try {
+      const { contractId } = req.params;
+      const owner = req.query.owner || undefined;
+      const page = req.query.page ? Number(req.query.page) : 1;
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+
+      if (isNaN(page) || page < 1) {
+        return res.status(422).json({ error: "Invalid page" });
+      }
+      if (isNaN(limit) || limit < 1 || limit > 200) {
+        return res.status(422).json({ error: "Invalid limit" });
+      }
+
+      const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+
+      const totalPages = Math.ceil(total / limit);
+      res.json({
+        contract_id: contractId,
+        tokens,
+        pagination: {
+          page,
+          limit,
+          total,
+          total_pages: totalPages,
+          has_next: page < totalPages,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:contractId/nfts/:tokenId/history
+  //   Returns the full mint + transfer event history for a single NFT token.
+  app.get("/api/tokens/:contractId/nfts/:tokenId/history", async (req, res) => {
+    try {
+      const { contractId, tokenId } = req.params;
+      const events = await db.getNftTokenHistory(contractId, tokenId);
+      res.json({ contract_id: contractId, token_id: tokenId, events });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── cursor-based pagination endpoint ────────────────────────────
   // GET /api/v1/events?contract=&fn=&type=&after=&limit=
   // `after` is the opaque seq cursor returned as `next_cursor` in the previous page.

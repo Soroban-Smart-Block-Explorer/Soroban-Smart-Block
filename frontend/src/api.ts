@@ -381,6 +381,54 @@ export interface AddressGraphData {
   edges: GraphEdge[];
 }
 
+// NFT token metadata from on-chain storage (schema is contract-defined)
+export interface NftMetadata {
+  name?: string;
+  description?: string;
+  image?: string;
+  attributes?: { trait_type: string; value: string | number }[];
+  [key: string]: unknown;
+}
+
+// Single NFT token entry returned from GET /api/tokens/:contractId/nfts
+export interface NftToken {
+  token_id: string;
+  owner: string;
+  metadata: NftMetadata | null;
+  last_transfer_ledger: number | null;
+}
+
+// Paginated response from GET /api/tokens/:contractId/nfts
+export interface NftTokensResponse {
+  contract_id: string;
+  tokens: NftToken[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+    has_next: boolean;
+  };
+}
+
+// Single event entry in NFT token history
+export interface NftHistoryEvent {
+  seq: number;
+  function: string;
+  ledger: number;
+  tx_hash: string | null;
+  description: string;
+  raw_topics: string[] | null;
+  created_at: string;
+}
+
+// Response from GET /api/tokens/:contractId/nfts/:tokenId/history
+export interface NftTokenHistoryResponse {
+  contract_id: string;
+  token_id: string;
+  events: NftHistoryEvent[];
+}
+
 // Sub-invocation filter options for the advanced search endpoint
 export interface SubInvocationFilter {
   contract?: string;
@@ -463,6 +511,23 @@ export const api = {
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
   wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
+
+  // NFT collection tokens with optional owner filter and pagination
+  nfts: (
+    contractId: string,
+    params: { owner?: string; page?: number; limit?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.owner) q.set("owner", params.owner);
+    if (params.page) q.set("page", String(params.page));
+    if (params.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return get<NftTokensResponse>(`/tokens/${contractId}/nfts${qs ? `?${qs}` : ""}`);
+  },
+
+  // Full transfer + mint history for a single NFT token
+  nftHistory: (contractId: string, tokenId: string) =>
+    get<NftTokenHistoryResponse>(`/tokens/${contractId}/nfts/${encodeURIComponent(tokenId)}/history`),
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),
 
