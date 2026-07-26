@@ -5,6 +5,7 @@
  */
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 
 export interface GraphNode {
@@ -27,15 +28,23 @@ export interface AddressGraphData {
 
 interface Props {
   contractId: string;
+  /**
+   * "address" (default) fetches wallet/contract connections via /address-graph.
+   * "call-graph" fetches sub-invocation call frequency via /call-graph and
+   * enables click-to-navigate to the callee contract's detail page (#540).
+   */
+  variant?: "address" | "call-graph";
 }
 
-export default function AddressConnectionGraph({ contractId }: Props) {
+export default function AddressConnectionGraph({ contractId, variant = "address" }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<any>(null);
+  const navigate = useNavigate();
+  const isCallGraph = variant === "call-graph";
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["address-graph", contractId],
-    queryFn: () => api.addressGraph(contractId),
+    queryKey: [isCallGraph ? "call-graph" : "address-graph", contractId],
+    queryFn: () => (isCallGraph ? api.contractCallGraph(contractId) : api.addressGraph(contractId)),
     enabled: !!contractId,
   });
   const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
@@ -113,6 +122,12 @@ export default function AddressConnectionGraph({ contractId }: Props) {
         userZoomingEnabled: true,
         userPanningEnabled: true,
       });
+
+      if (isCallGraph) {
+        cyRef.current.on("tap", "node", (evt: any) => {
+          navigate(`/contract/${evt.target.id()}`);
+        });
+      }
     });
 
     return () => {
@@ -121,17 +136,19 @@ export default function AddressConnectionGraph({ contractId }: Props) {
         cyRef.current = null;
       }
     };
-  }, [data]);
+  }, [data, isCallGraph, navigate]);
 
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Loading graph…</p>;
-  if (error) return <p style={{ color: "#ef4444" }}>Failed to load address graph.</p>;
+  if (error) return <p style={{ color: "#ef4444" }}>Failed to load {isCallGraph ? "call" : "address"} graph.</p>;
   if (nodes.length === 0) {
     return (
       <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
         <strong style={{ display: "block", color: "var(--text)", fontSize: 14, marginBottom: 6 }}>
-          No address graph data available
+          {isCallGraph ? "No sub-invocation call graph data available" : "No address graph data available"}
         </strong>
-        No wallet or contract connections were returned for this contract.
+        {isCallGraph
+          ? "No sub-invocation calls to other contracts have been recorded for this contract yet."
+          : "No wallet or contract connections were returned for this contract."}
       </div>
     );
   }
@@ -146,7 +163,9 @@ export default function AddressConnectionGraph({ contractId }: Props) {
           marginBottom: 12,
         }}
       >
-        <h3 style={{ fontSize: 14, margin: 0 }}>Address Connection Graph</h3>
+        <h3 style={{ fontSize: 14, margin: 0 }}>
+          {isCallGraph ? "Sub-invocation Call Graph" : "Address Connection Graph"}
+        </h3>
         <div
           style={{
             display: "flex",
@@ -168,19 +187,21 @@ export default function AddressConnectionGraph({ contractId }: Props) {
             />
             Contract
           </span>
-          <span>
-            <span
-              style={{
-                display: "inline-block",
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                background: "#0ea5e9",
-                marginRight: 4,
-              }}
-            />
-            Wallet
-          </span>
+          {!isCallGraph && (
+            <span>
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 10,
+                  height: 10,
+                  borderRadius: "50%",
+                  background: "#0ea5e9",
+                  marginRight: 4,
+                }}
+              />
+              Wallet
+            </span>
+          )}
         </div>
       </div>
       <div
@@ -193,7 +214,8 @@ export default function AddressConnectionGraph({ contractId }: Props) {
         }}
       />
       <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
-        Scroll to zoom · Drag to pan · {nodes.length} nodes · {edges.length} connections
+        Scroll to zoom · Drag to pan {isCallGraph ? "· Click a node to open its contract page" : ""} · {nodes.length}{" "}
+        nodes · {edges.length} connections
       </p>
     </div>
   );

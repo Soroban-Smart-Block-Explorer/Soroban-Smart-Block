@@ -201,6 +201,7 @@ export default function ContractPage() {
     { key: "roles", label: "Privileged Roles" },
     { key: "networks", label: "Networks" },
     { key: "graph", label: "Address Graph" },
+    { key: "call-graph", label: "Call Graph" },
     { key: "state-diff", label: "State Timeline" },
     { key: "abi-history", label: "ABI History" },
   ];
@@ -653,6 +654,9 @@ export default function ContractPage() {
 
       {/* Tab: Address Connection Graph — */}
       {tab === "graph" && <AddressConnectionGraph contractId={id} />}
+
+      {/* Tab: Sub-invocation Call Graph — #540 */}
+      {tab === "call-graph" && <AddressConnectionGraph contractId={id} variant="call-graph" />}
 
       {/* Tab: State-Diff Timeline — */}
       {tab === "state-diff" && <StateDiffTimeline contractId={id} />}

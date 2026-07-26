@@ -431,6 +431,34 @@ export interface CircuitBreakerStatus {
   has_circuit_breaker: boolean;
   is_paused: boolean;
   pause_status_ledger: number | null;
+  pause_trigger_tx_hash: string | null;
+  pause_trigger_event_seq: number | null;
+  status: "CLOSED" | "OPEN" | "HALF-OPEN";
+  trigger_threshold: number | null;
+  auto_reset_at: string | null;
+}
+
+export interface WasmBuildMetadata {
+  wasm_hash: string;
+  contract_id: string | null;
+  size_bytes: number | null;
+  sdk_version: string | null;
+  compiler: string | null;
+  optimizer: string | null;
+  repository: string | null;
+  commit: string | null;
+  producers: Record<string, string> | null;
+  ledger: number | null;
+  tx_hash: string | null;
+  created_at: string;
+}
+
+export interface UpgradeHistoryEntry {
+  ledger: number;
+  old_hash: string | null;
+  new_hash: string | null;
+  tx_hash: string | null;
+  timestamp: string;
 }
 
 export interface RwaMetadata {
@@ -636,6 +664,15 @@ export const api = {
 
   // Circuit breaker status
   circuitBreakerStatus: (id: string) => get<CircuitBreakerStatus>(`/contracts/${id}/circuit-breaker`),
+
+  // WASM build metadata panel (hash, compiler/rustc, SDK version, size)
+  wasmMetadata: (id: string) => get<WasmBuildMetadata>(`/contracts/${id}/wasm`),
+
+  // Contract upgrade history timeline
+  upgradeHistory: (id: string) => get<UpgradeHistoryEntry[]>(`/contracts/${id}/upgrades`),
+
+  // Sub-invocation call graph — top callee contracts by call frequency
+  contractCallGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/call-graph`),
 
   // RWA token metadata
   rwaMetadata: (id: string) => get<RwaMetadata>(`/contracts/${id}/rwa-metadata`),

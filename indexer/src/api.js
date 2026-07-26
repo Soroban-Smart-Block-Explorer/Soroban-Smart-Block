@@ -704,6 +704,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/contracts/:id/wasm — WASM build metadata panel (hash, compiler, SDK, size)
+  app.get("/api/contracts/:id/wasm", async (req, res) => {
+    try {
+      const meta = await db.getWasmBuildMetadata(req.params.id);
+      if (!meta) return res.status(404).json({ error: "WASM not indexed" });
+      res.json(meta);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // GET /api/contracts/:id/abi — download standardized ABI JSON
   app.get("/api/contracts/:id/abi", async (req, res) => {
     try {
@@ -1155,7 +1166,15 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.get("/api/contracts/:id/upgrades", async (req, res) => {
     try {
       const rows = await db.getUpgradeHistory(req.params.id);
-      res.json(rows);
+      res.json(
+        rows.map((r) => ({
+          ledger: Number(r.ledger),
+          old_hash: r.upgrade_info?.oldHash ?? null,
+          new_hash: r.upgrade_info?.newHash ?? null,
+          tx_hash: r.tx_hash,
+          timestamp: r.created_at,
+        })),
+      );
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1177,6 +1196,32 @@ export function createApi({ logDestination, dbOverride } = {}) {
     try {
       const status = await db.getCircuitBreakerStatus(req.params.id);
       res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Sub-invocation call graph ─────────────────────────────────────
+  // GET /api/contracts/:id/call-graph — top callee contracts by call frequency
+  app.get("/api/contracts/:id/call-graph", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 10, 50);
+      const edges = await db.getContractCallGraph(req.params.id, limit);
+      const nodes = edges.length
+        ? [
+            { id: req.params.id, label: req.params.id, type: "contract" },
+            ...edges.map((e) => ({ id: e.callee, label: e.callee, type: "contract" })),
+          ]
+        : [];
+      res.json({
+        nodes,
+        edges: edges.map((e) => ({
+          source: req.params.id,
+          target: e.callee,
+          label: `${e.call_count} call${e.call_count === 1 ? "" : "s"}`,
+          call_count: e.call_count,
+        })),
+      });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

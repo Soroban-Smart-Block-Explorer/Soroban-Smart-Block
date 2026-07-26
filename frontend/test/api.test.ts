@@ -57,8 +57,12 @@ const api = {
   },
   subInvocations: (txHash: string) => get<Array<{ id: number; parent_tx_hash: string }>>(`/transactions/${txHash}/sub-invocations`),
   circuitBreakerStatus: (id: string) =>
-    get<{ has_circuit_breaker: boolean; is_paused: boolean }>(`/contracts/${id}/circuit-breaker`),
+    get<{ has_circuit_breaker: boolean; is_paused: boolean; status: string }>(`/contracts/${id}/circuit-breaker`),
   rwaMetadata: (id: string) => get<{ is_rwa: boolean }>(`/contracts/${id}/rwa-metadata`),
+  wasmMetadata: (id: string) => get<{ wasm_hash: string }>(`/contracts/${id}/wasm`),
+  upgradeHistory: (id: string) => get<Array<{ ledger: number; old_hash: string | null; new_hash: string | null }>>(`/contracts/${id}/upgrades`),
+  contractCallGraph: (id: string) =>
+    get<{ nodes: Array<{ id: string }>; edges: Array<{ source: string; target: string }> }>(`/contracts/${id}/call-graph`),
   sourceVerifications: (id: string, wasmHash?: string) => {
     const q = wasmHash ? `?wasm_hash=${encodeURIComponent(wasmHash)}` : "";
     return get<Array<{ signer: string }>>(`/contracts/${id}/source-verifications${q}`);
@@ -250,6 +254,38 @@ describe("api utility", () => {
     mockFetch({ is_rwa: false });
     const result = await api.rwaMetadata("C1");
     expect(result.is_rwa).toBe(false);
+  });
+
+  it("wasmMetadata fetches WASM build metadata", async () => {
+    mockFetch({ wasm_hash: "abc123" });
+    const result = await api.wasmMetadata("C1");
+    expect(result.wasm_hash).toBe("abc123");
+  });
+
+  it("wasmMetadata throws on 404 when not indexed", async () => {
+    (global.fetch as any).mockResolvedValue({ ok: false, status: 404 });
+    await expect(api.wasmMetadata("C1")).rejects.toThrow("404");
+  });
+
+  it("upgradeHistory fetches upgrade lineage in order", async () => {
+    mockFetch([
+      { ledger: 100, old_hash: "aaa", new_hash: "bbb" },
+      { ledger: 200, old_hash: "bbb", new_hash: "ccc" },
+    ]);
+    const result = await api.upgradeHistory("C1");
+    expect(result).toHaveLength(2);
+    expect(result[0].ledger).toBe(100);
+    expect(result[1].ledger).toBe(200);
+  });
+
+  it("contractCallGraph fetches nodes and edges", async () => {
+    mockFetch({
+      nodes: [{ id: "C1" }, { id: "C2" }],
+      edges: [{ source: "C1", target: "C2" }],
+    });
+    const result = await api.contractCallGraph("C1");
+    expect(result.nodes).toHaveLength(2);
+    expect(result.edges[0]).toEqual({ source: "C1", target: "C2" });
   });
 
   it("sourceVerifications fetches verifications", async () => {
