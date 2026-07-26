@@ -499,6 +499,12 @@ export default function ContractPage() {
           {/* Live TTL expiration progress bars */}
           <TTLProgressBar contractId={id} />
 
+          {/* Invocation frequency (last 30 days) */}
+          <InvocationFrequencyChart contractId={id} />
+
+          {/* Storage writes by durability tier */}
+          <StorageTierStackedBar contractId={id} />
+
           {functions.length > 0 ? (
             <div className="card">
               <h3 style={{ marginBottom: 8, fontSize: 14 }}>ABI — Functions</h3>

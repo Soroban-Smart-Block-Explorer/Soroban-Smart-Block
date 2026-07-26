@@ -1468,6 +1468,39 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── Contract Stats ────────────────────────────────────────────
+
+  // GET /api/contracts/:id/stats — event/caller counts + 30-day activity sparkline
+  app.get(
+    "/api/contracts/:id/stats",
+    makeCache("stats", (req) => `contracts:stats:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const [stats, eventsPerDay] = await Promise.all([
+          db.getContractStats(req.params.id),
+          db.getContractEventsByDay(req.params.id, 30),
+        ]);
+        res.json({ ...stats, events_per_day: eventsPerDay });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
+  // GET /api/contracts/:id/storage-tiers — write counts by storage durability tier
+  app.get(
+    "/api/contracts/:id/storage-tiers",
+    makeCache("stats", (req) => `contracts:storage-tiers:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const tiers = await db.getContractStorageTiers(req.params.id);
+        res.json(tiers);
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
   // ── Live TTL status for contract instance, code, and persistent storage ──
   // GET /api/contracts/:id/ttl
   // Queries the Soroban RPC getLedgerEntries for the contract's instance and code

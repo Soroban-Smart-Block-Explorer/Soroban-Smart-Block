@@ -1343,3 +1343,73 @@ components:
               type:
                 type: string
                 example: "address"
+
+    ContractStats:
+      type: object
+      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day]
+      properties:
+        total_events:
+          type: integer
+          example: 1204
+        unique_callers:
+          type: integer
+          example: 87
+        first_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1000001
+        last_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1050320
+        events_per_day:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyEventCount"
+
+    DailyEventCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-07-25"
+        count:
+          type: integer
+          example: 42
+
+    StorageTierCounts:
+      type: object
+      required: [temporary, persistent, instance]
+      properties:
+        temporary:
+          type: integer
+          example: 30
+        persistent:
+          type: integer
+          example: 50
+        instance:
+          type: integer
+          example: 3
+
+    AssetMetadata:
+      type: object
+      required: [name, code, issuer, decimals, domain]
+      properties:
+        name:
+          type: string
+          example: "USDC"
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA22K667OGPC3R32NRJTNQG4KWT2OFGHNNGZ2JQMSIGLT7AFHVIOMJ43"
+        decimals:
+          type: integer
+          example: 7
+        domain:
+          type: string
+          nullable: true
+          example: "centre.io"
