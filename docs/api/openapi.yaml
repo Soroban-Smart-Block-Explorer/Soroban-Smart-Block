@@ -1105,6 +1105,34 @@ components:
         is_clawback:
           type: boolean
           example: false
+        type:
+          type: string
+          enum: [soroban, classic]
+          example: "soroban"
+          description: Event category — "classic" for Horizon payment/path-payment operations, "soroban" otherwise.
+
+    Asset:
+      type: object
+      required: [code, issuer]
+      properties:
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        name:
+          type: string
+          nullable: true
+          example: "Centre Consortium"
+        domain:
+          type: string
+          nullable: true
+          example: "centre.io"
+        logo_url:
+          type: string
+          nullable: true
+          example: "https://centre.io/logo.png"
 
     CursorPaginatedEvents:
       type: object

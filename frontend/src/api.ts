@@ -75,6 +75,7 @@ export interface DecodedEvent {
   ledger: number;
   description: string;
   raw_topics: string[];
+  raw_data?: string;
   tx_hash?: string;
   // Soroban resource gas costs
   cpu_instructions?: number;
@@ -88,6 +89,8 @@ export interface DecodedEvent {
   storage_tiers?: StorageTiers;
   // clawback compliance flag
   is_clawback?: boolean;
+  // "classic" for Horizon payment/path-payment operations, "soroban" otherwise
+  type?: "soroban" | "classic";
   // AMM swap path hops ["10 USDC", "9.1 EURC", "5.2 XLM"]
   swap_path?: string[];
   // Protocol 26: TTL extension host function data
@@ -316,6 +319,15 @@ async function get<T>(path: string): Promise<T> {
   const res = await fetch(BASE + path);
   if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
   return res.json();
+}
+
+// Resolved classic asset metadata (GET /api/assets/:issuer/:code)
+export interface AssetInfo {
+  code: string;
+  issuer: string;
+  name: string | null;
+  domain: string | null;
+  logo_url: string | null;
 }
 
 export interface SimResult {
@@ -570,6 +582,7 @@ export const api = {
     return get<EventsPage>(`/events?${q}`);
   },
   event: (seq: number) => get<DecodedEvent>(`/events/${seq}`),
+  asset: (issuer: string, code: string) => get<AssetInfo>(`/assets/${issuer}/${code}`),
   search: (q: string, limit = 10) => {
     const params = new URLSearchParams();
     params.set("q", q);

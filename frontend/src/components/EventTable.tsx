@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { DecodedEvent } from "../api";
 import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
+import AssetLogo from "./AssetLogo";
 import { getGasAlert } from "./GasLimitAlert";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
 
@@ -63,11 +64,31 @@ function parseTransfer(description: string): { amount: number; symbol: string } 
   return isNaN(amount) ? null : { amount, symbol: m[2].toUpperCase() };
 }
 
+/** Extract the destination asset code/issuer from a classic payment's raw_data JSON, if present. */
+function parseClassicAsset(ev: DecodedEvent): { code: string; issuer: string | null } | null {
+  if (ev.type !== "classic" || !ev.raw_data) return null;
+  try {
+    const op = JSON.parse(ev.raw_data);
+    if (!op.asset_code) return null;
+    return { code: op.asset_code, issuer: op.asset_issuer ?? null };
+  } catch {
+    return null;
+  }
+}
+
 interface Props {
   events: DecodedEvent[];
 }
 
-function FunctionBadge({ fn }: { fn: string }) {
+function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
+  if (isClassic) {
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span className="badge classic">Classic</span>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>{fn}</span>
+      </span>
+    );
+  }
   if (fn === "wrap_native") {
     return (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>

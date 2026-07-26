@@ -76,7 +76,11 @@ export default function EventPage() {
           />
         )}
         <Row label="Ledger" value={ev.ledger.toLocaleString()} />
-        <Row label="Contract" value={<Link to={`/contract/${ev.contract_id}`}>{ev.contract_id}</Link>} />
+        {ev.contract_id ? (
+          <Row label="Contract" value={<Link to={`/contract/${ev.contract_id}`}>{ev.contract_id}</Link>} />
+        ) : (
+          <Row label="Type" value="Classic (no Soroban contract)" />
+        )}
         {ev.tx_hash && <Row label="Tx Hash" value={ev.tx_hash} mono />}
         {ev.raw_topics.length > 0 && <Row label="Topics" value={ev.raw_topics.join(", ")} mono />}
       </div>

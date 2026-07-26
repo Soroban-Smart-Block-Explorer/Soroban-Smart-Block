@@ -135,7 +135,8 @@ export const db = {
     params.push(limit + 1); // fetch one extra to detect next page
 
     const { rows } = await pool.query(
-      `SELECT * FROM events ${where} ORDER BY seq DESC LIMIT $${params.length}`,
+      `SELECT *, CASE WHEN contract_id IS NULL OR contract_id = '' THEN 'classic' ELSE 'soroban' END AS type
+       FROM events ${where} ORDER BY seq DESC LIMIT $${params.length}`,
       params,
     );
 
@@ -283,7 +284,8 @@ export const db = {
   },
 
   async getEvent(seq) {
-    const sql = "SELECT * FROM events WHERE seq = $1";
+    const sql = `SELECT *, CASE WHEN contract_id IS NULL OR contract_id = '' THEN 'classic' ELSE 'soroban' END AS type
+                 FROM events WHERE seq = $1`;
     const { rows } = await pool.query(sql, [seq]);
     return rows[0] ?? null;
   },
@@ -1609,6 +1611,24 @@ export const db = {
       })),
       closed_last_24h: closed24h.rows[0].total,
     };
+  },
+
+  // ── classic asset metadata cache (#546) ─────────────────────────
+  async getAsset(code, issuer) {
+    const { rows } = await pool.query("SELECT * FROM assets WHERE code = $1 AND issuer = $2", [code, issuer]);
+    return rows[0] ?? null;
+  },
+
+  async upsertAsset({ code, issuer, name, domain, logo_url }) {
+    const { rows } = await pool.query(
+      `INSERT INTO assets (code, issuer, name, domain, logo_url)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (code, issuer) DO UPDATE
+         SET name = EXCLUDED.name, domain = EXCLUDED.domain, logo_url = EXCLUDED.logo_url, resolved_at = NOW()
+       RETURNING *`,
+      [code, issuer, name ?? null, domain ?? null, logo_url ?? null],
+    );
+    return rows[0];
   },
 };
 

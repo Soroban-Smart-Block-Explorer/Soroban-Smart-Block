@@ -48,6 +48,7 @@ import { sendVerificationEmail, isConfigured } from "./emailService.js";
 import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
+import { resolveAsset } from "./horizonClient.js";
 
 function requestIdMiddleware(req, _res, next) {
   req.id = req.headers["x-request-id"] || randomUUID();
