@@ -53,6 +53,21 @@ pub const MIN_MAX_EVENTS: u32 = 1_000;
 /// Default ring-buffer capacity used at init when caller passes `0`.
 pub const DEFAULT_MAX_EVENTS: u32 = 50_000;
 
+// ── Input-size limits (anti-bloat / rent DoS protection) ──────────────────────
+
+/// Maximum byte length for a contract or event `name`.
+pub const MAX_NAME_LEN: u32 = 64;
+/// Maximum byte length for a contract or event `description`.
+pub const MAX_DESCRIPTION_LEN: u32 = 512;
+/// Maximum number of entries in `ContractMeta.functions`.
+pub const MAX_FUNCTIONS: u32 = 50;
+/// Maximum byte length for each `ParamDef.name`.
+pub const MAX_PARAM_NAME_LEN: u32 = 32;
+/// Maximum byte length for each `ParamDef.kind`.
+pub const MAX_PARAM_KIND_LEN: u32 = 32;
+/// Maximum number of parameters per `FunctionAbi`.
+pub const MAX_PARAMS_PER_FUNCTION: u32 = 20;
+
 // ── Data types ────────────────────────────────────────────────────────────────
 
 /// ABI-like metadata for a registered contract.
@@ -116,6 +131,45 @@ pub struct EventInput {
     pub description: String,
     pub raw_topics: Vec<String>,
     pub raw_data: Bytes,
+}
+
+// ── Validation helpers ────────────────────────────────────────────────────────
+
+/// Validate a `ContractMeta` payload against all size limits.
+/// Returns `Error::InvalidInput` on the first violation found.
+/// Must be called before any storage write in `register_contract` and
+/// `update_contract`.
+fn validate_meta(meta: &ContractMeta) -> Result<(), Error> {
+    if meta.name.len() > MAX_NAME_LEN {
+        return Err(Error::InvalidInput);
+    }
+    if meta.description.len() > MAX_DESCRIPTION_LEN {
+        return Err(Error::InvalidInput);
+    }
+    if meta.functions.len() > MAX_FUNCTIONS {
+        return Err(Error::InvalidInput);
+    }
+    for i in 0..meta.functions.len() {
+        let func = meta.functions.get(i).unwrap();
+        if func.description.len() > MAX_DESCRIPTION_LEN {
+            return Err(Error::InvalidInput);
+        }
+        if func.params.len() > MAX_PARAMS_PER_FUNCTION {
+            return Err(Error::InvalidInput);
+        }
+        // Note: ParamDef.name and ParamDef.kind are Soroban `Symbol` values.
+        // The Soroban SDK already enforces the 32-character limit on Symbol
+        // construction, so no additional length check is required here.
+    }
+    Ok(())
+}
+
+/// Validate the `description` field of an `EventInput`.
+fn validate_event_description(description: &String) -> Result<(), Error> {
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(Error::InvalidInput);
+    }
+    Ok(())
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -246,6 +300,9 @@ impl ExplorerContract {
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, Error::AlreadyExists);
         }
+        if let Err(e) = validate_meta(&meta) {
+            panic_with_error!(&env, e);
+        }
         let mut stored = meta;
         stored.abi_version = 0;
         stored.min_ledger = env.ledger().sequence();
@@ -300,7 +357,9 @@ impl ExplorerContract {
         if meta.abi_version != expected {
             panic_with_error!(&env, Error::Unauthorized);
         }
-
+        if let Err(e) = validate_meta(&meta) {
+            panic_with_error!(&env, e);
+        }
         let old_abi_version = existing.abi_version;
         let old_version = existing.version;
         let new_abi_version = meta.abi_version;
@@ -398,6 +457,9 @@ impl ExplorerContract {
         caller.require_auth();
         if input.function == Symbol::new(&env, "") {
             panic_with_error!(&env, Error::InvalidInput);
+        }
+        if let Err(e) = validate_event_description(&input.description) {
+            panic_with_error!(&env, e);
         }
         if env
             .storage()
@@ -1074,5 +1136,249 @@ mod tests {
             },
         );
         assert_eq!(client.event_count(), 1u64);
+    }
+
+    // ── Input-size limits (anti-bloat DoS protection) ─────────────────────────
+
+    fn make_string(env: &Env, len: usize) -> String {
+        // Build a soroban_sdk::String of `len` 'a' bytes.
+        // String::from_bytes takes &[u8]; we assemble it from a static block.
+        // The largest len we ever call this with in tests is MAX_DESCRIPTION_LEN+1 = 513,
+        // so a 1024-byte static block is sufficient.
+        const BLOCK: &[u8] = &[b'a'; 1024];
+        String::from_bytes(env, &BLOCK[..len.min(1024)])
+    }
+
+    // MAX_NAME_LEN = 64 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_name_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[60u8; 32]);
+        let meta = ContractMeta {
+            name: make_string(&env, MAX_NAME_LEN as usize),
+            ..make_meta(&env, "", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+        assert_eq!(client.get_contract(&cid).name, meta.name);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_name_over_limit_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[61u8; 32]);
+        let meta = ContractMeta {
+            name: make_string(&env, (MAX_NAME_LEN + 1) as usize),
+            ..make_meta(&env, "", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    // MAX_DESCRIPTION_LEN = 512 ───────────────────────────────────────────────
+
+    #[test]
+    fn test_description_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[62u8; 32]);
+        let meta = ContractMeta {
+            description: make_string(&env, MAX_DESCRIPTION_LEN as usize),
+            ..make_meta(&env, "Ok", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_description_over_limit_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[63u8; 32]);
+        let meta = ContractMeta {
+            description: make_string(&env, (MAX_DESCRIPTION_LEN + 1) as usize),
+            ..make_meta(&env, "Over", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    // MAX_FUNCTIONS = 50 ──────────────────────────────────────────────────────
+
+    fn make_function(env: &Env) -> FunctionAbi {
+        FunctionAbi {
+            name: symbol_short!("fn"),
+            description: String::from_str(env, "d"),
+            params: Vec::new(env),
+        }
+    }
+
+    #[test]
+    fn test_functions_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[64u8; 32]);
+        let mut fns: Vec<FunctionAbi> = Vec::new(&env);
+        for _ in 0..MAX_FUNCTIONS {
+            fns.push_back(make_function(&env));
+        }
+        let meta = ContractMeta {
+            functions: fns,
+            ..make_meta(&env, "FnLimit", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_functions_over_limit_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[65u8; 32]);
+        let mut fns: Vec<FunctionAbi> = Vec::new(&env);
+        for _ in 0..(MAX_FUNCTIONS + 1) {
+            fns.push_back(make_function(&env));
+        }
+        let meta = ContractMeta {
+            functions: fns,
+            ..make_meta(&env, "FnOver", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    // MAX_PARAMS_PER_FUNCTION = 20 ────────────────────────────────────────────
+
+    fn make_param() -> ParamDef {
+        ParamDef {
+            name: symbol_short!("p"),
+            kind: symbol_short!("u32"),
+        }
+    }
+
+    #[test]
+    fn test_params_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[66u8; 32]);
+        let mut params: Vec<ParamDef> = Vec::new(&env);
+        for _ in 0..MAX_PARAMS_PER_FUNCTION {
+            params.push_back(make_param());
+        }
+        let mut fns: Vec<FunctionAbi> = Vec::new(&env);
+        fns.push_back(FunctionAbi {
+            name: symbol_short!("fn"),
+            description: String::from_str(&env, "d"),
+            params,
+        });
+        let meta = ContractMeta {
+            functions: fns,
+            ..make_meta(&env, "ParamLimit", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_params_over_limit_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[67u8; 32]);
+        let mut params: Vec<ParamDef> = Vec::new(&env);
+        for _ in 0..(MAX_PARAMS_PER_FUNCTION + 1) {
+            params.push_back(make_param());
+        }
+        let mut fns: Vec<FunctionAbi> = Vec::new(&env);
+        fns.push_back(FunctionAbi {
+            name: symbol_short!("fn"),
+            description: String::from_str(&env, "d"),
+            params,
+        });
+        let meta = ContractMeta {
+            functions: fns,
+            ..make_meta(&env, "ParamOver", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    // Event description limit ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_event_description_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[68u8; 32]);
+        client.submit_event(
+            &admin,
+            &EventInput {
+                contract_id: cid,
+                function: symbol_short!("ev"),
+                ledger: 1u32,
+                description: make_string(&env, MAX_DESCRIPTION_LEN as usize),
+                raw_topics: Vec::new(&env),
+                raw_data: Bytes::new(&env),
+            },
+        );
+        assert_eq!(client.event_count(), 1u64);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_event_description_over_limit_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[69u8; 32]);
+        client.submit_event(
+            &admin,
+            &EventInput {
+                contract_id: cid,
+                function: symbol_short!("ev"),
+                ledger: 1u32,
+                description: make_string(&env, (MAX_DESCRIPTION_LEN + 1) as usize),
+                raw_topics: Vec::new(&env),
+                raw_data: Bytes::new(&env),
+            },
+        );
+    }
+
+    // update_contract also validates ──────────────────────────────────────────
+
+    #[test]
+    #[should_panic]
+    fn test_update_contract_description_over_limit_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[70u8; 32]);
+        let meta_v0 = make_meta(&env, "MyApp", &admin);
+        client.register_contract(&admin, &cid, &meta_v0);
+
+        let meta_v1 = ContractMeta {
+            abi_version: 1,
+            description: make_string(&env, (MAX_DESCRIPTION_LEN + 1) as usize),
+            ..meta_v0
+        };
+        client.update_contract(&admin, &cid, &meta_v1);
     }
 }
