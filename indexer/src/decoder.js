@@ -6,6 +6,10 @@ import { decodeRwaEvent } from "./rwaDecoder.js";
 import { parseHeuristic } from "./heuristicParser.js";
 import { parseTTLHostFunction, formatTTLExtension } from "./ttlExtensionParser.js";
 import { parseZkHostFunctions, computeZkCostDelta } from "./zkHostFunctions.js";
+import { resolveAsset } from "./horizonClient.js";
+
+// Classic operation types decoded from Horizon alongside Soroban events.
+const PATH_PAYMENT_TYPES = new Set(["path_payment_strict_send", "path_payment_strict_receive"]);
 
 // Result codes that indicate the block compute budget was exhausted.
 const RESOURCE_LIMIT_CODES = new Set([
@@ -105,6 +109,12 @@ const NATIVE_SAC_IDS = new Set([
  * Uses the ABI template when available; falls back to a generic description.
  */
 export async function decode(ev, { currentAbi = false } = {}) {
+  // Classic Stellar operations (payments, path payments) carry no contract ID —
+  // they arrive from Horizon rather than Soroban RPC's getEvents.
+  if (ev.contractId == null && ev.operation) {
+    return decodeClassicOperation(ev);
+  }
+
   const contractId = ev.contractId;
   const topics = ev.topic.map((t) => scValToNative(t));
   const data = scValToNative(ev.value);
@@ -243,6 +253,65 @@ export function nativeXlmDescription(fnName, args, data) {
   return null;
 }
 
+/**
+ * Decode a classic Stellar payment/path-payment operation sourced from
+ * Horizon (contractId is null — there is no Soroban contract involved).
+ *
+ * @param {object} ev
+ * @param {number} ev.ledger
+ * @param {string} ev.txHash
+ * @param {object} ev.operation  Horizon operation record (payment | path_payment_strict_send | path_payment_strict_receive)
+ */
+export async function decodeClassicOperation(ev) {
+  const op = ev.operation;
+  const description = PATH_PAYMENT_TYPES.has(op.type)
+    ? await pathPaymentDescription(op)
+    : await paymentDescription(op);
+
+  return {
+    contract_id: "",
+    function: op.type,
+    ledger: ev.ledger,
+    tx_hash: ev.txHash,
+    description,
+    raw_topics: [op.type, op.from, op.to].filter((t) => typeof t === "string"),
+    raw_data: safeStringify(op),
+    type: "classic",
+  };
+}
+
+/** Resolve a classic asset to its display label, e.g. "USDC (Centre Consortium)". */
+async function classicAssetLabel(code, issuer, assetType) {
+  if (!code || !issuer || assetType === "native") return "XLM";
+  const resolved = await resolveAsset(code, issuer).catch(() => null);
+  return resolved?.name ? `${code} (${resolved.name})` : code;
+}
+
+async function paymentDescription(op) {
+  const label = await classicAssetLabel(op.asset_code, op.asset_issuer, op.asset_type);
+  return `Address ${fmt(op.from)} sent ${fmtClassicAmount(op.amount)} ${label} to ${fmt(op.to)}`;
+}
+
+async function pathPaymentDescription(op) {
+  const sourceLabel = await classicAssetLabel(op.source_asset_code, op.source_asset_issuer, op.source_asset_type);
+  const destLabel = await classicAssetLabel(op.asset_code, op.asset_issuer, op.asset_type);
+  const path = Array.isArray(op.path) ? op.path : [];
+  const pathLabels = await Promise.all(path.map((hop) => classicAssetLabel(hop.asset_code, hop.asset_issuer, hop.asset_type)));
+  const bracket = pathLabels.length ? ` → [${pathLabels.join(" → ")}]` : "";
+
+  const sourceAmount = fmtClassicAmount(op.source_amount ?? op.amount);
+  const destAmount = fmtClassicAmount(op.amount);
+
+  return `${fmt(op.from)} swapped ${sourceAmount} ${sourceLabel}${bracket} → ${destAmount} ${destLabel}`;
+}
+
+/** Format a Horizon decimal amount string (e.g. "100.0000000") for display. */
+function fmtClassicAmount(amount) {
+  if (amount == null) return "?";
+  const n = Number(amount);
+  return isNaN(n) ? String(amount) : n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 7 });
+}
+
 function vaultDescription(fn, args, data, contractName, vaultMeta) {
   const assetLabel = vaultMeta.underlying_asset
     ? `asset ${vaultMeta.underlying_asset.slice(0, 6)}…${vaultMeta.underlying_asset.slice(-4)}`
@@ -294,31 +363,25 @@ export function buildDescription(fn, args, data, contractName) {
       const [admin, from, amount, token] = args;
       return `CLAWBACK: ${amount} ${token ?? ""} recovered from ${fmt(from)} by authority ${fmt(admin)} on ${contractName}`;
     }
-
-    // ── SEP-41 approve / allowance (issues #561) ──────────────────────────
-    case "approve":
-    case "set_allowance":
-    case "increase_allowance":
-    case "decrease_allowance": {
-      return buildAllowanceDescription(fn, args, data, contractName);
+    case "stake":
+    case "lock":
+    case "deposit_stake": {
+      const [addr, amount, duration] = args;
+      const amt = amount ?? data;
+      if (duration != null && duration !== 0) {
+        return `${fmt(addr)} staked ${fmtXlm(amt)} XLM for ${duration} days on ${contractName}`;
+      }
+      return `${fmt(addr)} staked ${fmtXlm(amt)} XLM on ${contractName}`;
     }
-
-    // ── NFT transfer / mint / burn (issue #562) ───────────────────────────
-    case "mint_nft":
-    case "burn_nft":
-    case "create":
-    case "list_nft": {
-      return buildNftDescription(fn, args, data, contractName);
+    case "unstake":
+    case "unlock": {
+      const [addr, amount, rewards] = args;
+      const amt = amount ?? data;
+      if (rewards != null && rewards !== 0) {
+        return `${fmt(addr)} unstaked ${fmtXlm(amt)} XLM + ${fmtXlm(rewards)} XLM rewards on ${contractName}`;
+      }
+      return `${fmt(addr)} unstaked ${fmtXlm(amt)} XLM on ${contractName}`;
     }
-
-    // ── AMM liquidity (issue #563) ────────────────────────────────────────
-    case "add_liquidity":
-    case "provide_liquidity":
-    case "remove_liquidity":
-    case "withdraw_liquidity": {
-      return buildLiquidityDescription(fn, args, data, contractName);
-    }
-
     default:
       // NFT transfer detection: transfer event that carries a token_id field
       // (u64 / number) is treated as an NFT transfer rather than a fungible

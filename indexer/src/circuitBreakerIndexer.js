@@ -26,7 +26,7 @@ export async function processCircuitBreakerEvent(decoded, meta) {
 
     // Update circuit breaker status in database
     await db
-      .updateCircuitBreakerStatus(decoded.contract_id, isPaused, decoded.ledger)
+      .updateCircuitBreakerStatus(decoded.contract_id, isPaused, decoded.ledger, decoded.tx_hash ?? null)
       .catch((err) => console.error("[circuitBreakerIndexer] Failed to update status:", err.message));
   }
 }
@@ -57,7 +57,7 @@ export async function refreshCircuitBreakerStatus(contractId, meta) {
     const status = determinePauseStatus(events.data);
 
     // Update database
-    await db.updateCircuitBreakerStatus(contractId, status.isPaused, status.lastStatusChange);
+    await db.updateCircuitBreakerStatus(contractId, status.isPaused, status.lastStatusChange, status.txHash ?? null);
   } catch (err) {
     console.error("[circuitBreakerIndexer] Failed to refresh status:", err.message);
   }
