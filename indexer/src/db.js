@@ -1003,6 +1003,89 @@ export const db = {
     );
   },
 
+  // ── NFT token queries ──────────────────────────────────────────────────────
+
+  /**
+   * Return all minted NFT tokens for a collection contract, with pagination
+   * and optional owner-address filter.
+   *
+   * Each row in token_holders where token_id IS NOT NULL represents one
+   * minted NFT. The current owner is the `address` column.
+   *
+   * @param {string} contractId
+   * @param {{ owner?: string, page?: number, limit?: number }} opts
+   * @returns {Promise<{ tokens: object[], total: number }>}
+   */
+  async getNftTokens(contractId, { owner, page = 1, limit = 50 } = {}) {
+    const pageN = Math.max(1, Number(page) || 1);
+    const limitN = Math.min(200, Math.max(1, Number(limit) || 50));
+    const offset = (pageN - 1) * limitN;
+
+    const params = [contractId];
+    let ownerFilter = "";
+    if (owner) {
+      params.push(owner);
+      ownerFilter = `AND address = $${params.length}`;
+    }
+
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM token_holders
+       WHERE contract_id = $1 AND token_id IS NOT NULL ${ownerFilter}`,
+      params,
+    );
+    const total = Number(countRows[0].total);
+
+    params.push(limitN, offset);
+    const { rows } = await pool.query(
+      `SELECT token_id, address AS owner, metadata_json, last_transfer_ledger
+       FROM token_holders
+       WHERE contract_id = $1 AND token_id IS NOT NULL ${ownerFilter}
+       ORDER BY token_id ASC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+
+    return {
+      tokens: rows.map((r) => ({
+        token_id: r.token_id,
+        owner: r.owner,
+        metadata: r.metadata_json ?? null,
+        last_transfer_ledger: r.last_transfer_ledger != null ? Number(r.last_transfer_ledger) : null,
+      })),
+      total,
+    };
+  },
+
+  /**
+   * Return the full transfer + mint history for a single NFT token,
+   * sourced from the events table.
+   *
+   * @param {string} contractId
+   * @param {string} tokenId
+   * @returns {Promise<object[]>}
+   */
+  async getNftTokenHistory(contractId, tokenId) {
+    const { rows } = await pool.query(
+      `SELECT seq, function, ledger, tx_hash, description, raw_topics, created_at
+       FROM events
+       WHERE contract_id = $1
+         AND (raw_topics::text ILIKE $2 OR description ILIKE $2)
+       ORDER BY ledger ASC, seq ASC
+       LIMIT 500`,
+      [contractId, `%${tokenId}%`],
+    );
+    return rows.map((r) => ({
+      seq: Number(r.seq),
+      function: r.function,
+      ledger: Number(r.ledger),
+      tx_hash: r.tx_hash,
+      description: r.description,
+      raw_topics: r.raw_topics,
+      created_at: r.created_at,
+    }));
+  },
+
   // ── Predictive Gap Detection helpers ────────────────────────────────────────
 
   /**
