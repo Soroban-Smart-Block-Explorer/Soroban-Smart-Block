@@ -18,6 +18,7 @@ export default [
         setInterval: "readonly",
         clearInterval: "readonly",
         global: "readonly",
+        fetch: "readonly",
       },
     },
     rules: {

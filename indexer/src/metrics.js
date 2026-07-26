@@ -62,6 +62,21 @@ export const decoderSchemaViolationsTotal = new Counter({
   registers: [registry],
 });
 
+/** Cache hits/misses by cache layer type (e.g. cache="wallet"). */
+export const cacheHitTotal = new Counter({
+  name: "cache_hit_total",
+  help: "Total cache hits by cache type",
+  labelNames: ["cache"],
+  registers: [registry],
+});
+
+export const cacheMissTotal = new Counter({
+  name: "cache_miss_total",
+  help: "Total cache misses by cache type",
+  labelNames: ["cache"],
+  registers: [registry],
+});
+
 /**
  * Update DB pool gauges from a pg.Pool instance.
  * Call this periodically (e.g. every 15 s).

@@ -14,23 +14,12 @@ from `indexer/openapi.yaml`). Try endpoints live in the
 ### Added
 
 - This changelog and a generated OpenAPI 3.1 JSON document for tooling.
-- `GET /api/contracts/{id}/wasm` — WASM build metadata for the contract-detail
-  page panel (hash, compiler/rustc version, SDK version, size in bytes, build
-  timestamp). Returns 404 with `"WASM not indexed"` if the indexer has not
-  seen a WASM upload for the contract yet.
-- `GET /api/contracts/{id}/call-graph` — top 10 callee contracts by
-  sub-invocation call frequency, as a `{ nodes, edges }` graph for the
-  contract-detail page's call-graph visualization.
-
-### Changed
-
-- `GET /api/contracts/{id}/upgrades` now returns
-  `{ ledger, old_hash, new_hash, tx_hash, timestamp }[]` (previously a raw
-  `upgrade_info` blob) to directly back the upgrade-history timeline.
-- `GET /api/contracts/{id}/circuit-breaker` now includes `status`
-  (`"CLOSED" | "OPEN" | "HALF-OPEN"`), `trigger_threshold`, `auto_reset_at`,
-  `pause_trigger_tx_hash`, and `pause_trigger_event_seq` so the UI can link to
-  the event that tripped the breaker.
+- `GET /api/contracts/{id}/stats` — event/caller counts and a 30-day daily
+  activity series for a contract, cached for 5 minutes.
+- `GET /api/contracts/{id}/storage-tiers` — write counts grouped by storage
+  durability tier (temporary, persistent, instance).
+- `GET /api/assets/{issuer}/{code}` — classic Stellar asset metadata resolved
+  via Horizon, cached for 24 hours.
 
 ## [0.1.0]
 

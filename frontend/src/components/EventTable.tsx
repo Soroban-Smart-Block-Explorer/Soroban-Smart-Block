@@ -1,6 +1,9 @@
+import { useRef } from "react";
 import { Link } from "react-router-dom";
 import type { DecodedEvent } from "../api";
+import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
+import AssetLogo from "./AssetLogo";
 import { getGasAlert } from "./GasLimitAlert";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
 
@@ -61,11 +64,31 @@ function parseTransfer(description: string): { amount: number; symbol: string } 
   return isNaN(amount) ? null : { amount, symbol: m[2].toUpperCase() };
 }
 
+/** Extract the destination asset code/issuer from a classic payment's raw_data JSON, if present. */
+function parseClassicAsset(ev: DecodedEvent): { code: string; issuer: string | null } | null {
+  if (ev.type !== "classic" || !ev.raw_data) return null;
+  try {
+    const op = JSON.parse(ev.raw_data);
+    if (!op.asset_code) return null;
+    return { code: op.asset_code, issuer: op.asset_issuer ?? null };
+  } catch {
+    return null;
+  }
+}
+
 interface Props {
   events: DecodedEvent[];
 }
 
-function FunctionBadge({ fn }: { fn: string }) {
+function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
+  if (isClassic) {
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span className="badge classic">Classic</span>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>{fn}</span>
+      </span>
+    );
+  }
   if (fn === "wrap_native") {
     return (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -171,7 +194,83 @@ function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<Decode
   );
 }
 
+/** Render a single event row (extracted so it can be reused in both modes). */
+function EventRow({ ev }: { ev: DecodedEvent }) {
+  return (
+    <>
+      <td style={td}>
+        <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
+      </td>
+      <td style={td}>{ev.ledger.toLocaleString()}</td>
+      <td style={td}>
+        <FunctionBadge fn={ev.function} />
+      </td>
+      <td
+        style={{
+          ...td,
+          maxWidth: 480,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {ev.is_clawback && (
+          <span className="badge clawback" style={{ marginRight: 6 }} title="Mandatory authority intervention">
+            ⚠ COMPLIANCE: CLAWBACK
+          </span>
+        )}
+        {getGasAlert(ev) && (
+          <span
+            style={{
+              display: "inline-block",
+              marginRight: 6,
+              padding: "1px 6px",
+              background: "rgba(245,158,11,0.15)",
+              border: "1px solid #f59e0b",
+              borderRadius: 4,
+              fontSize: 11,
+              color: "#f59e0b",
+              verticalAlign: "middle",
+            }}
+            title="High gas usage — >80% of network limit"
+          >
+            ⚠ High Gas
+          </span>
+        )}
+        {ev.ttl_extension && <TTLExtensionBadge ext={ev.ttl_extension} />}
+        {ev.factory_deployment && <FactoryDeploymentBadge deployment={ev.factory_deployment} />}
+        {ev.sac_side_effect && <SacSideEffectBadge kind={ev.sac_side_effect} />}
+        <LinkedDescription text={ev.description} />
+        {ev.function === "transfer" &&
+          (() => {
+            const t = parseTransfer(ev.description);
+            return t ? <FiatValue amount={t.amount} symbol={t.symbol} /> : null;
+          })()}
+        {ev.function === "swap" &&
+          (() => {
+            const path = ev.swap_path ?? parseSwapPath(ev.description);
+            return path ? (
+              <span
+                style={{
+                  marginLeft: 6,
+                  color: "var(--accent)",
+                  fontSize: 12,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {path.join(" → ")}
+              </span>
+            ) : null;
+          })()}
+      </td>
+    </>
+  );
+}
+
 export default function EventTable({ events }: Props) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef);
+
   if (!events.length)
     return (
       <p data-testid="empty-state" style={{ color: "var(--muted)" }}>
@@ -195,78 +294,39 @@ export default function EventTable({ events }: Props) {
             <th style={th}>Description</th>
           </tr>
         </thead>
-        <tbody>
-          {events.map((ev) => (
-            <tr key={ev.seq} style={{ borderBottom: "1px solid var(--border)" }}>
-              <td style={td}>
-                <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
-              </td>
-              <td style={td}>{ev.ledger.toLocaleString()}</td>
-              <td style={td}>
-                <FunctionBadge fn={ev.function} />
-              </td>
-              <td
+      </table>
+
+      {/* Virtualized scroll area — rows are position:absolute inside here */}
+      <div
+        ref={scrollContainerRef}
+        data-testid="virtual-scroll-container"
+        style={{
+          overflowY: "auto",
+          maxHeight: 600,
+          position: "relative",
+        }}
+      >
+        {/* Spacer div creates the full scrollable height */}
+        <div style={{ height: totalHeight, position: "relative" }}>
+          {visibleItems.map(({ item, style }) => (
+            <div key={item.seq} style={style}>
+              <table
                 style={{
-                  ...td,
-                  maxWidth: 480,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  tableLayout: "fixed",
                 }}
               >
-                {ev.is_clawback && (
-                  <span className="badge clawback" style={{ marginRight: 6 }} title="Mandatory authority intervention">
-                    ⚠ COMPLIANCE: CLAWBACK
-                  </span>
-                )}
-                {getGasAlert(ev) && (
-                  <span
-                    style={{
-                      display: "inline-block",
-                      marginRight: 6,
-                      padding: "1px 6px",
-                      background: "rgba(245,158,11,0.15)",
-                      border: "1px solid #f59e0b",
-                      borderRadius: 4,
-                      fontSize: 11,
-                      color: "#f59e0b",
-                      verticalAlign: "middle",
-                    }}
-                    title="High gas usage — >80% of network limit"
-                  >
-                    ⚠ High Gas
-                  </span>
-                )}
-                {ev.ttl_extension && <TTLExtensionBadge ext={ev.ttl_extension} />}
-                {ev.factory_deployment && <FactoryDeploymentBadge deployment={ev.factory_deployment} />}
-                {ev.sac_side_effect && <SacSideEffectBadge kind={ev.sac_side_effect} />}
-                <LinkedDescription text={ev.description} />
-                {ev.function === "transfer" &&
-                  (() => {
-                    const t = parseTransfer(ev.description);
-                    return t ? <FiatValue amount={t.amount} symbol={t.symbol} /> : null;
-                  })()}
-                {ev.function === "swap" &&
-                  (() => {
-                    const path = ev.swap_path ?? parseSwapPath(ev.description);
-                    return path ? (
-                      <span
-                        style={{
-                          marginLeft: 6,
-                          color: "var(--accent)",
-                          fontSize: 12,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {path.join(" → ")}
-                      </span>
-                    ) : null;
-                  })()}
-              </td>
-            </tr>
+                <tbody>
+                  <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                    <EventRow ev={item} />
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+      </div>
     </div>
   );
 }
