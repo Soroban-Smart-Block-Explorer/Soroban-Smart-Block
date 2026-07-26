@@ -298,18 +298,20 @@ export function buildDescription(fn, args, data, contractName) {
     case "lock":
     case "deposit_stake": {
       const [addr, amount, duration] = args;
+      const amt = amount ?? data;
       if (duration != null && duration !== 0) {
-        return `${fmt(addr)} staked ${fmtXlm(amount)} XLM for ${duration} days on ${contractName}`;
+        return `${fmt(addr)} staked ${fmtXlm(amt)} XLM for ${duration} days on ${contractName}`;
       }
-      return `${fmt(addr)} staked ${fmtXlm(amount)} XLM on ${contractName}`;
+      return `${fmt(addr)} staked ${fmtXlm(amt)} XLM on ${contractName}`;
     }
     case "unstake":
     case "unlock": {
       const [addr, amount, rewards] = args;
+      const amt = amount ?? data;
       if (rewards != null && rewards !== 0) {
-        return `${fmt(addr)} unstaked ${fmtXlm(amount)} XLM + ${fmtXlm(rewards)} XLM rewards on ${contractName}`;
+        return `${fmt(addr)} unstaked ${fmtXlm(amt)} XLM + ${fmtXlm(rewards)} XLM rewards on ${contractName}`;
       }
-      return `${fmt(addr)} unstaked ${fmtXlm(amount)} XLM on ${contractName}`;
+      return `${fmt(addr)} unstaked ${fmtXlm(amt)} XLM on ${contractName}`;
     }
     default:
       return genericDescription(fn, args, data, contractName);
