@@ -541,25 +541,90 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
-  // GET /api/contracts?page=&limit=  — paginated list of registered contracts
+  // GET /api/contracts?page=&limit=&type=  — paginated list of registered contracts
   app.get(
     "/api/contracts",
     makeCache("contracts_list", (req) => {
       const page = Number(req.query.page) || 1;
       const limit = Number(req.query.limit) || 25;
-      return `contracts:list:${page}:${limit}`;
+      const q = req.query.q || "";
+      const type = req.query.type || "all";
+      return `contracts:list:${page}:${limit}:${q}:${type}`;
     }),
     async (req, res) => {
       try {
         const page = Number(req.query.page) || 1;
         const limit = Math.min(Number(req.query.limit) || 25, 100);
-        const result = await db.listContracts({ page, limit });
-        res.json(result);
+        const q = (req.query.q || "").trim();
+        const type = (req.query.type || "all").toLowerCase();
+
+        // Build dynamic query supporting optional search (q) and type filter
+        const params = [];
+        const conditions = [];
+
+        if (q) {
+          params.push(`%${q}%`);
+          const idx = params.length;
+          conditions.push(`(name ILIKE $${idx} OR description ILIKE $${idx})`);
+        }
+
+        if (type && type !== "all") {
+          if (type === "verified") {
+            // A contract is "verified" when it has at least one source verification
+            conditions.push(
+              `id IN (SELECT DISTINCT contract_id FROM source_verifications)`,
+            );
+          } else {
+            // Match protocol_type column (may not exist on all installs — guard with COALESCE)
+            params.push(type);
+            conditions.push(`LOWER(COALESCE(protocol_type, '')) = $${params.length}`);
+          }
+        }
+
+        const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+        const offset = (page - 1) * limit;
+        params.push(limit, offset);
+
+        const [{ rows }, { rows: countRows }] = await Promise.all([
+          db.query(
+            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type, created_at
+             FROM contracts ${where}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params,
+          ),
+          db.query(
+            `SELECT COUNT(*)::INT AS total FROM contracts ${where}`,
+            params.slice(0, params.length - 2),
+          ),
+        ]);
+
+        const total = countRows[0].total;
+        res.json({
+          contracts: rows,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: Math.ceil(total / limit),
+          },
+        });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
     },
   );
+
+  // GET /api/contracts/:id/abi-history — ABI version history for a contract
+  // Returns all ABI snapshots ordered by version ascending: [{ abi_version, functions, min_ledger, created_at }, ...]
+  app.get("/api/contracts/:id/abi-history", async (req, res) => {
+    try {
+      const history = await db.getContractAbiHistory(req.params.id);
+      res.json({ contract_id: req.params.id, history });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   // GET /api/contracts/:id/events?page=&limit=  — events for a specific contract
   app.get("/api/contracts/:id/events", async (req, res) => {
@@ -945,6 +1010,60 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── NFT endpoints ────────────────────────────────────────────────
+
+  // GET /api/tokens/:contractId/nfts
+  //   ?owner=<address>  — filter to tokens owned by this address
+  //   &page=<n>         — 1-indexed page number (default 1)
+  //   &limit=<n>        — results per page, max 200 (default 50)
+  //
+  // Returns a paginated list of all minted NFT token IDs with their
+  // current owner, on-chain metadata, and last transfer ledger.
+  app.get("/api/tokens/:contractId/nfts", async (req, res) => {
+    try {
+      const { contractId } = req.params;
+      const owner = req.query.owner || undefined;
+      const page = req.query.page ? Number(req.query.page) : 1;
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+
+      if (isNaN(page) || page < 1) {
+        return res.status(422).json({ error: "Invalid page" });
+      }
+      if (isNaN(limit) || limit < 1 || limit > 200) {
+        return res.status(422).json({ error: "Invalid limit" });
+      }
+
+      const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+
+      const totalPages = Math.ceil(total / limit);
+      res.json({
+        contract_id: contractId,
+        tokens,
+        pagination: {
+          page,
+          limit,
+          total,
+          total_pages: totalPages,
+          has_next: page < totalPages,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:contractId/nfts/:tokenId/history
+  //   Returns the full mint + transfer event history for a single NFT token.
+  app.get("/api/tokens/:contractId/nfts/:tokenId/history", async (req, res) => {
+    try {
+      const { contractId, tokenId } = req.params;
+      const events = await db.getNftTokenHistory(contractId, tokenId);
+      res.json({ contract_id: contractId, token_id: tokenId, events });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── cursor-based pagination endpoint ────────────────────────────
   // GET /api/v1/events?contract=&fn=&type=&after=&limit=
   // `after` is the opaque seq cursor returned as `next_cursor` in the previous page.
@@ -1266,6 +1385,25 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.get("/api/contracts/:id/source-verifications", async (req, res) => {
     try {
       const rows = await db.getSourceVerifications(req.params.id, req.query.wasm_hash || undefined);
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── ABI Version History ───────────────────────────────────────────────────
+  // GET /api/contracts/:id/abi-history
+  // Returns all rows from contract_versions for this contract, ordered by abi_version ASC.
+  app.get("/api/contracts/:id/abi-history", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, contract_id, abi_version, min_ledger, name, description,
+                functions, registered_by, created_at
+         FROM contract_versions
+         WHERE contract_id = $1
+         ORDER BY abi_version ASC`,
+        [req.params.id],
+      );
       res.json(rows);
     } catch (e) {
       res.status(500).json({ error: e.message });
