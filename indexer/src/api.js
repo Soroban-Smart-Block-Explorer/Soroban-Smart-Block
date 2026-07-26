@@ -540,7 +540,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
-  // GET /api/contracts?page=&limit=  — paginated list of registered contracts
+  // GET /api/contracts?page=&limit=&type=  — paginated list of registered contracts
   app.get(
     "/api/contracts",
     makeCache("contracts_list", (req) => {
@@ -613,6 +613,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
     },
   );
+
+  // GET /api/contracts/:id/abi-history — ABI version history for a contract
+  // Returns all ABI snapshots ordered by version ascending: [{ abi_version, functions, min_ledger, created_at }, ...]
+  app.get("/api/contracts/:id/abi-history", async (req, res) => {
+    try {
+      const history = await db.getContractAbiHistory(req.params.id);
+      res.json({ contract_id: req.params.id, history });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   // GET /api/contracts/:id/events?page=&limit=  — events for a specific contract
   app.get("/api/contracts/:id/events", async (req, res) => {

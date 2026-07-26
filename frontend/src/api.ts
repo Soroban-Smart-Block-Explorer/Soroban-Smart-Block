@@ -168,7 +168,27 @@ export interface ContractListItem {
   is_paused: boolean;
   is_rwa: boolean;
   rwa_type: string | null;
+  /** Protocol type — auto-tagged from ABI functions or set explicitly. */
+  protocol_type: "token" | "dex" | "lending" | "nft" | "bridge" | "other";
+  /** Whether the DB ABI has been verified against the on-chain ContractMeta. */
+  is_verified: boolean;
+  /** Ledger at which verification was last confirmed (null if never verified). */
+  verified_ledger: number | null;
   created_at: string;
+}
+
+/** One ABI version snapshot returned by GET /api/contracts/:id/abi-history */
+export interface AbiHistoryEntry {
+  abi_version: number;
+  functions: { name: string; description?: string; params?: { name: string; kind?: string }[] }[];
+  registered_by: string;
+  min_ledger: number;
+  created_at: string;
+}
+
+export interface AbiHistoryResponse {
+  contract_id: string;
+  history: AbiHistoryEntry[];
 }
 
 export interface ContractsListResponse {
@@ -501,12 +521,15 @@ export const api = {
   },
   zkCosts: (seq: number) => get<{ calls: ZkHostCall[]; delta: ZkCostDelta | null }>(`/events/${seq}/zk-costs`),
   contract: (id: string) => get<ContractMeta>(`/contracts/${id}`),
-  listContracts: (page = 1, limit = 25) => {
+  listContracts: (page = 1, limit = 25, type?: string) => {
     const q = new URLSearchParams();
     q.set("page", String(page));
     q.set("limit", String(limit));
+    if (type) q.set("type", type);
     return get<ContractsListResponse>(`/contracts?${q}`);
   },
+  /** ABI version history — GET /api/contracts/:id/abi-history */
+  abiHistory: (id: string) => get<AbiHistoryResponse>(`/contracts/${id}/abi-history`),
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
   wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),

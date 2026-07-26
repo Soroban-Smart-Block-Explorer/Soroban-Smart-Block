@@ -472,15 +472,31 @@ export const db = {
     ].slice(0, limitN);
   },
 
-  async listContracts({ page = 1, limit = 25 } = {}) {
+  async listContracts({ page = 1, limit = 25, type } = {}) {
     const offset = (page - 1) * limit;
+    const params = [];
+    const conditions = [];
+
+    if (type) {
+      params.push(type);
+      conditions.push(`protocol_type = $${params.length}`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    params.push(limit);
+    const limitIdx = params.length;
+    params.push(offset);
+    const offsetIdx = params.length;
+
     const [{ rows }, { rows: countRows }] = await Promise.all([
       pool.query(
-        `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type, created_at
-         FROM contracts ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        [limit, offset],
+        `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused,
+                is_rwa, rwa_type, protocol_type, is_verified, verified_ledger, created_at
+         FROM contracts ${where} ORDER BY created_at DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params,
       ),
-      pool.query("SELECT COUNT(*)::INT AS total FROM contracts"),
+      pool.query(`SELECT COUNT(*)::INT AS total FROM contracts ${where}`, type ? [type] : []),
     ]);
     const total = countRows[0].total;
     return {
@@ -586,10 +602,14 @@ export const db = {
   },
 
   async upsertContractMeta(meta) {
+    // Auto-tag protocol_type from function names if not explicitly provided
+    const functionNames = (meta.functions ?? []).map((f) => (typeof f === 'string' ? f : f?.name ?? ''));
+    const protocol_type = meta.protocol_type ?? this.inferProtocolType(functionNames);
+
     await pool.query(
-      `INSERT INTO contracts (id, name, description, functions, registered_by, source_files, has_circuit_breaker, is_rwa, rwa_type, version, abi_version, min_ledger)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       ON CONFLICT (id) DO UPDATE SET name=$2, description=$3, functions=$4, source_files=$6, has_circuit_breaker=$7, is_rwa=$8, rwa_type=$9, version=$10, abi_version=$11, min_ledger=$12`,
+      `INSERT INTO contracts (id, name, description, functions, registered_by, source_files, has_circuit_breaker, is_rwa, rwa_type, version, abi_version, min_ledger, protocol_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       ON CONFLICT (id) DO UPDATE SET name=$2, description=$3, functions=$4, source_files=$6, has_circuit_breaker=$7, is_rwa=$8, rwa_type=$9, version=$10, abi_version=$11, min_ledger=$12, protocol_type=$13`,
       [
         meta.id,
         meta.name,
@@ -603,10 +623,27 @@ export const db = {
         meta.version ?? 1,
         meta.abi_version ?? 0,
         meta.min_ledger ?? 0,
+        protocol_type,
       ],
     );
 
-    // Also store in version history if abi_version is provided
+    // Also store in contract_abi_versions history if abi_version is provided
+    if (meta.abi_version != null) {
+      await pool.query(
+        `INSERT INTO contract_abi_versions (contract_id, abi_version, min_ledger, functions, registered_by)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (contract_id, abi_version) DO NOTHING`,
+        [
+          meta.id,
+          meta.abi_version,
+          meta.min_ledger ?? 0,
+          JSON.stringify(meta.functions ?? []),
+          meta.registered_by ?? '',
+        ],
+      );
+    }
+
+    // Also store in contract_versions (legacy) if abi_version is provided
     if (meta.abi_version != null) {
       await pool.query(
         `INSERT INTO contract_versions (contract_id, abi_version, min_ledger, name, description, functions, registered_by)
@@ -1270,6 +1307,95 @@ export const db = {
       `UPDATE gap_log SET retries = retries + 1 WHERE id = $1`,
       [id],
     );
+  },
+
+  /**
+   * Mark a contract as verified (or unverified) against the on-chain ABI.
+   *
+   * @param {string} contractId
+   * @param {boolean} isVerified
+   * @param {number|null} ledger  — ledger at which verification was confirmed
+   */
+  async setContractVerified(contractId, isVerified, ledger = null) {
+    await pool.query(
+      `UPDATE contracts
+       SET is_verified = $2,
+           verified_at = CASE WHEN $2 THEN NOW() ELSE verified_at END,
+           verified_ledger = CASE WHEN $2 THEN $3 ELSE verified_ledger END
+       WHERE id = $1`,
+      [contractId, isVerified, ledger],
+    );
+  },
+
+  // ── Issue #517: ABI version history ───────────────────────────────────────
+
+  /**
+   * Return the full ABI version history for a contract in ascending version order.
+   * Each row represents a snapshot of the functions array at a given abi_version.
+   *
+   * @param {string} contractId
+   * @returns {Promise<{ abi_version: number, functions: object[], registered_by: string, min_ledger: number, created_at: string }[]>}
+   */
+  async getContractAbiHistory(contractId) {
+    const { rows } = await pool.query(
+      `SELECT abi_version, functions, registered_by, min_ledger, created_at
+       FROM contract_abi_versions
+       WHERE contract_id = $1
+       ORDER BY abi_version ASC`,
+      [contractId],
+    );
+    return rows.map((r) => ({
+      abi_version: r.abi_version,
+      functions: parseJsonField(r.functions, []),
+      registered_by: r.registered_by,
+      min_ledger: r.min_ledger,
+      created_at: r.created_at,
+    }));
+  },
+
+  /**
+   * Insert a new ABI version snapshot.
+   * Called by the decoder when it detects an update_contract event.
+   * No-op if the (contract_id, abi_version) pair already exists.
+   *
+   * @param {{ contract_id: string, abi_version: number, functions: object[], registered_by: string, min_ledger: number }} entry
+   */
+  async insertAbiVersionSnapshot(entry) {
+    await pool.query(
+      `INSERT INTO contract_abi_versions
+         (contract_id, abi_version, functions, registered_by, min_ledger)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (contract_id, abi_version) DO NOTHING`,
+      [
+        entry.contract_id,
+        entry.abi_version,
+        JSON.stringify(entry.functions ?? []),
+        entry.registered_by ?? '',
+        entry.min_ledger ?? 0,
+      ],
+    );
+  },
+
+  // ── Issue #518: protocol_type ──────────────────────────────────────────────
+
+  /**
+   * Derive a protocol_type from the contract's function names using heuristics.
+   *
+   * Rules (in priority order):
+   *   swap | swap_exact          → 'dex'
+   *   supply | borrow            → 'lending'
+   *   mint + transfer (no swap)  → 'token'
+   *   otherwise                  → 'other'
+   *
+   * @param {string[]} functionNames  Array of function name strings
+   * @returns {'dex'|'lending'|'token'|'other'}
+   */
+  inferProtocolType(functionNames) {
+    const names = (functionNames ?? []).map((n) => String(n).toLowerCase());
+    if (names.some((n) => n === 'swap' || n === 'swap_exact')) return 'dex';
+    if (names.some((n) => n === 'supply' || n === 'borrow')) return 'lending';
+    if (names.includes('mint') && names.includes('transfer')) return 'token';
+    return 'other';
   },
 
   /**
