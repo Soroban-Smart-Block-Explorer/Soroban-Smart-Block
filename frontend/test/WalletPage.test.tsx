@@ -1,20 +1,34 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import WalletPage from "../src/pages/WalletPage";
 
-vi.mock("react-router-dom", () => ({
-  useParams: () => ({ address: "GA3X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X" }),
-}));
+const VALID_ADDR = "GA5ZSEJYB37FRCONJ3LQUMTZHKWZ6BIGZU3U2XHRJHXBVWMGHMV36TJQ";
+
+const mockWallet = vi.fn();
 
 vi.mock("../src/api", () => ({
   api: {
-    wallet: vi.fn().mockResolvedValue([]),
+    wallet: (...args: unknown[]) => mockWallet(...args),
   },
 }));
 
-function Wrapper({ children }: { children: React.ReactNode }) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+function makeQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
+}
+
+function renderWalletPage(address: string) {
+  const qc = makeQueryClient();
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[`/wallet/${address}`]}>
+        <Routes>
+          <Route path="/wallet/:address" element={<WalletPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 describe("WalletPage", () => {
@@ -26,23 +40,82 @@ describe("WalletPage", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders with empty-state message when no events", async () => {
-    const WalletPage = (await import("../src/pages/WalletPage")).default;
-    render(
-      <Wrapper>
-        <WalletPage />
-      </Wrapper>
-    );
-    expect(await screen.findByText("No Soroban interactions found for this address")).toBeDefined();
+  it("renders events from a mock API response", async () => {
+    const mockEvents = [
+      {
+        seq: 1001,
+        contract_id: "CCEMOFO5TE7FGOAJXR3RDHPC6RWO4FM2GOPUKI5N6KJQ4MOLOFPFJN6B",
+        function: "transfer",
+        ledger: 2500000,
+        description: "Transferred 100.00 USDC to GDQOE2JFBXYKIYLJBNUDRZI2FHLX5TLXHMDNUE7KPK5I2YA5TSB6Z4LD",
+        raw_topics: ["transfer"],
+        tx_hash: "abc123def456abc123def456abc123def456abc123def456abc123def4561234",
+      },
+      {
+        seq: 1002,
+        contract_id: "CDLZFC3SYJYDZT7K67VZ75HRJDTIKI7BF6RQD7MFPK5QERZUTXX7YV7V",
+        function: "swap",
+        ledger: 2500005,
+        description: "Swapped 50.00 XLM to 420.00 USDC",
+        raw_topics: ["swap"],
+        tx_hash: "def789abc123def789abc123def789abc123def789abc123def789abc1231234",
+      },
+    ];
+
+    mockWallet.mockResolvedValue({ events: mockEvents, horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    const seqLink = await screen.findByText("#1001");
+    expect(seqLink).toBeDefined();
+    expect(screen.getByText("#1002")).toBeDefined();
+    expect(screen.getByText("2,500,000")).toBeDefined();
+    expect(screen.getByText("2,500,005")).toBeDefined();
+    expect(screen.getByText("transfer")).toBeDefined();
+    expect(screen.getByText("swap")).toBeDefined();
   });
 
-  it("shows address in page heading even with no events", async () => {
-    const WalletPage = (await import("../src/pages/WalletPage")).default;
-    render(
-      <Wrapper>
-        <WalletPage />
-      </Wrapper>
-    );
-    expect(await screen.findByText("GA3X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X")).toBeDefined();
+  it("shows 'invalid address' error for GFOO", async () => {
+    renderWalletPage("GFOO");
+
+    const errorEl = await screen.findByText("Invalid wallet address format");
+    expect(errorEl).toBeDefined();
+
+    expect(mockWallet).not.toHaveBeenCalled();
+  });
+
+  it("shows empty state when the events array is empty", async () => {
+    mockWallet.mockResolvedValue({ events: [], horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    const emptyMsg = await screen.findByText("No Soroban interactions found for this address");
+    expect(emptyMsg).toBeDefined();
+  });
+
+  it("renders XLM balance when horizon_account is present in the response", async () => {
+    mockWallet.mockResolvedValue({
+      events: [],
+      horizon_account: {
+        id: VALID_ADDR,
+        account_id: VALID_ADDR,
+        sequence: "123456789",
+        balances: [
+          { asset_type: "native", balance: "1250.0000000" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: "GDQOE2JFBXYKIYLJBNUDRZI2FHLX5TLXHMDNUE7KPK5I2YA5TSB6Z4LD",
+            balance: "500.0000000",
+          },
+        ],
+      },
+    });
+
+    renderWalletPage(VALID_ADDR);
+
+    const xlmHeading = await screen.findByText("XLM Balance");
+    expect(xlmHeading).toBeDefined();
+    expect(screen.getByText("1250.0000000 XLM")).toBeDefined();
   });
 });

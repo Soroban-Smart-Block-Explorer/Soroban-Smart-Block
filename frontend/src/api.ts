@@ -234,6 +234,20 @@ export interface SearchResponse {
   suggestions: SearchSuggestion[];
 }
 
+export interface HorizonBalance {
+  asset_type: string;
+  asset_code?: string;
+  asset_issuer?: string;
+  balance: string;
+}
+
+export interface HorizonAccount {
+  id: string;
+  account_id: string;
+  sequence: string;
+  balances: HorizonBalance[];
+}
+
 export interface BurnAlert {
   contractId: string;
   ledger: number;
@@ -532,7 +546,8 @@ export const api = {
   abiHistory: (id: string) => get<AbiHistoryResponse>(`/contracts/${id}/abi-history`),
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
-  wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
+  wallet: (address: string) =>
+    get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(`/wallet/${address}`),
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
 
   // NFT collection tokens with optional owner filter and pagination
