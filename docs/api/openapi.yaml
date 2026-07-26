@@ -347,6 +347,137 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/abi-history:
+    get:
+      summary: ABI version history for a contract (Issue #517)
+      description: |
+        Returns every ABI snapshot recorded for the contract, ordered by abi_version
+        ascending. A new entry is added each time an update_contract event is
+        detected. The initial registration is stored as version 0.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: ABI version history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, history]
+                properties:
+                  contract_id:
+                    type: string
+                  history:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AbiHistoryEntry"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/abi/import-github:
+    post:
+      summary: Bulk ABI import from a GitHub repository (Issue #520)
+      description: |
+        Scans a GitHub repository directory for JSON files matching the
+        contractRegistry.schema.json format and bulk-upserts them into the
+        contract registry. Idempotent — re-importing the same file only updates
+        changed fields. Rate-limited to one call per 10 minutes per repo.
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repo]
+              properties:
+                repo:
+                  type: string
+                  description: GitHub repository in owner/repo format
+                  example: "myorg/my-abis"
+                path:
+                  type: string
+                  description: Directory path within the repo containing .json ABI files
+                  default: "contracts/"
+                  example: "contracts/"
+                ref:
+                  type: string
+                  description: Git ref (branch, tag, or commit SHA) to read from
+                  default: "main"
+                  example: "main"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported, skipped, errors, total_files]
+                properties:
+                  imported:
+                    type: integer
+                    description: Number of contracts successfully upserted
+                  skipped:
+                    type: integer
+                    description: Number of files skipped due to schema validation errors
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file:
+                          type: string
+                        error:
+                          type: string
+                  total_files:
+                    type: integer
+                    description: Total .json files found in the directory
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid admin auth token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited — retry after the specified number of seconds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  retry_after:
+                    type: integer
+        "502":
+          description: GitHub API error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/admin/alerts/{condition}/resolve:
     post:
       summary: Resolve an active alert condition
@@ -375,6 +506,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /api/contracts:
+    get:
+      summary: List registered contracts
+      description: Returns a paginated list of registered contracts. Supports filtering by protocol type.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: type
+          in: query
+          description: Filter by protocol type (Issue #518)
+          schema:
+            type: string
+            enum: [token, dex, lending, nft, bridge, other]
+      responses:
+        "200":
+          description: Paginated contract list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractsListResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     post:
       summary: Register contract ABI metadata
       description: Registers metadata for a new contract ID. Requires API key authentication.
@@ -1071,10 +1238,66 @@ components:
           type: string
           nullable: true
           example: null
+        protocol_type:
+          type: string
+          enum: [token, dex, lending, nft, bridge, other]
+          default: other
+          description: Auto-tagged protocol type (Issue #518)
+        is_verified:
+          type: boolean
+          default: false
+          description: Whether the ABI has been verified against the on-chain registry (Issue #519)
+        verified_ledger:
+          type: integer
+          nullable: true
+          description: Ledger at which verification was last confirmed
         dependency_advisory:
           type: object
           nullable: true
           example: null
+
+    AbiHistoryEntry:
+      type: object
+      required: [abi_version, functions, registered_by, min_ledger, created_at]
+      description: Single ABI version snapshot (Issue #517)
+      properties:
+        abi_version:
+          type: integer
+          description: Monotonically increasing ABI version number
+          example: 0
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionSpec"
+        registered_by:
+          type: string
+          description: Address or identifier of the registrant
+        min_ledger:
+          type: integer
+          description: Ledger at which this ABI version became active
+        created_at:
+          type: string
+          format: date-time
+
+    ContractsListResponse:
+      type: object
+      required: [contracts, pagination]
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractMeta"
+        pagination:
+          type: object
+          properties:
+            page:
+              type: integer
+            limit:
+              type: integer
+            total:
+              type: integer
+            total_pages:
+              type: integer
 
     ContractRegistration:
       type: object
@@ -1093,6 +1316,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FunctionSpec"
+        protocol_type:
+          type: string
+          enum: [token, dex, lending, nft, bridge, other]
+          description: Optional explicit protocol type; auto-tagged from functions if omitted
 
     FunctionSpec:
       type: object

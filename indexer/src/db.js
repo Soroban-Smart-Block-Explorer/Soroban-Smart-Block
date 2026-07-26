@@ -17,6 +17,11 @@ export const db = {
   /** Run all pending SQL migrations from indexer/migrations/. */
   async init() {
     await runMigrations(pool);
+    await pool.query(
+      `INSERT INTO daemon_state (key, value)
+       VALUES ('cursor', '0'), ('last_indexed_ledger', '0')
+       ON CONFLICT (key) DO NOTHING`,
+    );
   },
 
   async getMaxLedger() {
@@ -25,17 +30,30 @@ export const db = {
   },
 
   // ── daemon cursor persistence ──────────────────────────────────
-  async saveCursor(ledger) {
+  async saveDaemonState(key, value) {
     await pool.query(
-      `INSERT INTO daemon_state (key, value) VALUES ('cursor', $1)
-       ON CONFLICT (key) DO UPDATE SET value = $1`,
-      [String(ledger)],
+      `INSERT INTO daemon_state (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = $2`,
+      [key, String(value)],
     );
+  },
+
+  async saveCursor(ledger) {
+    await this.saveDaemonState('cursor', ledger);
   },
 
   async loadCursor() {
     const { rows } = await pool.query("SELECT value FROM daemon_state WHERE key = 'cursor'");
     return rows[0] ? Number(rows[0].value) : null;
+  },
+
+  async saveLastIndexedLedger(ledger) {
+    await this.saveDaemonState('last_indexed_ledger', ledger);
+  },
+
+  async getLastIndexedLedger() {
+    const { rows } = await pool.query("SELECT value FROM daemon_state WHERE key = 'last_indexed_ledger'");
+    return rows[0] ? Number(rows[0].value) : 0;
   },
 
   // ── ledger reorganization state ───────────────────────────────
@@ -508,15 +526,31 @@ export const db = {
     ].slice(0, limitN);
   },
 
-  async listContracts({ page = 1, limit = 25 } = {}) {
+  async listContracts({ page = 1, limit = 25, type } = {}) {
     const offset = (page - 1) * limit;
+    const params = [];
+    const conditions = [];
+
+    if (type) {
+      params.push(type);
+      conditions.push(`protocol_type = $${params.length}`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    params.push(limit);
+    const limitIdx = params.length;
+    params.push(offset);
+    const offsetIdx = params.length;
+
     const [{ rows }, { rows: countRows }] = await Promise.all([
       pool.query(
-        `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type, created_at
-         FROM contracts ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        [limit, offset],
+        `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused,
+                is_rwa, rwa_type, protocol_type, is_verified, verified_ledger, created_at
+         FROM contracts ${where} ORDER BY created_at DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params,
       ),
-      pool.query("SELECT COUNT(*)::INT AS total FROM contracts"),
+      pool.query(`SELECT COUNT(*)::INT AS total FROM contracts ${where}`, type ? [type] : []),
     ]);
     const total = countRows[0].total;
     return {
@@ -621,11 +655,69 @@ export const db = {
     return rows;
   },
 
+  /**
+   * Aggregate stats for a contract's event history (#536): total events,
+   * unique caller addresses, first/last seen ledger, and a 30-day daily
+   * event-count trend (zero-filled so the frontend sparkline never sees gaps).
+   * @param {string} contractId
+   */
+  async getContractStats(contractId) {
+    const [{ rows: totals }, { rows: callerRows }, { rows: dailyRows }] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::INT AS total_events, MIN(ledger) AS first_seen_ledger, MAX(ledger) AS last_seen_ledger
+         FROM events WHERE contract_id = $1`,
+        [contractId],
+      ),
+      // Unique caller addresses referenced anywhere in the event payload —
+      // same address-extraction approach as searchWallets().
+      pool.query(
+        `SELECT COUNT(DISTINCT a.address)::INT AS unique_callers
+         FROM events e
+         CROSS JOIN LATERAL (
+           SELECT DISTINCT m[1] AS address
+           FROM regexp_matches(
+             coalesce(e.description, '') || ' ' || coalesce(e.raw_topics::text, '') || ' ' || coalesce(e.raw_data, ''),
+             '\\m[GCM][A-Z2-7]{55}\\M',
+             'g'
+           ) AS m
+         ) a
+         WHERE e.contract_id = $1`,
+        [contractId],
+      ),
+      pool.query(
+        `SELECT to_char(created_at, 'YYYY-MM-DD') AS date, COUNT(*)::INT AS count
+         FROM events
+         WHERE contract_id = $1 AND created_at >= NOW() - INTERVAL '30 days'
+         GROUP BY date`,
+        [contractId],
+      ),
+    ]);
+
+    const countsByDate = new Map(dailyRows.map((r) => [r.date, r.count]));
+    const events_per_day = [];
+    for (let i = 29; i >= 0; i--) {
+      const date = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+      events_per_day.push({ date, count: countsByDate.get(date) ?? 0 });
+    }
+
+    return {
+      total_events: totals[0].total_events,
+      unique_callers: callerRows[0].unique_callers,
+      first_seen_ledger: totals[0].first_seen_ledger != null ? Number(totals[0].first_seen_ledger) : null,
+      last_seen_ledger: totals[0].last_seen_ledger != null ? Number(totals[0].last_seen_ledger) : null,
+      events_per_day,
+    };
+  },
+
   async upsertContractMeta(meta) {
+    // Auto-tag protocol_type from function names if not explicitly provided
+    const functionNames = (meta.functions ?? []).map((f) => (typeof f === 'string' ? f : f?.name ?? ''));
+    const protocol_type = meta.protocol_type ?? this.inferProtocolType(functionNames);
+
     await pool.query(
-      `INSERT INTO contracts (id, name, description, functions, registered_by, source_files, has_circuit_breaker, is_rwa, rwa_type, version, abi_version, min_ledger)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       ON CONFLICT (id) DO UPDATE SET name=$2, description=$3, functions=$4, source_files=$6, has_circuit_breaker=$7, is_rwa=$8, rwa_type=$9, version=$10, abi_version=$11, min_ledger=$12`,
+      `INSERT INTO contracts (id, name, description, functions, registered_by, source_files, has_circuit_breaker, is_rwa, rwa_type, version, abi_version, min_ledger, protocol_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       ON CONFLICT (id) DO UPDATE SET name=$2, description=$3, functions=$4, source_files=$6, has_circuit_breaker=$7, is_rwa=$8, rwa_type=$9, version=$10, abi_version=$11, min_ledger=$12, protocol_type=$13`,
       [
         meta.id,
         meta.name,
@@ -639,10 +731,27 @@ export const db = {
         meta.version ?? 1,
         meta.abi_version ?? 0,
         meta.min_ledger ?? 0,
+        protocol_type,
       ],
     );
 
-    // Also store in version history if abi_version is provided
+    // Also store in contract_abi_versions history if abi_version is provided
+    if (meta.abi_version != null) {
+      await pool.query(
+        `INSERT INTO contract_abi_versions (contract_id, abi_version, min_ledger, functions, registered_by)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (contract_id, abi_version) DO NOTHING`,
+        [
+          meta.id,
+          meta.abi_version,
+          meta.min_ledger ?? 0,
+          JSON.stringify(meta.functions ?? []),
+          meta.registered_by ?? '',
+        ],
+      );
+    }
+
+    // Also store in contract_versions (legacy) if abi_version is provided
     if (meta.abi_version != null) {
       await pool.query(
         `INSERT INTO contract_versions (contract_id, abi_version, min_ledger, name, description, functions, registered_by)
@@ -1039,6 +1148,89 @@ export const db = {
     );
   },
 
+  // ── NFT token queries ──────────────────────────────────────────────────────
+
+  /**
+   * Return all minted NFT tokens for a collection contract, with pagination
+   * and optional owner-address filter.
+   *
+   * Each row in token_holders where token_id IS NOT NULL represents one
+   * minted NFT. The current owner is the `address` column.
+   *
+   * @param {string} contractId
+   * @param {{ owner?: string, page?: number, limit?: number }} opts
+   * @returns {Promise<{ tokens: object[], total: number }>}
+   */
+  async getNftTokens(contractId, { owner, page = 1, limit = 50 } = {}) {
+    const pageN = Math.max(1, Number(page) || 1);
+    const limitN = Math.min(200, Math.max(1, Number(limit) || 50));
+    const offset = (pageN - 1) * limitN;
+
+    const params = [contractId];
+    let ownerFilter = "";
+    if (owner) {
+      params.push(owner);
+      ownerFilter = `AND address = $${params.length}`;
+    }
+
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM token_holders
+       WHERE contract_id = $1 AND token_id IS NOT NULL ${ownerFilter}`,
+      params,
+    );
+    const total = Number(countRows[0].total);
+
+    params.push(limitN, offset);
+    const { rows } = await pool.query(
+      `SELECT token_id, address AS owner, metadata_json, last_transfer_ledger
+       FROM token_holders
+       WHERE contract_id = $1 AND token_id IS NOT NULL ${ownerFilter}
+       ORDER BY token_id ASC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+
+    return {
+      tokens: rows.map((r) => ({
+        token_id: r.token_id,
+        owner: r.owner,
+        metadata: r.metadata_json ?? null,
+        last_transfer_ledger: r.last_transfer_ledger != null ? Number(r.last_transfer_ledger) : null,
+      })),
+      total,
+    };
+  },
+
+  /**
+   * Return the full transfer + mint history for a single NFT token,
+   * sourced from the events table.
+   *
+   * @param {string} contractId
+   * @param {string} tokenId
+   * @returns {Promise<object[]>}
+   */
+  async getNftTokenHistory(contractId, tokenId) {
+    const { rows } = await pool.query(
+      `SELECT seq, function, ledger, tx_hash, description, raw_topics, created_at
+       FROM events
+       WHERE contract_id = $1
+         AND (raw_topics::text ILIKE $2 OR description ILIKE $2)
+       ORDER BY ledger ASC, seq ASC
+       LIMIT 500`,
+      [contractId, `%${tokenId}%`],
+    );
+    return rows.map((r) => ({
+      seq: Number(r.seq),
+      function: r.function,
+      ledger: Number(r.ledger),
+      tx_hash: r.tx_hash,
+      description: r.description,
+      raw_topics: r.raw_topics,
+      created_at: r.created_at,
+    }));
+  },
+
   // ── Predictive Gap Detection helpers ────────────────────────────────────────
 
   /**
@@ -1223,6 +1415,95 @@ export const db = {
       `UPDATE gap_log SET retries = retries + 1 WHERE id = $1`,
       [id],
     );
+  },
+
+  /**
+   * Mark a contract as verified (or unverified) against the on-chain ABI.
+   *
+   * @param {string} contractId
+   * @param {boolean} isVerified
+   * @param {number|null} ledger  — ledger at which verification was confirmed
+   */
+  async setContractVerified(contractId, isVerified, ledger = null) {
+    await pool.query(
+      `UPDATE contracts
+       SET is_verified = $2,
+           verified_at = CASE WHEN $2 THEN NOW() ELSE verified_at END,
+           verified_ledger = CASE WHEN $2 THEN $3 ELSE verified_ledger END
+       WHERE id = $1`,
+      [contractId, isVerified, ledger],
+    );
+  },
+
+  // ── Issue #517: ABI version history ───────────────────────────────────────
+
+  /**
+   * Return the full ABI version history for a contract in ascending version order.
+   * Each row represents a snapshot of the functions array at a given abi_version.
+   *
+   * @param {string} contractId
+   * @returns {Promise<{ abi_version: number, functions: object[], registered_by: string, min_ledger: number, created_at: string }[]>}
+   */
+  async getContractAbiHistory(contractId) {
+    const { rows } = await pool.query(
+      `SELECT abi_version, functions, registered_by, min_ledger, created_at
+       FROM contract_abi_versions
+       WHERE contract_id = $1
+       ORDER BY abi_version ASC`,
+      [contractId],
+    );
+    return rows.map((r) => ({
+      abi_version: r.abi_version,
+      functions: parseJsonField(r.functions, []),
+      registered_by: r.registered_by,
+      min_ledger: r.min_ledger,
+      created_at: r.created_at,
+    }));
+  },
+
+  /**
+   * Insert a new ABI version snapshot.
+   * Called by the decoder when it detects an update_contract event.
+   * No-op if the (contract_id, abi_version) pair already exists.
+   *
+   * @param {{ contract_id: string, abi_version: number, functions: object[], registered_by: string, min_ledger: number }} entry
+   */
+  async insertAbiVersionSnapshot(entry) {
+    await pool.query(
+      `INSERT INTO contract_abi_versions
+         (contract_id, abi_version, functions, registered_by, min_ledger)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (contract_id, abi_version) DO NOTHING`,
+      [
+        entry.contract_id,
+        entry.abi_version,
+        JSON.stringify(entry.functions ?? []),
+        entry.registered_by ?? '',
+        entry.min_ledger ?? 0,
+      ],
+    );
+  },
+
+  // ── Issue #518: protocol_type ──────────────────────────────────────────────
+
+  /**
+   * Derive a protocol_type from the contract's function names using heuristics.
+   *
+   * Rules (in priority order):
+   *   swap | swap_exact          → 'dex'
+   *   supply | borrow            → 'lending'
+   *   mint + transfer (no swap)  → 'token'
+   *   otherwise                  → 'other'
+   *
+   * @param {string[]} functionNames  Array of function name strings
+   * @returns {'dex'|'lending'|'token'|'other'}
+   */
+  inferProtocolType(functionNames) {
+    const names = (functionNames ?? []).map((n) => String(n).toLowerCase());
+    if (names.some((n) => n === 'swap' || n === 'swap_exact')) return 'dex';
+    if (names.some((n) => n === 'supply' || n === 'borrow')) return 'lending';
+    if (names.includes('mint') && names.includes('transfer')) return 'token';
+    return 'other';
   },
 
   /**

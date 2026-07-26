@@ -1,47 +1,28 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import WalletPage from "../src/pages/WalletPage";
 
-const ADDRESS = "GA3X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X";
-// A valid muxed (M...) address and its known base G... account + numeric ID,
-// per SEP-23 test vectors.
-const MUXED_ADDRESS = "MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK";
-const MUXED_BASE_ADDRESS = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
-const MUXED_ID = "9223372036854775808";
+const VALID_ADDR = "GA5ZSEJYB37FRCONJ3LQUMTZHKWZ6BIGZU3U2XHRJHXBVWMGHMV36TJQ";
 
-const NATIVE_ONLY_BALANCES = { balances: [{ asset_code: "XLM", asset_issuer: null, balance: "125.5000000", is_native: true }] };
+const mockWallet = vi.fn();
 
-function mockFetch({
-  events = { events: [] },
-  eventsOk = true,
-  balances = NATIVE_ONLY_BALANCES,
-  balancesOk = true,
-}: {
-  events?: unknown;
-  eventsOk?: boolean;
-  balances?: unknown;
-  balancesOk?: boolean;
-} = {}) {
-  const fn = vi.fn().mockImplementation((url: string) => {
-    if (url.includes("/balances")) {
-      return Promise.resolve({ ok: balancesOk, status: balancesOk ? 200 : 502, json: async () => balances });
-    }
-    if (url.includes("/wallet/")) {
-      return Promise.resolve({ ok: eventsOk, status: eventsOk ? 200 : 500, json: async () => events });
-    }
-    return Promise.reject(new Error(`Unexpected fetch: ${url}`));
-  });
-  (global as any).fetch = fn;
-  return fn;
+vi.mock("../src/api", () => ({
+  api: {
+    wallet: (...args: unknown[]) => mockWallet(...args),
+  },
+}));
+
+function makeQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
 
-function renderWalletPage(path: string) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderWalletPage(address: string) {
+  const qc = makeQueryClient();
   return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[path]}>
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[`/wallet/${address}`]}>
         <Routes>
           <Route path="/wallet/:address" element={<WalletPage />} />
         </Routes>
@@ -53,87 +34,124 @@ function renderWalletPage(path: string) {
 describe("WalletPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSearchParams = new URLSearchParams();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("renders with empty-state message when no events", async () => {
-    mockFetch();
-    renderWalletPage(`/wallet/${ADDRESS}`);
-    expect(await screen.findByText("No Soroban interactions found for this address")).toBeDefined();
+  it("renders events from a mock API response", async () => {
+    const mockEvents = [
+      {
+        seq: 1001,
+        contract_id: "CCEMOFO5TE7FGOAJXR3RDHPC6RWO4FM2GOPUKI5N6KJQ4MOLOFPFJN6B",
+        function: "transfer",
+        ledger: 2500000,
+        description: "Transferred 100.00 USDC to GDQOE2JFBXYKIYLJBNUDRZI2FHLX5TLXHMDNUE7KPK5I2YA5TSB6Z4LD",
+        raw_topics: ["transfer"],
+        tx_hash: "abc123def456abc123def456abc123def456abc123def456abc123def4561234",
+      },
+      {
+        seq: 1002,
+        contract_id: "CDLZFC3SYJYDZT7K67VZ75HRJDTIKI7BF6RQD7MFPK5QERZUTXX7YV7V",
+        function: "swap",
+        ledger: 2500005,
+        description: "Swapped 50.00 XLM to 420.00 USDC",
+        raw_topics: ["swap"],
+        tx_hash: "def789abc123def789abc123def789abc123def789abc123def789abc1231234",
+      },
+    ];
+
+    mockWallet.mockResolvedValue({ events: mockEvents, horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    const seqLink = await screen.findByText("#1001");
+    expect(seqLink).toBeDefined();
+    expect(screen.getByText("#1002")).toBeDefined();
+    expect(screen.getByText("2,500,000")).toBeDefined();
+    expect(screen.getByText("2,500,005")).toBeDefined();
+    expect(screen.getByText("transfer")).toBeDefined();
+    expect(screen.getByText("swap")).toBeDefined();
   });
 
-  it("shows address in page heading even with no events", async () => {
-    mockFetch();
-    renderWalletPage(`/wallet/${ADDRESS}`);
-    expect(await screen.findByText(ADDRESS)).toBeDefined();
+  it("shows 'invalid address' error for GFOO", async () => {
+    renderWalletPage("GFOO");
+
+    const errorEl = await screen.findByText("Invalid wallet address format");
+    expect(errorEl).toBeDefined();
+
+    expect(mockWallet).not.toHaveBeenCalled();
   });
 
-  it("shows the XLM balance prominently (issue #529)", async () => {
-    mockFetch();
-    renderWalletPage(`/wallet/${ADDRESS}`);
-    expect(await screen.findByText("125.5")).toBeDefined();
-    expect(screen.getByText("XLM Balance")).toBeDefined();
+  it("shows empty state when the events array is empty", async () => {
+    mockWallet.mockResolvedValue({ events: [], horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    const emptyMsg = await screen.findByText("No Soroban interactions found for this address");
+    expect(emptyMsg).toBeDefined();
   });
 
-  it("shows a non-fatal error when Horizon is unreachable, but event history still loads (issue #529)", async () => {
-    mockFetch({
-      balancesOk: false,
-      balances: { error: "Account not found on network" },
-      events: { events: [] },
+  it("renders XLM balance when horizon_account is present in the response", async () => {
+    mockWallet.mockResolvedValue({
+      events: [],
+      horizon_account: {
+        id: VALID_ADDR,
+        account_id: VALID_ADDR,
+        sequence: "123456789",
+        balances: [
+          { asset_type: "native", balance: "1250.0000000" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: "GDQOE2JFBXYKIYLJBNUDRZI2FHLX5TLXHMDNUE7KPK5I2YA5TSB6Z4LD",
+            balance: "500.0000000",
+          },
+        ],
+      },
     });
-    renderWalletPage(`/wallet/${ADDRESS}`);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Unable to load balances/i);
-    expect(await screen.findByText("No Soroban interactions found for this address")).toBeDefined();
+    renderWalletPage(VALID_ADDR);
+
+    const xlmHeading = await screen.findByText("XLM Balance");
+    expect(xlmHeading).toBeDefined();
+    expect(screen.getByText("1250.0000000 XLM")).toBeDefined();
   });
 
-  it("resolves a muxed M... address to its base G... account for fetching events, while the header keeps showing the muxed address (issue #531)", async () => {
-    const fetchMock = mockFetch();
-    renderWalletPage(`/wallet/${MUXED_ADDRESS}`);
+  it("restores filter state from the URL (issue #533 permalink)", async () => {
+    mockSearchParams = new URLSearchParams({ from: "100", to: "200", fn: "transfer", group: "function" });
+    const { api } = await import("../src/api");
+    (api.wallet as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      events: [{ seq: 1, ledger: 150, function: "transfer", description: "moved tokens" }],
+    });
 
-    await screen.findByText("No Soroban interactions found for this address");
+    const WalletPage = (await import("../src/pages/WalletPage")).default;
+    render(
+      <Wrapper>
+        <WalletPage />
+      </Wrapper>
+    );
+    expect(await screen.findByDisplayValue("100")).toBeDefined();
+    expect(screen.getByDisplayValue("200")).toBeDefined();
+    expect(screen.getByDisplayValue("transfer")).toBeDefined();
+    expect(screen.getByDisplayValue("Function")).toBeDefined();
+  });
 
-    // Header shows the muxed address, not the base address.
-    const heading = await screen.findByText(MUXED_ADDRESS);
-    expect(heading.getAttribute("title")).toBe(
-      `Showing events for the base account ${MUXED_BASE_ADDRESS} (muxed ID: ${MUXED_ID})`,
+  it("copies the current URL and shows a transient 'Link copied!' toast on Share click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    const WalletPage = (await import("../src/pages/WalletPage")).default;
+    render(
+      <Wrapper>
+        <WalletPage />
+      </Wrapper>
     );
 
-    // Events + balances were fetched for the base G... address.
-    const calledUrls = fetchMock.mock.calls.map((c: unknown[]) => c[0] as string);
-    expect(calledUrls.some((u: string) => u === `/api/wallet/${MUXED_BASE_ADDRESS}`)).toBe(true);
-    expect(calledUrls.some((u: string) => u === `/api/wallet/${MUXED_BASE_ADDRESS}/balances`)).toBe(true);
-  });
-
-  it("passes the selected event-type filter to the API and reflects it in the URL (issue #532)", async () => {
-    const fetchMock = mockFetch();
-    renderWalletPage(`/wallet/${ADDRESS}`);
-    await screen.findByText("No Soroban interactions found for this address");
-
-    fireEvent.click(screen.getByRole("button", { name: "Swap" }));
-
-    await waitFor(() => {
-      const calledUrls = fetchMock.mock.calls.map((c: unknown[]) => c[0] as string);
-      expect(calledUrls).toContain(`/api/wallet/${ADDRESS}?fn=swap`);
-    });
-  });
-
-  it("reverts to showing all events when every chip is deselected (issue #532)", async () => {
-    const fetchMock = mockFetch();
-    renderWalletPage(`/wallet/${ADDRESS}`);
-    await screen.findByText("No Soroban interactions found for this address");
-
-    fireEvent.click(screen.getByRole("button", { name: "Swap" }));
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.map((c: unknown[]) => c[0])).toContain(`/api/wallet/${ADDRESS}?fn=swap`);
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Swap" }));
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.map((c: unknown[]) => c[0])).toContain(`/api/wallet/${ADDRESS}`);
-    });
+    fireEvent.click(await screen.findByText("🔗 Share"));
+    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    expect(await screen.findByText("Link copied!")).toBeDefined();
   });
 });

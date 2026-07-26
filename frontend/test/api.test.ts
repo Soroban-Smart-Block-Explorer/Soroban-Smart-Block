@@ -20,7 +20,11 @@ const api = {
   },
   event: (seq: number) => get<{ seq: number }>(`/events/${seq}`),
   contract: (id: string) => get<{ id: string; name: string }>(`/contracts/${id}`),
-  wallet: (address: string) => get<Array<{ seq: number }>>(`/wallet/${address}`),
+  wallet: (address: string) => get<{ events: Array<{ seq: number }> }>(`/wallet/${address}`),
+  contractStats: (id: string) =>
+    get<{ total_events: number; unique_callers: number; first_seen_ledger: number | null; last_seen_ledger: number | null; events_per_day: Array<{ date: string; count: number }> }>(
+      `/contracts/${id}/stats`,
+    ),
   search: (q: string, limit = 10) =>
     get<{ contracts: unknown[]; events: unknown[]; wallets: unknown[]; suggestions: unknown[] }>(
       `/search?q=${encodeURIComponent(q)}&limit=${limit}`,
@@ -151,9 +155,16 @@ describe("api utility", () => {
   });
 
   it("wallet fetches events by address", async () => {
-    mockFetch([{ seq: 1 }, { seq: 2 }]);
+    mockFetch({ events: [{ seq: 1 }, { seq: 2 }] });
     const result = await api.wallet("GABCDEF");
-    expect(result).toHaveLength(2);
+    expect(result.events).toHaveLength(2);
+  });
+
+  it("contractStats fetches stats by contract id", async () => {
+    mockFetch({ total_events: 100, unique_callers: 10, first_seen_ledger: 1, last_seen_ledger: 2, events_per_day: [] });
+    const result = await api.contractStats("C1");
+    expect(result.total_events).toBe(100);
+    expect(result.unique_callers).toBe(10);
   });
 
   it("search builds encoded query string", async () => {
