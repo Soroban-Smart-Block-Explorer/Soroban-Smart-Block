@@ -20,10 +20,19 @@ Thumbs.db
 
 # Test snapshots & coverage
 **/__snapshots__/
-*.snap
+**/*.snap
 coverage/
 .nyc_output/
 *.test.js.snap
+
+# Soroban contract test snapshots
+contracts/**/test_snapshots/
+
+# Playwright & e2e artifacts
+e2e/test-results/
+e2e/playwright-report/
+playwright-report/
+test-results/
 
 # Logs
 *.log

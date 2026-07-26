@@ -546,14 +546,68 @@ export function createApi({ logDestination, dbOverride } = {}) {
     makeCache("contracts_list", (req) => {
       const page = Number(req.query.page) || 1;
       const limit = Number(req.query.limit) || 25;
-      return `contracts:list:${page}:${limit}`;
+      const q = req.query.q || "";
+      const type = req.query.type || "all";
+      return `contracts:list:${page}:${limit}:${q}:${type}`;
     }),
     async (req, res) => {
       try {
         const page = Number(req.query.page) || 1;
         const limit = Math.min(Number(req.query.limit) || 25, 100);
-        const result = await db.listContracts({ page, limit });
-        res.json(result);
+        const q = (req.query.q || "").trim();
+        const type = (req.query.type || "all").toLowerCase();
+
+        // Build dynamic query supporting optional search (q) and type filter
+        const params = [];
+        const conditions = [];
+
+        if (q) {
+          params.push(`%${q}%`);
+          const idx = params.length;
+          conditions.push(`(name ILIKE $${idx} OR description ILIKE $${idx})`);
+        }
+
+        if (type && type !== "all") {
+          if (type === "verified") {
+            // A contract is "verified" when it has at least one source verification
+            conditions.push(
+              `id IN (SELECT DISTINCT contract_id FROM source_verifications)`,
+            );
+          } else {
+            // Match protocol_type column (may not exist on all installs — guard with COALESCE)
+            params.push(type);
+            conditions.push(`LOWER(COALESCE(protocol_type, '')) = $${params.length}`);
+          }
+        }
+
+        const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+        const offset = (page - 1) * limit;
+        params.push(limit, offset);
+
+        const [{ rows }, { rows: countRows }] = await Promise.all([
+          db.query(
+            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type, created_at
+             FROM contracts ${where}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params,
+          ),
+          db.query(
+            `SELECT COUNT(*)::INT AS total FROM contracts ${where}`,
+            params.slice(0, params.length - 2),
+          ),
+        ]);
+
+        const total = countRows[0].total;
+        res.json({
+          contracts: rows,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: Math.ceil(total / limit),
+          },
+        });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
@@ -1173,6 +1227,25 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.get("/api/contracts/:id/source-verifications", async (req, res) => {
     try {
       const rows = await db.getSourceVerifications(req.params.id, req.query.wasm_hash || undefined);
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── ABI Version History ───────────────────────────────────────────────────
+  // GET /api/contracts/:id/abi-history
+  // Returns all rows from contract_versions for this contract, ordered by abi_version ASC.
+  app.get("/api/contracts/:id/abi-history", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, contract_id, abi_version, min_ledger, name, description,
+                functions, registered_by, created_at
+         FROM contract_versions
+         WHERE contract_id = $1
+         ORDER BY abi_version ASC`,
+        [req.params.id],
+      );
       res.json(rows);
     } catch (e) {
       res.status(500).json({ error: e.message });

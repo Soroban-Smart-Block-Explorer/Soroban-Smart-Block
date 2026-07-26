@@ -298,6 +298,19 @@ export interface StateDiff {
   created_at: string;
 }
 
+// Issue #516: ABI version history entry (one row per contract_versions table row)
+export interface AbiVersionEntry {
+  id: number;
+  contract_id: string;
+  abi_version: number;
+  min_ledger: number;
+  name: string;
+  description: string | null;
+  functions: { name: string; description?: string; params?: { name: string; kind: string }[] }[] | null;
+  registered_by: string | null;
+  created_at: string;
+}
+
 // sub-invocation record
 export interface SubInvocation {
   id: number;
@@ -732,4 +745,35 @@ export const api = {
     if (filter?.function) q.set("function", filter.function);
     return `${BASE}/sub-invocations/stream?${q}`;
   },
+
+  // Issue #514: search + filter contracts list
+  listContractsSearch: (params: { q?: string; type?: string; page?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params.q) q.set("q", params.q);
+    if (params.type && params.type !== "all") q.set("type", params.type);
+    q.set("page", String(params.page ?? 1));
+    q.set("limit", String(params.limit ?? 25));
+    return get<ContractsListResponse>(`/contracts?${q}`);
+  },
+
+  // Issue #513: register a new contract ABI
+  registerContract: (body: {
+    id: string;
+    name: string;
+    description: string;
+    functions: { name: string; description: string; params: { name: string; kind: string }[] }[];
+    registered_by: string;
+  }) =>
+    fetch(`${BASE}/contracts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      const data = await r.json();
+      if (!r.ok) throw Object.assign(new Error(data.error ?? `API ${r.status}`), { status: r.status, data });
+      return data as { ok: boolean };
+    }),
+
+  // Issue #516: ABI version history for a contract
+  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
 };

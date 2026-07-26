@@ -34,6 +34,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/contracts" element={<RegistryPage />} />
+            <Route path="/contracts/register" element={<RegisterContractPage />} />
             <Route path="/contract/:id" element={<ContractPage />} />
             <Route path="/contract/:id/workspace" element={<DeveloperWorkspace />} />
             <Route path="/wallet/:address" element={<WalletPage />} />
