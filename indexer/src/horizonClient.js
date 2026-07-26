@@ -1,134 +1,67 @@
 /**
- * Horizon client for resolving classic Stellar asset metadata.
+ * Horizon API client — classic Stellar asset resolution.
  *
- * Looks up an asset issuer's home_domain via Horizon, fetches that domain's
- * stellar.toml, and extracts the [[CURRENCIES]] entry matching the asset's
- * code (and issuer, when the TOML lists one) to get a display name and logo.
+ * Wraps @stellar/stellar-sdk's Horizon server to resolve classic (non-Soroban)
+ * asset metadata by issuer + code. Results are cached for 24h since asset
+ * metadata (code, issuer, decimals) rarely changes once an asset is issued.
  */
-const HORIZON_URL = (process.env.HORIZON_URL || "https://horizon-testnet.stellar.org").replace(/\/$/, "");
+import { Horizon } from "@stellar/stellar-sdk";
+import config from "./config.js";
+import { cacheAside } from "./cacheLayer.js";
 
-// In-memory caches — asset/TOML metadata changes rarely, so a process-lifetime
-// cache avoids re-fetching the same domain/account on every decoded event.
-const homeDomainCache = new Map(); // issuer -> Promise<string|null>
-const tomlCache = new Map(); // domain -> Promise<CurrencyEntry[]>
-const assetCache = new Map(); // "code:issuer" -> Promise<{name, logo_url, domain} | null>
+// Classic Stellar assets always use 7 decimal places (1 unit = 10,000,000 stroops),
+// matching the fixed-point precision used across this codebase for SAC/token
+// amounts (see db.js get24hVolume, vaults.decimals default).
+const CLASSIC_ASSET_DECIMALS = 7;
 
-/**
- * Look up the home_domain set on a Horizon account.
- * @param {string} issuer  Strkey account ID (G...)
- * @returns {Promise<string|null>}
- */
-async function fetchHomeDomain(issuer) {
-  if (homeDomainCache.has(issuer)) return homeDomainCache.get(issuer);
-
-  const promise = (async () => {
-    try {
-      const res = await fetch(`${HORIZON_URL}/accounts/${issuer}`);
-      if (!res.ok) return null;
-      const account = await res.json();
-      return account.home_domain ?? null;
-    } catch {
-      return null;
-    }
-  })();
-
-  homeDomainCache.set(issuer, promise);
-  return promise;
-}
-
-/**
- * Parse `[[CURRENCIES]]` array-of-tables entries out of a stellar.toml body.
- * Only the handful of string fields the explorer cares about are extracted —
- * this intentionally isn't a general TOML parser.
- * @param {string} text  Raw stellar.toml contents
- * @returns {Array<{ code: string, issuer: string|null, name: string|null, image: string|null }>}
- */
-function parseCurrencies(text) {
-  const currencies = [];
-  const blocks = text.split(/\[\[CURRENCIES\]\]/).slice(1);
-
-  for (const block of blocks) {
-    // A block runs until the next table/array-of-tables header (or EOF).
-    const end = block.search(/\n\s*\[/);
-    const body = end === -1 ? block : block.slice(0, end);
-
-    const entry = {};
-    for (const line of body.split("\n")) {
-      const match = line.match(/^\s*([A-Za-z_]+)\s*=\s*"([^"]*)"/);
-      if (match) entry[match[1]] = match[2];
-    }
-
-    if (entry.code) {
-      currencies.push({
-        code: entry.code,
-        issuer: entry.issuer ?? null,
-        name: entry.name ?? null,
-        image: entry.image ?? null,
-      });
-    }
+let _server = null;
+function getServer() {
+  if (!_server) {
+    _server = new Horizon.Server(config.HORIZON_URL, {
+      allowHttp: config.HORIZON_URL.startsWith("http://"),
+    });
   }
+  return _server;
+}
 
-  return currencies;
+/** Extract the home domain from a Horizon asset record's stellar.toml link, if set. */
+function extractDomain(tomlHref) {
+  if (!tomlHref) return null;
+  try {
+    return new URL(tomlHref).hostname || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Fetch and parse `https://{domain}/.well-known/stellar.toml`, returning its
- * `[[CURRENCIES]]` entries. Returns an empty array when the domain has no
- * TOML file or it fails to parse.
- * @param {string} domain
- * @returns {Promise<Array<{ code: string, issuer: string|null, name: string|null, image: string|null }>>}
+ * Resolve classic asset metadata from Horizon, cached for 24h.
+ * @param {string} issuer  Stellar account ID (G...) that issued the asset
+ * @param {string} code    Asset code (e.g. "USDC")
+ * @returns {Promise<{ name: string, code: string, issuer: string, decimals: number, domain: string|null } | null>}
+ *   null when the issuer has never issued this asset code.
  */
-export async function resolveToml(domain) {
-  if (!domain) return [];
-  if (tomlCache.has(domain)) return tomlCache.get(domain);
+export async function resolveAsset(issuer, code) {
+  if (!issuer || !code) return null;
 
-  const promise = (async () => {
-    try {
-      const res = await fetch(`https://${domain}/.well-known/stellar.toml`);
-      if (!res.ok) return [];
-      const text = await res.text();
-      return parseCurrencies(text);
-    } catch {
-      return [];
-    }
-  })();
+  const cacheKey = `horizon:asset:${issuer}:${code}`;
+  return cacheAside(
+    cacheKey,
+    async () => {
+      const page = await getServer().assets().forCode(code).forIssuer(issuer).call();
+      const record = page.records?.[0];
+      if (!record) return null;
 
-  tomlCache.set(domain, promise);
-  return promise;
-}
-
-/**
- * Resolve a classic asset's display name and logo URL via its issuer's
- * stellar.toml. Returns null when the issuer has no home_domain, the TOML
- * is unreachable, or it lists no matching CURRENCIES entry — callers should
- * fall back to the bare asset code and a placeholder icon in that case.
- * @param {string} code    Asset code, e.g. "USDC"
- * @param {string} issuer  Strkey account ID of the asset issuer
- * @returns {Promise<{ name: string|null, logo_url: string|null, domain: string } | null>}
- */
-export async function resolveAsset(code, issuer) {
-  if (!code || !issuer) return null;
-  const key = `${code}:${issuer}`;
-  if (assetCache.has(key)) return assetCache.get(key);
-
-  const promise = (async () => {
-    const domain = await fetchHomeDomain(issuer);
-    if (!domain) return null;
-
-    const currencies = await resolveToml(domain);
-    const match = currencies.find((c) => c.code === code && (!c.issuer || c.issuer === issuer));
-    if (!match) return null;
-
-    return { name: match.name ?? null, logo_url: match.image ?? null, domain };
-  })();
-
-  assetCache.set(key, promise);
-  return promise;
-}
-
-/** Clears all in-memory caches — for tests only. */
-export function _clearCache() {
-  homeDomainCache.clear();
-  tomlCache.clear();
-  assetCache.clear();
+      return {
+        // Horizon's asset listing has no curated display name — the asset
+        // code is the best identifier available without a SEP-1 TOML lookup.
+        name: record.asset_code,
+        code: record.asset_code,
+        issuer: record.asset_issuer,
+        decimals: CLASSIC_ASSET_DECIMALS,
+        domain: extractDomain(record._links?.toml?.href),
+      };
+    },
+    "asset_metadata",
+  );
 }

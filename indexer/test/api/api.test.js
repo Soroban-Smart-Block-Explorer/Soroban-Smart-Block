@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import pg from "pg";
+import bcrypt from "bcryptjs";
 
 // Ensure process.env uses TEST_DATABASE_URL
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
@@ -65,6 +66,12 @@ describe("REST API Integration Tests", () => {
         [contractId, fn, ledger, txHash, description, JSON.stringify(rawTopics), rawData]
       );
     }
+
+    await db.query(
+      `INSERT INTO daemon_state (key, value)
+       VALUES ('cursor', '1051'), ('last_indexed_ledger', '1050')
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    );
 
     // Start Express app
     server = startApi();
@@ -132,6 +139,91 @@ describe("REST API Integration Tests", () => {
       expect(res.body).toHaveProperty("reason");
 
       db.query = originalQuery;
+    });
+  });
+
+  describe("GET /api/admin/integrity", () => {
+    const adminAuth = { Authorization: `Bearer ${process.env.ADMIN_SECRET || "test-admin-secret"}` };
+
+    beforeAll(() => {
+      process.env.ADMIN_SECRET = "test-admin-secret";
+    });
+
+    it("should return OK on a clean database", async () => {
+      const res = await request(app).get("/api/admin/integrity").set(adminAuth);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+    });
+
+    it("should fail when a row is deleted and a seq gap appears", async () => {
+      await db.query(`DELETE FROM events WHERE seq = 25`);
+
+      const res = await request(app).get("/api/admin/integrity").set(adminAuth);
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(false);
+      expect(Array.isArray(res.body.failed)).toBe(true);
+      expect(res.body.failed.some((item) => item.check === "seq_gap")).toBe(true);
+
+      await db.query(
+        `INSERT INTO events (seq, contract_id, function, ledger, tx_hash, description, raw_topics, raw_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          25,
+          "C1",
+          "mint",
+          1025,
+          "tx_hash_25_restored",
+          "Event 25 restored",
+          JSON.stringify([wallet1, wallet2]),
+          JSON.stringify({ amount: "2500" }),
+        ],
+      );
+    });
+  });
+
+  describe("API key daily usage enforcement", () => {
+    const rawKey = "daily-limit-test-key-123";
+
+    beforeAll(async () => {
+      const keyHash = await bcrypt.hash(rawKey, 12);
+      const { rows } = await db.query(
+        `INSERT INTO api_keys
+          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL)
+         RETURNING id`,
+        [
+          "daily-limit-key",
+          keyHash,
+          rawKey.slice(0, 8),
+          "free",
+          2,
+          JSON.stringify([]),
+          JSON.stringify([]),
+        ],
+      );
+
+      await db.query(
+        `INSERT INTO api_key_usage (api_key_id, date, request_count)
+         VALUES ($1, CURRENT_DATE, 0)
+         ON CONFLICT (api_key_id, date)
+         DO NOTHING`,
+        [rows[0].id],
+      );
+    });
+
+    it("should return 429 on the N+1 request once the daily limit is reached", async () => {
+      const headers = { "x-api-key": rawKey, "X-Forwarded-For": "10.90.0.200" };
+
+      const first = await request(app).get("/api/events?limit=1").set(headers);
+      const second = await request(app).get("/api/events?limit=1").set(headers);
+      const third = await request(app).get("/api/events?limit=1").set(headers);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(third.status).toBe(429);
+      expect(third.body).toEqual({ error: "Daily API key usage limit exceeded" });
     });
   });
 

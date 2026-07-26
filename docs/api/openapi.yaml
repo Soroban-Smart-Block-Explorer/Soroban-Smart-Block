@@ -347,6 +347,137 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/abi-history:
+    get:
+      summary: ABI version history for a contract (Issue #517)
+      description: |
+        Returns every ABI snapshot recorded for the contract, ordered by abi_version
+        ascending. A new entry is added each time an update_contract event is
+        detected. The initial registration is stored as version 0.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: ABI version history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, history]
+                properties:
+                  contract_id:
+                    type: string
+                  history:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AbiHistoryEntry"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/abi/import-github:
+    post:
+      summary: Bulk ABI import from a GitHub repository (Issue #520)
+      description: |
+        Scans a GitHub repository directory for JSON files matching the
+        contractRegistry.schema.json format and bulk-upserts them into the
+        contract registry. Idempotent — re-importing the same file only updates
+        changed fields. Rate-limited to one call per 10 minutes per repo.
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repo]
+              properties:
+                repo:
+                  type: string
+                  description: GitHub repository in owner/repo format
+                  example: "myorg/my-abis"
+                path:
+                  type: string
+                  description: Directory path within the repo containing .json ABI files
+                  default: "contracts/"
+                  example: "contracts/"
+                ref:
+                  type: string
+                  description: Git ref (branch, tag, or commit SHA) to read from
+                  default: "main"
+                  example: "main"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported, skipped, errors, total_files]
+                properties:
+                  imported:
+                    type: integer
+                    description: Number of contracts successfully upserted
+                  skipped:
+                    type: integer
+                    description: Number of files skipped due to schema validation errors
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file:
+                          type: string
+                        error:
+                          type: string
+                  total_files:
+                    type: integer
+                    description: Total .json files found in the directory
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid admin auth token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited — retry after the specified number of seconds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  retry_after:
+                    type: integer
+        "502":
+          description: GitHub API error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/admin/alerts/{condition}/resolve:
     post:
       summary: Resolve an active alert condition
@@ -375,6 +506,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /api/contracts:
+    get:
+      summary: List registered contracts
+      description: Returns a paginated list of registered contracts. Supports filtering by protocol type.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: type
+          in: query
+          description: Filter by protocol type (Issue #518)
+          schema:
+            type: string
+            enum: [token, dex, lending, nft, bridge, other]
+      responses:
+        "200":
+          description: Paginated contract list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractsListResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     post:
       summary: Register contract ABI metadata
       description: Registers metadata for a new contract ID. Requires API key authentication.
@@ -441,6 +608,17 @@ paths:
             type: string
             example: "GBADY234567890123456789012345678901234567890123456789012"
           description: Wallet address
+        - name: fn
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "transfer,mint"
+          description: >-
+            Comma-separated event-type categories to filter by
+            (transfer/swap/mint/burn/stake match by prefix, e.g. "swap" also
+            matches "swap_exact_tokens_for_tokens"; "other" matches any
+            function outside those categories). Omit to return all events.
       responses:
         "200":
           description: Events matching the wallet address (empty array if none)
@@ -473,43 +651,47 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/assets/{issuer}/{code}:
+  /api/wallet/{address}/balances:
     get:
-      summary: Resolve a classic asset's display name and logo
+      summary: Get classic XLM and asset balances for a wallet address
       description: >-
-        Returns the asset's name and logo URL, resolved from the issuer's
-        stellar.toml and cached in the assets table. Resolves on first
-        request when not yet cached.
+        Fetches the account's balances from Horizon and normalises them.
+        Cached for 30 seconds per address to avoid hammering Horizon.
       parameters:
-        - name: issuer
+        - name: address
           in: path
           required: true
           schema:
             type: string
-            example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
-          description: Strkey account ID of the asset issuer
-        - name: code
-          in: path
-          required: true
-          schema:
-            type: string
-            example: "USDC"
-          description: Asset code
+            example: "GBADY234567890123456789012345678901234567890123456789012"
+          description: Wallet address
       responses:
         "200":
-          description: Resolved asset metadata (name/domain/logo_url are null when unresolved)
+          description: Balances for the account (XLM plus any classic/SEP-41 assets)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Asset"
+                type: object
+                required: [balances]
+                properties:
+                  balances:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WalletBalance"
         "400":
-          description: Invalid issuer format
+          description: Invalid wallet address format
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Internal server error
+        "404":
+          description: Account not found on the network
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Horizon is unreachable or returned an unexpected error
           content:
             application/json:
               schema:
@@ -831,6 +1013,25 @@ components:
           type: string
           example: "Detailed error message"
 
+    WalletBalance:
+      type: object
+      required: [asset_code, asset_issuer, balance, is_native]
+      properties:
+        asset_code:
+          type: string
+          example: "USDC"
+        asset_issuer:
+          type: string
+          nullable: true
+          description: Null for the native XLM asset
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        balance:
+          type: string
+          example: "42.5000000"
+        is_native:
+          type: boolean
+          example: false
+
     Rfc7807Error:
       type: object
       required: [type, title, status, detail]
@@ -1065,10 +1266,66 @@ components:
           type: string
           nullable: true
           example: null
+        protocol_type:
+          type: string
+          enum: [token, dex, lending, nft, bridge, other]
+          default: other
+          description: Auto-tagged protocol type (Issue #518)
+        is_verified:
+          type: boolean
+          default: false
+          description: Whether the ABI has been verified against the on-chain registry (Issue #519)
+        verified_ledger:
+          type: integer
+          nullable: true
+          description: Ledger at which verification was last confirmed
         dependency_advisory:
           type: object
           nullable: true
           example: null
+
+    AbiHistoryEntry:
+      type: object
+      required: [abi_version, functions, registered_by, min_ledger, created_at]
+      description: Single ABI version snapshot (Issue #517)
+      properties:
+        abi_version:
+          type: integer
+          description: Monotonically increasing ABI version number
+          example: 0
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionSpec"
+        registered_by:
+          type: string
+          description: Address or identifier of the registrant
+        min_ledger:
+          type: integer
+          description: Ledger at which this ABI version became active
+        created_at:
+          type: string
+          format: date-time
+
+    ContractsListResponse:
+      type: object
+      required: [contracts, pagination]
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractMeta"
+        pagination:
+          type: object
+          properties:
+            page:
+              type: integer
+            limit:
+              type: integer
+            total:
+              type: integer
+            total_pages:
+              type: integer
 
     ContractRegistration:
       type: object
@@ -1087,6 +1344,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FunctionSpec"
+        protocol_type:
+          type: string
+          enum: [token, dex, lending, nft, bridge, other]
+          description: Optional explicit protocol type; auto-tagged from functions if omitted
 
     FunctionSpec:
       type: object
@@ -1110,3 +1371,73 @@ components:
               type:
                 type: string
                 example: "address"
+
+    ContractStats:
+      type: object
+      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day]
+      properties:
+        total_events:
+          type: integer
+          example: 1204
+        unique_callers:
+          type: integer
+          example: 87
+        first_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1000001
+        last_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1050320
+        events_per_day:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyEventCount"
+
+    DailyEventCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-07-25"
+        count:
+          type: integer
+          example: 42
+
+    StorageTierCounts:
+      type: object
+      required: [temporary, persistent, instance]
+      properties:
+        temporary:
+          type: integer
+          example: 30
+        persistent:
+          type: integer
+          example: 50
+        instance:
+          type: integer
+          example: 3
+
+    AssetMetadata:
+      type: object
+      required: [name, code, issuer, decimals, domain]
+      properties:
+        name:
+          type: string
+          example: "USDC"
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA22K667OGPC3R32NRJTNQG4KWT2OFGHNNGZ2JQMSIGLT7AFHVIOMJ43"
+        decimals:
+          type: integer
+          example: 7
+        domain:
+          type: string
+          nullable: true
+          example: "centre.io"
