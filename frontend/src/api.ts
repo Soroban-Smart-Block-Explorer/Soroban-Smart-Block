@@ -214,6 +214,14 @@ export interface ContractsListResponse {
   };
 }
 
+// Classic/SEP-41 asset balance entry from the wallet balances endpoint (issue #530).
+export interface WalletBalance {
+  asset_code: string;
+  asset_issuer: string | null;
+  balance: string;
+  is_native: boolean;
+}
+
 export type SearchKind = "contract" | "event" | "wallet";
 
 export interface SearchContract {

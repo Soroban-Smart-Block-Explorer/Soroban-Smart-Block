@@ -608,6 +608,17 @@ paths:
             type: string
             example: "GBADY234567890123456789012345678901234567890123456789012"
           description: Wallet address
+        - name: fn
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "transfer,mint"
+          description: >-
+            Comma-separated event-type categories to filter by
+            (transfer/swap/mint/burn/stake match by prefix, e.g. "swap" also
+            matches "swap_exact_tokens_for_tokens"; "other" matches any
+            function outside those categories). Omit to return all events.
       responses:
         "200":
           description: Events matching the wallet address (empty array if none)
@@ -635,6 +646,52 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/{address}/balances:
+    get:
+      summary: Get classic XLM and asset balances for a wallet address
+      description: >-
+        Fetches the account's balances from Horizon and normalises them.
+        Cached for 30 seconds per address to avoid hammering Horizon.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "GBADY234567890123456789012345678901234567890123456789012"
+          description: Wallet address
+      responses:
+        "200":
+          description: Balances for the account (XLM plus any classic/SEP-41 assets)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [balances]
+                properties:
+                  balances:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WalletBalance"
+        "400":
+          description: Invalid wallet address format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Account not found on the network
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Horizon is unreachable or returned an unexpected error
           content:
             application/json:
               schema:
@@ -955,6 +1012,25 @@ components:
         error:
           type: string
           example: "Detailed error message"
+
+    WalletBalance:
+      type: object
+      required: [asset_code, asset_issuer, balance, is_native]
+      properties:
+        asset_code:
+          type: string
+          example: "USDC"
+        asset_issuer:
+          type: string
+          nullable: true
+          description: Null for the native XLM asset
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        balance:
+          type: string
+          example: "42.5000000"
+        is_native:
+          type: boolean
+          example: false
 
     Rfc7807Error:
       type: object

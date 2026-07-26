@@ -28,6 +28,7 @@ const TTL_CONFIG = {
   wallet: { l1: 60, l2: 60, l3: "private, max-age=60" },
   search: { l1: 0, l2: 10, l3: "no-cache, no-store" },
   stats: { l1: 60, l2: 300, l3: "public, max-age=300" },
+  wallet_balances: { l1: 30, l2: 30, l3: "public, max-age=30" },
   default: { l1: 30, l2: 60, l3: "public, max-age=60" },
 };
 

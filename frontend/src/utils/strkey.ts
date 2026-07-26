@@ -5,6 +5,7 @@
  *  - Detects G... (ed25519 account), M... (muxed account), C... (contract) addresses
  *  - Resolves M... muxed addresses to their base G... account for routing
  */
+import { StrKey, decodeAddressToMuxedAccount } from "@stellar/stellar-sdk";
 
 /** Returns true if the string looks like a Stellar G... account address. */
 export function isAccountAddress(addr: string): boolean {
@@ -41,30 +42,29 @@ export function addressRoute(addr: string): string | null {
 /**
  * Resolve a muxed M... address to its base G... account address.
  * Returns null if the input is not a valid muxed address.
- *
- * Note: This is a pure string-based heuristic for the frontend.
- * The indexer already resolves M... → G... before storing, so in practice
- * the frontend will rarely see raw M... addresses. This handles edge cases
- * where raw XDR is displayed directly (e.g. XdrInspector page).
  */
 export function resolveMuxed(addr: string): string | null {
   if (!isMuxedAddress(addr)) return null;
-  // The indexer resolves M... → G... at decode time, so if we see an M...
-  // in the frontend it came from raw XDR display. We cannot decode it
-  // without the stellar-sdk in the browser bundle, so we return null and
-  // let the caller fall back to displaying the address without a link.
-  // If @stellar/stellar-sdk is available in the bundle, use it:
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sdk = (globalThis as any).__stellarSdk;
-    if (sdk?.StrKey?.decodeMuxedAccount) {
-      const decoded = sdk.StrKey.decodeMuxedAccount(addr);
-      return sdk.StrKey.encodeEd25519PublicKey(decoded.ed25519);
-    }
+    const muxed = decodeAddressToMuxedAccount(addr, true);
+    return StrKey.encodeEd25519PublicKey(muxed.med25519().ed25519());
   } catch {
-    // sdk not available or invalid address
+    return null;
   }
-  return null;
+}
+
+/**
+ * Returns the numeric multiplexing ID embedded in a muxed M... address,
+ * or null if the input is not a valid muxed address.
+ */
+export function muxedId(addr: string): string | null {
+  if (!isMuxedAddress(addr)) return null;
+  try {
+    const muxed = decodeAddressToMuxedAccount(addr, true);
+    return muxed.med25519().id().toString();
+  } catch {
+    return null;
+  }
 }
 
 /**

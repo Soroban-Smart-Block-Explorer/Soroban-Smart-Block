@@ -4,6 +4,36 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
+import WalletBalances from "../components/WalletBalances";
+import { isMuxedAddress, muxedId, resolveMuxed } from "../utils/strkey";
+
+const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
+  { key: "transfer", label: "Transfer" },
+  { key: "swap", label: "Swap" },
+  { key: "mint", label: "Mint" },
+  { key: "burn", label: "Burn" },
+  { key: "stake", label: "Stake" },
+  { key: "other", label: "Other" },
+];
+
+function Chip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: active ? "var(--accent)" : "var(--surface)",
+        color: active ? "#0d1117" : "var(--muted)",
+        border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
+        borderRadius: 999,
+        padding: "4px 12px",
+        fontSize: 13,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
 
 const VALID_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
 
@@ -99,6 +129,22 @@ export default function WalletPage() {
     );
   }
 
+  function toggleType(key: string) {
+    const next = new Set(selectedTypes);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    const params = new URLSearchParams(searchParams);
+    if (next.size) params.set("fn", [...next].join(","));
+    else params.delete("fn");
+    setSearchParams(params, { replace: true });
+  }
+
+  function clearTypes() {
+    const params = new URLSearchParams(searchParams);
+    params.delete("fn");
+    setSearchParams(params, { replace: true });
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div className="card">
@@ -186,6 +232,17 @@ export default function WalletPage() {
       )}
 
       <div className="card">
+        <WalletBalances address={queryAddress} />
+      </div>
+
+      <div className="card">
+        <div style={{ marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Chip active={selectedTypes.size === 0} label="All" onClick={clearTypes} />
+          {EVENT_TYPE_CHIPS.map((c) => (
+            <Chip key={c.key} active={selectedTypes.has(c.key)} label={c.label} onClick={() => toggleType(c.key)} />
+          ))}
+        </div>
+
         {isLoading ? (
           <p style={{ color: "var(--muted)" }}>Loading…</p>
         ) : events.length === 0 ? (
