@@ -20,6 +20,7 @@ const UPDATABLE_FIELDS = [
   'name',
   'tier',
   'rate_limit',
+  'daily_limit',
   'allowed_ips',
   'allowed_endpoints',
   'expires_at',
@@ -69,7 +70,7 @@ async function listKeys(page = 1, limit = 50) {
 
   const [{ rows }, { rows: countRows }] = await Promise.all([
     pool.query(
-      `SELECT id, name, key_prefix, tier, rate_limit,
+      `SELECT id, name, key_prefix, tier, rate_limit, daily_limit,
               allowed_ips, allowed_endpoints, expires_at,
               revoked, last_used_at, usage_count, created_at, updated_at
        FROM api_keys
@@ -103,7 +104,7 @@ async function listKeys(page = 1, limit = 50) {
  * @returns {Promise<{ key: string, record: object }>}
  */
 async function createKey(data) {
-  const { name, tier = 'free', rate_limit, allowed_ips, allowed_endpoints, expires_at } = data ?? {};
+  const { name, tier = 'free', rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at } = data ?? {};
 
   // Validate required fields.
   if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -121,6 +122,13 @@ async function createKey(data) {
     }
   }
 
+  if (data?.daily_limit !== undefined && data?.daily_limit !== null) {
+    const dailyLimit = Number(data.daily_limit);
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 0) {
+      throw new Error('daily_limit must be a non-negative integer');
+    }
+  }
+
   // Generate key material.
   const rawKey = generateRawKey();
   const keyPrefix = rawKey.slice(0, 8);
@@ -128,9 +136,9 @@ async function createKey(data) {
 
   const { rows } = await pool.query(
     `INSERT INTO api_keys
-       (name, key_hash, key_prefix, tier, rate_limit, allowed_ips, allowed_endpoints, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id, name, key_prefix, tier, rate_limit,
+       (name, key_hash, key_prefix, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     [
@@ -139,6 +147,7 @@ async function createKey(data) {
       keyPrefix,
       tier,
       rate_limit ?? null,
+      daily_limit ?? null,
       allowed_ips ? JSON.stringify(allowed_ips) : null,
       allowed_endpoints ? JSON.stringify(allowed_endpoints) : null,
       expires_at ?? null,
@@ -199,7 +208,7 @@ async function updateKey(id, updates) {
     `UPDATE api_keys
      SET ${setClauses.join(', ')}
      WHERE id = $${idParam}
-     RETURNING id, name, key_prefix, tier, rate_limit,
+     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     params,
@@ -227,7 +236,7 @@ async function deleteKey(id) {
     `UPDATE api_keys
      SET revoked = TRUE, updated_at = NOW()
      WHERE id = $1
-     RETURNING id, name, key_prefix, tier, rate_limit,
+     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     [id],
@@ -259,7 +268,7 @@ async function rotateKey(id) {
     `UPDATE api_keys
      SET key_hash = $1, key_prefix = $2, updated_at = NOW()
      WHERE id = $3
-     RETURNING id, name, key_prefix, tier, rate_limit,
+     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     [keyHash, keyPrefix, id],
@@ -281,22 +290,29 @@ async function rotateKey(id) {
  * @param {number} [days=30]
  * @returns {Promise<object[]>}
  */
-async function getKeyUsage(id, days = 30) {
+async function getKeyUsage(id) {
   if (!id) throw new Error('id is required');
 
-  const safeDays = Math.min(Math.max(1, Number(days) || 30), 365);
-
-  const { rows } = await pool.query(
-    `SELECT date, total_requests, endpoint_distribution,
-            data_transfer_mb, rate_limit_hits, peak_concurrent
-     FROM api_key_usage_daily
-     WHERE api_key_id = $1
-     ORDER BY date DESC
-     LIMIT $2`,
-    [id, safeDays],
+  const { rows: keyRows } = await pool.query(
+    `SELECT daily_limit
+     FROM api_keys
+     WHERE id = $1`,
+    [id],
   );
 
-  return rows;
+  const dailyLimit = Number(keyRows[0]?.daily_limit ?? 0);
+
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(CASE WHEN date = ((NOW() AT TIME ZONE 'UTC')::DATE) THEN request_count ELSE 0 END), 0)::INT AS today,
+            COALESCE(SUM(request_count), 0)::INT AS this_month,
+            $2::INT AS limit_daily
+     FROM api_key_usage
+     WHERE api_key_id = $1
+       AND date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::DATE`,
+    [id, dailyLimit],
+  );
+
+  return rows[0] ?? { today: 0, this_month: 0, limit_daily: 0 };
 }
 
 export { listKeys, createKey, updateKey, deleteKey, rotateKey, getKeyUsage };

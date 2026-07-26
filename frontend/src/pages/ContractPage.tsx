@@ -23,6 +23,7 @@ import RwaMetadataDisplay from "../components/RwaMetadataDisplay";
 import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
+import AbiHistoryDrawer from "../components/AbiHistoryDrawer";
 
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff" | "abi-history";
 
@@ -62,6 +63,7 @@ export default function ContractPage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [selectedFn, setSelectedFn] = useState("");
   const [snippetFn, setSnippetFn] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // ── Local ABI (session-only, never sent to server) ──────────────────────────
   const { localAbi, loadAbi, clearAbi, parseError } = useLocalAbi(id);
@@ -232,6 +234,22 @@ export default function ContractPage() {
             </code>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              style={{
+                padding: "8px 16px",
+                background: "transparent",
+                color: "var(--text)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+              aria-label="View ABI version history"
+            >
+              📜 ABI History
+            </button>
             <Link
               to={`/contract/${id}/workspace`}
               style={{
@@ -562,61 +580,12 @@ export default function ContractPage() {
       {/* Tab: State-Diff Timeline — */}
       {tab === "state-diff" && <StateDiffTimeline contractId={id} />}
 
-      {/* Tab: ABI History (Issue #517) — version-by-version ABI snapshots */}
-      {tab === "abi-history" && (
-        <div className="card">
-          <h3 style={{ fontSize: 14, marginBottom: 12 }}>ABI Version History</h3>
-          {!abiHistoryData || abiHistoryData.history.length === 0 ? (
-            <p style={{ color: "var(--muted)", fontSize: 13 }}>No ABI version history recorded yet.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              {abiHistoryData.history.map((entry) => (
-                <div
-                  key={entry.abi_version}
-                  style={{
-                    borderLeft: "3px solid var(--accent)",
-                    paddingLeft: 12,
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                    <strong style={{ fontSize: 13 }}>v{entry.abi_version}</strong>
-                    <span style={{ color: "var(--muted)", fontSize: 12 }}>
-                      ledger #{entry.min_ledger} · {new Date(entry.created_at).toLocaleString()}
-                    </span>
-                    {entry.registered_by && (
-                      <span style={{ color: "var(--muted)", fontSize: 11 }}>
-                        by <code>{entry.registered_by}</code>
-                      </span>
-                    )}
-                  </div>
-                  {entry.functions.length === 0 ? (
-                    <p style={{ color: "var(--muted)", fontSize: 12 }}>No functions recorded.</p>
-                  ) : (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
-                      {entry.functions.map((f: { name: string; description?: string }) => (
-                        <span
-                          key={f.name}
-                          title={f.description || f.name}
-                          style={{
-                            background: "var(--surface)",
-                            border: "1px solid var(--border)",
-                            borderRadius: 4,
-                            padding: "2px 8px",
-                            fontSize: 12,
-                            fontFamily: "monospace",
-                          }}
-                        >
-                          {f.name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {/* ABI Version History Drawer — Issue #516 */}
+      <AbiHistoryDrawer
+        contractId={id}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
     </div>
   );
 }
