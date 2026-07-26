@@ -67,6 +67,12 @@ describe("REST API Integration Tests", () => {
       );
     }
 
+    await db.query(
+      `INSERT INTO daemon_state (key, value)
+       VALUES ('cursor', '1051'), ('last_indexed_ledger', '1050')
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    );
+
     // Start Express app
     server = startApi();
     app = server;
@@ -133,6 +139,47 @@ describe("REST API Integration Tests", () => {
       expect(res.body).toHaveProperty("reason");
 
       db.query = originalQuery;
+    });
+  });
+
+  describe("GET /api/admin/integrity", () => {
+    const adminAuth = { Authorization: `Bearer ${process.env.ADMIN_SECRET || "test-admin-secret"}` };
+
+    beforeAll(() => {
+      process.env.ADMIN_SECRET = "test-admin-secret";
+    });
+
+    it("should return OK on a clean database", async () => {
+      const res = await request(app).get("/api/admin/integrity").set(adminAuth);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+    });
+
+    it("should fail when a row is deleted and a seq gap appears", async () => {
+      await db.query(`DELETE FROM events WHERE seq = 25`);
+
+      const res = await request(app).get("/api/admin/integrity").set(adminAuth);
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(false);
+      expect(Array.isArray(res.body.failed)).toBe(true);
+      expect(res.body.failed.some((item) => item.check === "seq_gap")).toBe(true);
+
+      await db.query(
+        `INSERT INTO events (seq, contract_id, function, ledger, tx_hash, description, raw_topics, raw_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          25,
+          "C1",
+          "mint",
+          1025,
+          "tx_hash_25_restored",
+          "Event 25 restored",
+          JSON.stringify([wallet1, wallet2]),
+          JSON.stringify({ amount: "2500" }),
+        ],
+      );
     });
   });
 

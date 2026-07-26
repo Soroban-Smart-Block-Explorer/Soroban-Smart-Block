@@ -76,6 +76,82 @@ const CONTRACT_COLUMNS = [
   'created_at',
 ];
 
+async function runIntegrityChecks() {
+  const failed = [];
+
+  const { rows: gapRows } = await pool.query(
+    `SELECT COUNT(*)::int AS gap_count
+     FROM (
+       SELECT seq,
+              LAG(seq) OVER (ORDER BY seq) AS previous_seq
+       FROM events
+     ) AS ordered
+     WHERE seq - previous_seq > 1`,
+  );
+  if (Number(gapRows[0]?.gap_count ?? 0) > 0) {
+    failed.push({ check: 'seq_gap', details: { gap_count: Number(gapRows[0].gap_count) } });
+  }
+
+  const { rows: ledgerOrderRows } = await pool.query(
+    `SELECT COUNT(*)::int AS non_monotonic_count
+     FROM (
+       SELECT seq,
+              ledger,
+              LAG(ledger) OVER (ORDER BY seq) AS previous_ledger
+       FROM events
+     ) AS ordered
+     WHERE previous_ledger IS NOT NULL
+       AND ledger < previous_ledger`,
+  );
+  if (Number(ledgerOrderRows[0]?.non_monotonic_count ?? 0) > 0) {
+    failed.push({ check: 'ledger_monotonicity', details: { non_monotonic_count: Number(ledgerOrderRows[0].non_monotonic_count) } });
+  }
+
+  const { rows: maxLedgerRows } = await pool.query(
+    `SELECT COALESCE(MAX(ledger), 0)::bigint AS max_ledger FROM events`,
+  );
+  const { rows: lastIndexedRows } = await pool.query(
+    `SELECT COALESCE((SELECT value FROM daemon_state WHERE key = 'last_indexed_ledger'), '0') AS value`,
+  );
+  const maxLedger = Number(maxLedgerRows[0]?.max_ledger ?? 0);
+  const lastIndexedLedger = Number(lastIndexedRows[0]?.value ?? 0);
+  if (lastIndexedLedger !== maxLedger) {
+    failed.push({ check: 'last_indexed_ledger', details: { expected: maxLedger, actual: lastIndexedLedger } });
+  }
+
+  const { rows: txRangeRows } = await pool.query(
+    `SELECT COALESCE(MIN(ledger), 0)::bigint AS min_ledger,
+            COALESCE(MAX(ledger), 0)::bigint AS max_ledger
+     FROM events`,
+  );
+  const minLedger = Number(txRangeRows[0]?.min_ledger ?? 0);
+  const maxLedgerForTx = Number(txRangeRows[0]?.max_ledger ?? 0);
+  const { rows: hashCountRows } = await pool.query(
+    `SELECT COUNT(*)::int AS ledger_hash_count
+     FROM ledger_hashes
+     WHERE ledger >= $1
+       AND ledger <= $2`,
+    [minLedger, maxLedgerForTx],
+  );
+  const ledgerHashCount = Number(hashCountRows[0]?.ledger_hash_count ?? 0);
+  if (ledgerHashCount > 0 && maxLedgerForTx > 0) {
+    const { rows: txCountRows } = await pool.query(
+      `SELECT COUNT(DISTINCT tx_hash)::int AS distinct_tx_hashes
+       FROM events
+       WHERE tx_hash IS NOT NULL
+         AND ledger >= $1
+         AND ledger <= $2`,
+      [minLedger, maxLedgerForTx],
+    );
+    const distinctTxHashes = Number(txCountRows[0]?.distinct_tx_hashes ?? 0);
+    if (distinctTxHashes !== ledgerHashCount) {
+      failed.push({ check: 'ledger_hash_count', details: { distinct_tx_hashes: distinctTxHashes, ledger_hash_count: ledgerHashCount } });
+    }
+  }
+
+  return failed.length ? { ok: false, failed } : { ok: true };
+}
+
 function rowsToCsv(rows, columns) {
   if (!rows.length) return columns.join(',') + '\n';
   const escape = (v) => {
@@ -89,6 +165,8 @@ function rowsToCsv(rows, columns) {
   const body = rows.map((r) => columns.map((c) => escape(r[c])).join(',')).join('\n');
   return header + '\n' + body + '\n';
 }
+
+export { runIntegrityChecks };
 
 // ── Router factory ────────────────────────────────────────────────────────────
 
@@ -165,6 +243,19 @@ export default function registerAdminRoutes(app) {
 
   // Apply admin auth to all routes on this router.
   router.use(adminAuthMiddleware);
+
+  // ── GET /api/admin/integrity ─────────────────────────────────────────────
+  router.get('/integrity', async (_req, res) => {
+    try {
+      const result = await runIntegrityChecks();
+      if (result.ok) {
+        return res.json({ ok: true });
+      }
+      return res.json(result);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
 
   // ── POST /api/admin/alerts/:condition/resolve ─────────────────────────────
   router.post('/alerts/:condition/resolve', (req, res) => {
