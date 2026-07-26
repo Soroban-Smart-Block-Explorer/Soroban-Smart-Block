@@ -235,8 +235,7 @@ export default function registerAdminRoutes(app) {
   // ── GET /api/admin/api-keys/:id/usage ─────────────────────────────────────
   router.get('/api-keys/:id/usage', async (req, res) => {
     try {
-      const days = Number(req.query.days) || 30;
-      const usage = await getKeyUsage(req.params.id, days);
+      const usage = await getKeyUsage(req.params.id);
       res.json(usage);
     } catch (e) {
       res.status(500).json({ error: e.message });

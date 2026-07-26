@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import pg from "pg";
+import bcrypt from "bcryptjs";
 
 // Ensure process.env uses TEST_DATABASE_URL
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
@@ -132,6 +133,50 @@ describe("REST API Integration Tests", () => {
       expect(res.body).toHaveProperty("reason");
 
       db.query = originalQuery;
+    });
+  });
+
+  describe("API key daily usage enforcement", () => {
+    const rawKey = "daily-limit-test-key-123";
+
+    beforeAll(async () => {
+      const keyHash = await bcrypt.hash(rawKey, 12);
+      const { rows } = await db.query(
+        `INSERT INTO api_keys
+          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL)
+         RETURNING id`,
+        [
+          "daily-limit-key",
+          keyHash,
+          rawKey.slice(0, 8),
+          "free",
+          2,
+          JSON.stringify([]),
+          JSON.stringify([]),
+        ],
+      );
+
+      await db.query(
+        `INSERT INTO api_key_usage (api_key_id, date, request_count)
+         VALUES ($1, CURRENT_DATE, 0)
+         ON CONFLICT (api_key_id, date)
+         DO NOTHING`,
+        [rows[0].id],
+      );
+    });
+
+    it("should return 429 on the N+1 request once the daily limit is reached", async () => {
+      const headers = { "x-api-key": rawKey, "X-Forwarded-For": "10.90.0.200" };
+
+      const first = await request(app).get("/api/events?limit=1").set(headers);
+      const second = await request(app).get("/api/events?limit=1").set(headers);
+      const third = await request(app).get("/api/events?limit=1").set(headers);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(third.status).toBe(429);
+      expect(third.body).toEqual({ error: "Daily API key usage limit exceeded" });
     });
   });
 
