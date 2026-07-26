@@ -34,43 +34,84 @@ export async function rollback(forkLedger) {
 /**
  * Compare our stored hashes against the network.
  *
- * @param {import("@stellar/stellar-sdk").SorobanRpc.Server} rpc
+ * Supports two call patterns:
+ * 1. Legacy RPC-backed scan: checkForReorg(rpc, dependencies)
+ * 2. Immediate fast-path: checkForReorg(latestLedger, latestLedgerHash)
+ *
  * A detected mismatch is rolled back atomically before the fork height is
  * returned to the caller for its in-memory cursor rewind. Alert delivery is
  * best-effort and cannot block that recovery path.
  *
+ * @param {import("@stellar/stellar-sdk").SorobanRpc.Server | number} rpcOrLatestLedger
  * @param {{
  *   getStoredHashes?: (limit: number) => Promise<Array<{ledger: number|string, hash: string}>>,
  *   rollbackFork?: (ledger: number) => Promise<void>,
  *   alertReorg?: (ledger: number) => Promise<void>,
  *   checkInterval?: number,
- *   maxDepth?: number
- * }} dependencies Optional test seams for external effects.
+ *   maxDepth?: number,
+ *   latestLedger?: number,
+ *   latestLedgerHash?: string
+ * } | string} dependencies Optional test seams or the latest ledger hash.
  * @returns {Promise<number|null>} fork ledger height, or null if no reorg
  */
-export async function checkForReorg(rpc, dependencies = {}) {
-  const getStoredHashes = dependencies.getStoredHashes ?? getRecentLedgerHashes;
-  const rollbackFork = dependencies.rollbackFork ?? rollback;
-  const alertReorg = dependencies.alertReorg ?? alertManager.alertReorg;
-  const checkInterval = dependencies.checkInterval ?? config.REORG_CHECK_INTERVAL;
-  const maxDepth = dependencies.maxDepth ?? config.REORG_MAX_DEPTH;
-  // A polling pass records the RPC's latest-ledger hash; paginated pages
-  // conflict on that same ledger. A catch-up span therefore must not expand
-  // this SQL/RPC scan beyond the configured cadence plus supported depth.
+export async function checkForReorg(latestLedgerOrRpc, latestLedgerHashOrDependencies = {}) {
+  const fastPath =
+    typeof latestLedgerOrRpc === "number" &&
+    typeof latestLedgerHashOrDependencies === "string";
+
+  const getStoredHashes =
+    fastPath || !latestLedgerHashOrDependencies
+      ? getRecentLedgerHashes
+      : latestLedgerHashOrDependencies.getStoredHashes ?? getRecentLedgerHashes;
+  const rollbackFork =
+    fastPath || !latestLedgerHashOrDependencies
+      ? rollback
+      : latestLedgerHashOrDependencies.rollbackFork ?? rollback;
+  const alertReorg =
+    fastPath || !latestLedgerHashOrDependencies
+      ? alertManager.alertReorg
+      : latestLedgerHashOrDependencies.alertReorg ?? alertManager.alertReorg;
+  const checkInterval =
+    fastPath || !latestLedgerHashOrDependencies
+      ? config.REORG_CHECK_INTERVAL
+      : latestLedgerHashOrDependencies.checkInterval ?? config.REORG_CHECK_INTERVAL;
+  const maxDepth =
+    fastPath || !latestLedgerHashOrDependencies
+      ? config.REORG_MAX_DEPTH
+      : latestLedgerHashOrDependencies.maxDepth ?? config.REORG_MAX_DEPTH;
+
   const lookback = checkInterval + maxDepth;
   const stored = await getStoredHashes(lookback);
   if (stored.length === 0) return null;
 
+  if (fastPath) {
+    const latestLedger = latestLedgerOrRpc;
+    const latestLedgerHash = latestLedgerHashOrDependencies;
+    const latestEntry = stored.find((row) => Number(row.ledger) === latestLedger);
+    if (!latestEntry) return null;
+    if (latestEntry.hash !== latestLedgerHash) {
+      console.warn(`[reorg] Mismatch at ledger ${latestLedger}: stored=${latestEntry.hash} network=${latestLedgerHash}`);
+      await rollbackFork(latestLedger);
+      try {
+        await alertReorg(latestLedger);
+      } catch (err) {
+        console.error(`[reorg] Alert failed at ledger ${latestLedger}: ${err.message}`);
+      }
+      return latestLedger;
+    }
+    return null;
+  }
+
+  const rpc = latestLedgerOrRpc;
   let earliestFork = null;
   for (const { ledger, hash } of stored) {
     const ledgerNumber = Number(ledger);
     let networkHash;
     try {
-      // getLedger is available on Soroban RPC; fall back gracefully if not.
       const info = await rpc.getLedger(ledgerNumber).catch(() => null);
       networkHash = info?.hash ?? null;
     } catch {
-      continue; // RPC hiccup — skip this ledger
+      continue;
     }
 
     if (networkHash && networkHash !== hash) {
