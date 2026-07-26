@@ -14,6 +14,7 @@ import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTr
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus } from "./rpcMultiNode.js";
+import { cacheHitTotal, cacheMissTotal } from "./metrics.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
 import { geoIpRateLimiter } from "./rateLimit/geoIpLimiter.js";
@@ -104,6 +105,7 @@ function makeCache(cacheType, getKey) {
 
     const cached = await cacheGet(key, cacheType);
     if (cached !== null) {
+      cacheHitTotal.inc({ cache: cacheType });
       const etag = generateETag(cached);
       if (req.headers["if-none-match"] === etag) {
         recordCachedLatency(Date.now() - start);
@@ -117,6 +119,7 @@ function makeCache(cacheType, getKey) {
       recordAccess(key);
       return res.json(cached);
     }
+    cacheMissTotal.inc({ cache: cacheType });
 
     // Miss: intercept res.json to cache the successful response
     const originalJson = res.json.bind(res);
@@ -667,6 +670,21 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
         const advisory = await analyzeSourceDependencies(sourceFiles);
         res.json({ ...meta, dependency_advisory: advisory });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
+  // GET /api/contracts/:id/stats — event totals, unique callers, and a 30-day
+  // daily trend for the contract stats widget (#536). Cached for 5 minutes.
+  app.get(
+    "/api/contracts/:id/stats",
+    makeCache("contract_stats", (req) => `contracts:stats:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const stats = await db.getContractStats(req.params.id);
+        res.json(stats);
       } catch (e) {
         res.status(500).json({ error: e.message });
       }

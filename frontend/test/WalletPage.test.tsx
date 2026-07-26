@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import WalletPage from "../src/pages/WalletPage";
@@ -34,6 +34,7 @@ function renderWalletPage(address: string) {
 describe("WalletPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSearchParams = new URLSearchParams();
   });
 
   afterEach(() => {
@@ -117,5 +118,40 @@ describe("WalletPage", () => {
     const xlmHeading = await screen.findByText("XLM Balance");
     expect(xlmHeading).toBeDefined();
     expect(screen.getByText("1250.0000000 XLM")).toBeDefined();
+  });
+
+  it("restores filter state from the URL (issue #533 permalink)", async () => {
+    mockSearchParams = new URLSearchParams({ from: "100", to: "200", fn: "transfer", group: "function" });
+    const { api } = await import("../src/api");
+    (api.wallet as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      events: [{ seq: 1, ledger: 150, function: "transfer", description: "moved tokens" }],
+    });
+
+    const WalletPage = (await import("../src/pages/WalletPage")).default;
+    render(
+      <Wrapper>
+        <WalletPage />
+      </Wrapper>
+    );
+    expect(await screen.findByDisplayValue("100")).toBeDefined();
+    expect(screen.getByDisplayValue("200")).toBeDefined();
+    expect(screen.getByDisplayValue("transfer")).toBeDefined();
+    expect(screen.getByDisplayValue("Function")).toBeDefined();
+  });
+
+  it("copies the current URL and shows a transient 'Link copied!' toast on Share click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    const WalletPage = (await import("../src/pages/WalletPage")).default;
+    render(
+      <Wrapper>
+        <WalletPage />
+      </Wrapper>
+    );
+
+    fireEvent.click(await screen.findByText("🔗 Share"));
+    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    expect(await screen.findByText("Link copied!")).toBeDefined();
   });
 });

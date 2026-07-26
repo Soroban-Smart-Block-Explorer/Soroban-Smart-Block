@@ -152,11 +152,24 @@ export interface ContractMeta {
   version: number;
   name: string;
   description: string;
-  functions: { name: string; description: string }[];
+  functions: { name: string; description: string; args?: { name: string; type: string }[] }[];
+  registered_by?: string;
+  is_rwa?: boolean;
+  rwa_type?: string | null;
+  min_ledger?: number;
+  created_at?: string;
   source?: string;
   source_file?: string;
   source_files?: SourceFile[];
   dependency_advisory?: DependencyAdvisory | null;
+}
+
+export interface ContractStats {
+  total_events: number;
+  unique_callers: number;
+  first_seen_ledger: number | null;
+  last_seen_ledger: number | null;
+  events_per_day: { date: string; count: number }[];
 }
 
 export interface ContractListItem {

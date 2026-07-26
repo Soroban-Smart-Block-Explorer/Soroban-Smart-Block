@@ -2,7 +2,9 @@ import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { truncateAddress } from "../utils/strkey";
 import EventTable from "../components/EventTable";
+import ContractStatsWidget from "../components/ContractStatsWidget";
 import RustCodeViewer from "../components/RustCodeViewer";
 import MigrationBanner from "../components/MigrationBanner";
 import SourceFileTree from "../components/SourceFileTree";
@@ -56,6 +58,36 @@ function isInvocationNode(value: unknown): value is InvocationNode {
   if (!value || typeof value !== "object") return false;
   const node = value as Partial<InvocationNode>;
   return typeof node.contract === "string" && node.contract.length > 0 && typeof node.fn === "string" && node.fn.length > 0;
+}
+
+/** Compact header badge — mirrors the verification threshold used on the Source tab. */
+function VerifiedBadge({ contractId }: { contractId: string }) {
+  const MIN_VERIFIED = 3;
+  const { data: verifications = [] } = useQuery({
+    queryKey: ["source-verifications", contractId],
+    queryFn: () => api.sourceVerifications(contractId),
+    enabled: !!contractId,
+  });
+  const isVerified = verifications.length >= MIN_VERIFIED;
+  const color = isVerified ? "var(--green, #22c55e)" : "var(--muted)";
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 10px",
+        borderRadius: 12,
+        border: `1px solid ${color}`,
+        color,
+        fontSize: 11,
+        fontWeight: 600,
+      }}
+      title={isVerified ? `Source verified by ${verifications.length} signatures` : "Source not yet verified"}
+    >
+      {isVerified ? "✔ Verified" : "✗ Unverified"}
+    </span>
+  );
 }
 
 export default function ContractPage() {
@@ -129,7 +161,7 @@ export default function ContractPage() {
                 flexShrink: 0,
               }}
             />
-            <h2 style={{ fontSize: 16 }}>Unverified Contract</h2>
+            <h2 style={{ fontSize: 16 }}>Not registered — be the first to add ABI metadata</h2>
             <code
               style={{
                 fontSize: 12,
@@ -228,10 +260,20 @@ export default function ContractPage() {
                 fontSize: 12,
                 color: "var(--muted)",
                 wordBreak: "break-all",
+                display: "block",
+                marginBottom: 8,
               }}
             >
               {id}
             </code>
+            <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--muted)", flexWrap: "wrap" }}>
+              {meta.registered_by && (
+                <span>
+                  Registered by <code>{truncateAddress(meta.registered_by)}</code>
+                </span>
+              )}
+              {meta.min_ledger != null && <span>Registration ledger: {meta.min_ledger.toLocaleString()}</span>}
+            </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button
@@ -350,6 +392,9 @@ export default function ContractPage() {
       {/* Tab: Overview */}
       {tab === "overview" && (
         <>
+          {/* Contract stats widget — total events, unique callers, last activity, sparkline (#536) */}
+          <ContractStatsWidget contractId={id} />
+
           {/* Local ABI upload zone — shown for unverified contracts or when
               the user wants to override descriptions with a local file */}
           {isUnverified && (
@@ -456,16 +501,20 @@ export default function ContractPage() {
 
           {functions.length > 0 ? (
             <div className="card">
-              <h3 style={{ marginBottom: 8, fontSize: 14 }}>Functions</h3>
+              <h3 style={{ marginBottom: 8, fontSize: 14 }}>ABI — Functions</h3>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {functions.map((f) => (
-                  <div key={f.name} className="card" style={{ padding: "8px 12px" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <details key={f.name} className="card" style={{ padding: "8px 12px" }}>
+                    <summary style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", listStyle: "none" }}>
                       <span className="badge">{f.name}</span>
                       <span style={{ color: "var(--muted)", flex: 1 }}>{f.description}</span>
+                      <span style={{ color: "var(--muted)", fontSize: 11 }}>{f.args?.length ?? 0} param(s)</span>
                       {/* SDK snippet copy button */}
                       <button
-                        onClick={() => setSnippetFn(snippetFn === f.name ? null : f.name)}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setSnippetFn(snippetFn === f.name ? null : f.name);
+                        }}
                         style={{
                           padding: "3px 10px",
                           fontSize: 12,
@@ -478,9 +527,31 @@ export default function ContractPage() {
                       >
                         {"</>"} SDK
                       </button>
+                    </summary>
+                    <div style={{ marginTop: 10 }}>
+                      {f.args && f.args.length > 0 ? (
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                          <thead>
+                            <tr style={{ color: "var(--muted)", textAlign: "left" }}>
+                              <th style={{ padding: "2px 8px 2px 0" }}>Param</th>
+                              <th style={{ padding: "2px 0" }}>Type</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {f.args.map((a) => (
+                              <tr key={a.name}>
+                                <td style={{ padding: "2px 8px 2px 0", fontFamily: "monospace" }}>{a.name}</td>
+                                <td style={{ padding: "2px 0", color: "var(--muted)", fontFamily: "monospace" }}>{a.type}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <p style={{ color: "var(--muted)", fontSize: 12, margin: 0 }}>No parameters.</p>
+                      )}
                     </div>
                     {snippetFn === f.name && <SdkSnippet contractId={id} fnName={f.name} />}
-                  </div>
+                  </details>
                 ))}
               </div>
             </div>
