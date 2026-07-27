@@ -1,12 +1,13 @@
 import { scValToNative } from "@stellar/stellar-sdk";
 import { db } from "./db.js";
-import { detectSac, detectSacAsset } from "./sac.js";
+import { detectSac, detectSacAsset, sacLabel } from "./sac.js";
 import { extractRoleAssignment } from "./roleTracker.js";
 import { decodeRwaEvent } from "./rwaDecoder.js";
 import { parseHeuristic } from "./heuristicParser.js";
 import { parseTTLHostFunction, formatTTLExtension } from "./ttlExtensionParser.js";
 import { parseZkHostFunctions, computeZkCostDelta } from "./zkHostFunctions.js";
 import { resolveAsset } from "./horizonClient.js";
+import config from "./config.js";
 
 // Classic operation types decoded from Horizon alongside Soroban events.
 const PATH_PAYMENT_TYPES = new Set(["path_payment_strict_send", "path_payment_strict_receive"]);
@@ -104,6 +105,12 @@ const NATIVE_SAC_IDS = new Set([
   "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA", // mainnet
 ]);
 
+// Contract IDs for protocol-specific decoders (#552, #553). Blank by default —
+// operators set these once the target instance is deployed/identified, same
+// convention as EXPLORER_CONTRACT_ID.
+const STELLARSWAP_CONTRACT_ID = config.STELLARSWAP_CONTRACT_ID || null;
+const BLEND_CONTRACT_ID = config.BLEND_CONTRACT_ID || null;
+
 /**
  * Decode a raw Soroban RPC event into a human-readable record.
  * Uses the ABI template when available; falls back to a generic description.
@@ -132,6 +139,40 @@ export async function decode(ev, { currentAbi = false } = {}) {
         ledger: ev.ledger,
         tx_hash: ev.txHash,
         description: wrapUnwrap.description,
+        raw_topics: topics.map((t) => stripNul(t)),
+        raw_data: safeStringify(data),
+        ...extractGasCosts(ev),
+      };
+    }
+  }
+
+  // StellarSwap DEX (#552)
+  if (STELLARSWAP_CONTRACT_ID && contractId === STELLARSWAP_CONTRACT_ID) {
+    const description = stellarSwapDescription(fnName, topics.slice(1), data, ev.ledger);
+    if (description) {
+      return {
+        contract_id: contractId,
+        function: fnName,
+        ledger: ev.ledger,
+        tx_hash: ev.txHash,
+        description,
+        raw_topics: topics.map((t) => stripNul(t)),
+        raw_data: safeStringify(data),
+        ...extractGasCosts(ev),
+      };
+    }
+  }
+
+  // Blend lending protocol (#553)
+  if (BLEND_CONTRACT_ID && contractId === BLEND_CONTRACT_ID) {
+    const description = blendDescription(fnName, topics.slice(1), data, ev.ledger);
+    if (description) {
+      return {
+        contract_id: contractId,
+        function: fnName,
+        ledger: ev.ledger,
+        tx_hash: ev.txHash,
+        description,
         raw_topics: topics.map((t) => stripNul(t)),
         raw_data: safeStringify(data),
         ...extractGasCosts(ev),
@@ -284,6 +325,17 @@ export async function decodeClassicOperation(ev) {
 async function classicAssetLabel(code, issuer, assetType) {
   if (!code || !issuer || assetType === "native") return "XLM";
   const resolved = await resolveAsset(code, issuer).catch(() => null);
+  if (resolved) {
+    // Populate the token metadata registry (#550) as classic asset transfers
+    // are decoded, so GET /api/assets can serve it without a live Horizon call.
+    db.upsertAsset({
+      code: resolved.code,
+      issuer: resolved.issuer,
+      name: resolved.name,
+      domain: resolved.domain,
+      decimals: resolved.decimals,
+    }).catch((err) => console.error("[assets] upsertAsset failed:", err.message));
+  }
   return resolved?.name ? `${code} (${resolved.name})` : code;
 }
 
@@ -587,6 +639,118 @@ function buildLiquidityDescription(fn, args, _data, contractName) {
   const recvA = amounts[1] ?? "?";
   const recvB = amounts[2] ?? "?";
   return `${provider} removed ${lpAmt} LP tokens from ${poolLabel} (received ${recvA} ${tokenA} + ${recvB} ${tokenB})`;
+}
+
+// ── StellarSwap DEX (issue #552) ──────────────────────────────────────────────
+//
+// Event shape (topics.slice(1), data), matching src/abis/stellarswap.json:
+//   swap / swap_exact_tokens_for_tokens:
+//     args = [trader, token_in, token_out]
+//     data = [amount_in, amount_out, amount_out_expected]
+//   add_liquidity / remove_liquidity: same shape as the generic AMM liquidity
+//     helper above — delegated to buildLiquidityDescription().
+//
+// "amount_out_expected" is the pre-trade quoted output; slippage is the percent
+// shortfall between that quote and the amount actually received.
+
+/**
+ * "GA… swapped 100 USDC → 98.7 XLM (slippage 1.3%) on StellarSwap at ledger #N"
+ */
+export function stellarSwapDescription(fn, args, data, ledger) {
+  if (fn === "add_liquidity" || fn === "remove_liquidity") {
+    return buildLiquidityDescription(fn, args, data, "StellarSwap");
+  }
+  if (fn !== "swap" && fn !== "swap_exact_tokens_for_tokens") return null;
+
+  const [trader, tokenIn, tokenOut] = args;
+  const [amountIn, amountOut, amountOutExpected] = Array.isArray(data) ? data : [data];
+
+  const expected = amountOutExpected != null ? Number(amountOutExpected) : null;
+  const actual = amountOut != null ? Number(amountOut) : null;
+  const slippage =
+    expected != null && actual != null && expected > 0
+      ? ` (slippage ${(((expected - actual) / expected) * 100).toFixed(1)}%)`
+      : "";
+
+  return `${fmt(trader)} swapped ${amountIn} ${tokenIn} → ${amountOut} ${tokenOut}${slippage} on StellarSwap at ledger #${ledger}`;
+}
+
+// ── Blend lending protocol (issue #553) ───────────────────────────────────────
+//
+// Real Blend v2 pool event topics/data (blend-contracts-v2 pool/src/events.rs):
+//   supply / supply_collateral: topics ["<fn>", asset, from], data (tokens_in, b_tokens_minted)
+//   withdraw / withdraw_collateral: topics ["<fn>", asset, from], data (tokens_out, b_tokens_burnt)
+//   borrow: topics ["borrow", asset, from], data (tokens_out, d_tokens_minted)
+//   repay: topics ["repay", asset, from], data (tokens_in, d_tokens_burnt)
+//   fill_auction (liquidation execution): topics ["fill_auction", auction_type, user],
+//     data (filler, fill_percent, filled_auction_data), where filled_auction_data is
+//     { bid: Map<Address, i128>, lot: Map<Address, i128>, block } — bid is seized from
+//     the filler (repaid debt), lot is paid out to the filler (seized collateral).
+//     auction_type 0 = UserLiquidation (per AuctionData's field-order doc comments).
+
+const LIQUIDATION_AUCTION_TYPE = 0;
+
+/** Normalise a Soroban Map (native Map or plain object) to [key, value] entries. */
+function mapEntries(mapOrObj) {
+  if (!mapOrObj) return [];
+  if (mapOrObj instanceof Map) return [...mapOrObj.entries()];
+  if (typeof mapOrObj === "object") return Object.entries(mapOrObj);
+  return [];
+}
+
+/** Resolve a Blend reserve asset address to its display code, e.g. "USDC". */
+function blendAssetLabel(assetAddress) {
+  return sacLabel(assetAddress, fmt(assetAddress));
+}
+
+/**
+ * "GA… supplied 500 USDC to Blend pool at ledger #N"
+ * "GA… borrowed 200 XLM from Blend (health factor: 1.85)"
+ * "GA… liquidated GB… position: seized 150 USDC, repaid 130 XLM"
+ */
+export function blendDescription(fn, args, data, ledger) {
+  const ledgerSuffix = ledger != null ? ` at ledger #${ledger}` : "";
+
+  if (fn === "supply" || fn === "supply_collateral") {
+    const [asset, from] = args;
+    const [tokensIn] = Array.isArray(data) ? data : [data];
+    return `${fmt(from)} supplied ${fmtXlm(tokensIn)} ${blendAssetLabel(asset)} to Blend pool${ledgerSuffix}`;
+  }
+
+  if (fn === "withdraw" || fn === "withdraw_collateral") {
+    const [asset, from] = args;
+    const [tokensOut] = Array.isArray(data) ? data : [data];
+    return `${fmt(from)} withdrew ${fmtXlm(tokensOut)} ${blendAssetLabel(asset)} from Blend pool${ledgerSuffix}`;
+  }
+
+  if (fn === "borrow") {
+    const [asset, from] = args;
+    const [tokensOut, , healthFactor] = Array.isArray(data) ? data : [data];
+    const hfSuffix = healthFactor != null ? ` (health factor: ${Number(healthFactor).toFixed(2)})` : "";
+    return `${fmt(from)} borrowed ${fmtXlm(tokensOut)} ${blendAssetLabel(asset)} from Blend${hfSuffix}`;
+  }
+
+  if (fn === "repay") {
+    const [asset, from] = args;
+    const [tokensIn] = Array.isArray(data) ? data : [data];
+    return `${fmt(from)} repaid ${fmtXlm(tokensIn)} ${blendAssetLabel(asset)} to Blend${ledgerSuffix}`;
+  }
+
+  if (fn === "fill_auction") {
+    const [auctionType, user] = args;
+    if (Number(auctionType) !== LIQUIDATION_AUCTION_TYPE) return null;
+
+    const [filler, , auctionData] = Array.isArray(data) ? data : [];
+    const [repaidAsset, repaidAmount] = mapEntries(auctionData?.bid)[0] ?? [];
+    const [seizedAsset, seizedAmount] = mapEntries(auctionData?.lot)[0] ?? [];
+
+    const seizedStr = seizedAsset ? `${fmtXlm(seizedAmount)} ${blendAssetLabel(seizedAsset)}` : "?";
+    const repaidStr = repaidAsset ? `${fmtXlm(repaidAmount)} ${blendAssetLabel(repaidAsset)}` : "?";
+
+    return `${fmt(filler)} liquidated ${fmt(user)} position: seized ${seizedStr}, repaid ${repaidStr}`;
+  }
+
+  return null;
 }
 
 function genericDescription(fn, args, data, contractId) {

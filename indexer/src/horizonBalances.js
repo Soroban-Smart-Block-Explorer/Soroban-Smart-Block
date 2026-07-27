@@ -46,3 +46,31 @@ export async function fetchWalletBalances(address) {
     "wallet_balances",
   );
 }
+
+/**
+ * Fetch Horizon account metadata for the GET /api/wallet/:address response
+ * (#551), cached for 60 seconds. Returns null for an unfunded account (Horizon
+ * 404) rather than throwing, since the wallet endpoint treats horizon_account
+ * as an optional enrichment.
+ * @param {string} address G... account address
+ * @returns {Promise<{ sequence: string, subentry_count: number, home_domain: string|null } | null>}
+ */
+export async function fetchAccountMeta(address) {
+  return cacheAside(
+    `horizon:account:${address}`,
+    async () => {
+      const res = await fetch(`${HORIZON_URL}/accounts/${address}`);
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        throw new Error(`Horizon request failed with status ${res.status}`);
+      }
+      const data = await res.json();
+      return {
+        sequence: data.sequence ?? null,
+        subentry_count: data.subentry_count ?? null,
+        home_domain: data.home_domain ?? null,
+      };
+    },
+    "horizon_account",
+  );
+}
