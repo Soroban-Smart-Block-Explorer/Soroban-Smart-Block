@@ -1664,22 +1664,54 @@ export const db = {
     };
   },
 
-  // ── classic asset metadata cache (#546) ─────────────────────────
+  // ── classic asset metadata cache (#546) / token metadata registry (#550) ────
   async getAsset(code, issuer) {
     const { rows } = await pool.query("SELECT * FROM assets WHERE code = $1 AND issuer = $2", [code, issuer]);
     return rows[0] ?? null;
   },
 
-  async upsertAsset({ code, issuer, name, domain, logo_url }) {
+  async upsertAsset({ code, issuer, name, domain, logo_url, decimals }) {
     const { rows } = await pool.query(
-      `INSERT INTO assets (code, issuer, name, domain, logo_url)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO assets (code, issuer, name, domain, logo_url, decimals)
+       VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (code, issuer) DO UPDATE
-         SET name = EXCLUDED.name, domain = EXCLUDED.domain, logo_url = EXCLUDED.logo_url, resolved_at = NOW()
+         SET name = EXCLUDED.name, domain = EXCLUDED.domain, logo_url = EXCLUDED.logo_url,
+             decimals = EXCLUDED.decimals, resolved_at = NOW()
        RETURNING *`,
-      [code, issuer, name ?? null, domain ?? null, logo_url ?? null],
+      [code, issuer, name ?? null, domain ?? null, logo_url ?? null, decimals ?? 7],
     );
     return rows[0];
+  },
+
+  /**
+   * Paginated list of every asset seen in indexed events, newest-resolved first.
+   * Keyset (cursor) pagination on the monotonic `id` column (#550).
+   * @param {{ after_id?: number, limit?: number }} opts
+   * @returns {Promise<{ data: object[], next_cursor: number|null }>}
+   */
+  async listAssets({ after_id = 0, limit = 25 } = {}) {
+    const params = [];
+    const conditions = [];
+
+    if (after_id > 0) {
+      params.push(after_id);
+      conditions.push(`id < $${params.length}`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.push(limit + 1); // fetch one extra to detect next page
+
+    const { rows } = await pool.query(
+      `SELECT id, code, issuer, name, domain, logo_url, decimals, resolved_at
+       FROM assets ${where} ORDER BY id DESC LIMIT $${params.length}`,
+      params,
+    );
+
+    const hasMore = rows.length > limit;
+    const data = hasMore ? rows.slice(0, limit) : rows;
+    const next_cursor = hasMore ? Number(data[data.length - 1].id) : null;
+
+    return { data, next_cursor };
   },
 };
 

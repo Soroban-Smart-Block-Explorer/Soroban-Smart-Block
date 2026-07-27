@@ -313,6 +313,7 @@ async function run() {
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
   warmCache().catch((e) => logger.warn({ err: e.message }, "cache warm failed"));
+  seedBuiltinAbis().catch((e) => logger.warn({ err: e.message }, "builtin ABI seed failed"));
   startAbiSync();
   startContractVerifier(); // periodically verify DB ABI hashes against on-chain registry
   startBurnDetector();

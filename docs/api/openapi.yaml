@@ -629,12 +629,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [events]
+                required: [events, horizon_account]
                 properties:
                   events:
                     type: array
                     items:
                       $ref: "#/components/schemas/DecodedEvent"
+                  horizon_account:
+                    $ref: "#/components/schemas/HorizonAccount"
         "400":
           description: Invalid wallet address format
           content:
@@ -649,6 +651,84 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/assets:
+    get:
+      summary: List all assets seen in indexed events
+      description: >-
+        Paginated list of classic asset metadata backed by the `assets` table,
+        populated as events are decoded. Cursor-based (keyset) pagination via
+        `next_cursor` (#550).
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Opaque cursor — pass the previous page's `next_cursor` value
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 25
+            maximum: 100
+          description: Page size (max 100)
+      responses:
+        "200":
+          description: Paginated asset list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Asset"
+                  next_cursor:
+                    type: integer
+                    nullable: true
+        "422":
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/assets/{issuer}/{code}:
+    get:
+      summary: Get metadata for a single classic asset
+      description: >-
+        Returns the resolved metadata for a classic asset identified by
+        issuer + code, backed by the `assets` table (#550).
+      parameters:
+        - name: issuer
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "USDC"
+      responses:
+        "200":
+          description: Asset metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "404":
+          description: Asset has not been indexed
           content:
             application/json:
               schema:
@@ -1035,6 +1115,51 @@ components:
           type: boolean
           example: false
 
+    HorizonAccount:
+      type: object
+      nullable: true
+      description: >-
+        Null when the account is unfunded (Horizon 404) or Horizon could not
+        be reached — see #551.
+      required: [sequence, subentry_count, home_domain]
+      properties:
+        sequence:
+          type: string
+          example: "123456789012345"
+        subentry_count:
+          type: integer
+          example: 3
+        home_domain:
+          type: string
+          nullable: true
+          example: "example.com"
+
+    Asset:
+      type: object
+      required: [code, issuer, name, decimals, logo_url, home_domain]
+      properties:
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        name:
+          type: string
+          nullable: true
+          example: "USDC"
+        decimals:
+          type: integer
+          example: 7
+        logo_url:
+          type: string
+          nullable: true
+          example: "https://centre.io/logo.png"
+        home_domain:
+          type: string
+          nullable: true
+          example: "centre.io"
+
     Rfc7807Error:
       type: object
       required: [type, title, status, detail]
@@ -1121,29 +1246,6 @@ components:
             DEX swap slippage in basis points (1% = 100 bps), computed as
             |amount_out - min_amount_out| / min_amount_out. Present only for
             swap events where min_amount_out is known.
-
-    Asset:
-      type: object
-      required: [code, issuer]
-      properties:
-        code:
-          type: string
-          example: "USDC"
-        issuer:
-          type: string
-          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
-        name:
-          type: string
-          nullable: true
-          example: "Centre Consortium"
-        domain:
-          type: string
-          nullable: true
-          example: "centre.io"
-        logo_url:
-          type: string
-          nullable: true
-          example: "https://centre.io/logo.png"
 
     CursorPaginatedEvents:
       type: object

@@ -1,64 +1,51 @@
 /**
  * abiSeeder.js
  *
- * Seeds the built-in ABIs shipped in indexer/src/abis/ (e.g. StellarSwap, Blend)
- * into the contracts table on startup, so the explorer decodes their events out
- * of the box on a fresh database. Existing registrations are never overwritten —
- * only contract IDs not yet present in the DB are seeded (issue #557).
+ * Seeds the built-in StellarSwap (#552) and Blend (#553) ABI definitions into
+ * the contracts table on startup, so the registry UI and decoder both see
+ * them immediately without waiting on githubAbiSync's cron.
+ *
+ * Each ABI file's `contractId` is a schema-valid placeholder — the real
+ * deployed instance is supplied via config (STELLARSWAP_CONTRACT_ID /
+ * BLEND_CONTRACT_ID) and substitutes it at seed time. Seeding for a protocol
+ * is skipped entirely when its contract ID isn't configured.
  */
-import { readdir, readFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
+import config from "./config.js";
 import { db } from "./db.js";
 
 const ABIS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "abis");
 
-/**
- * Scans indexer/src/abis/ for *.json ABI files and registers any whose
- * contract ID isn't already in the DB. Safe to call on every startup.
- *
- * @returns {Promise<{ seeded: number, skipped: number }>}
- */
+const BUILTIN_ABIS = [
+  { file: "stellarswap.json", configKey: "STELLARSWAP_CONTRACT_ID" },
+  { file: "blend.json", configKey: "BLEND_CONTRACT_ID" },
+];
+
 export async function seedBuiltinAbis() {
-  let files;
-  try {
-    files = (await readdir(ABIS_DIR)).filter((f) => f.endsWith(".json"));
-  } catch {
-    return { seeded: 0, skipped: 0 }; // no abis/ directory — nothing to seed
-  }
+  for (const { file, configKey } of BUILTIN_ABIS) {
+    const contractId = config[configKey];
+    if (!contractId) continue; // not configured for this deployment
 
-  let seeded = 0;
-  let skipped = 0;
-
-  for (const file of files) {
     try {
+      const existing = await db.getContractMeta(contractId);
+      if (existing) continue; // already registered
+
       const raw = await readFile(path.join(ABIS_DIR, file), "utf8");
       const meta = JSON.parse(raw);
 
-      if (!meta.id || !meta.name) {
-        console.warn(`[startup] Skipping built-in ABI ${file}: missing id or name`);
-        continue;
-      }
-
-      const existing = await db.getContractMeta(meta.id);
-      if (existing) {
-        skipped++;
-        continue;
-      }
-
       await db.upsertContractMeta({
-        id: meta.id,
+        id: contractId,
         name: meta.name,
         description: meta.description ?? null,
         functions: meta.functions ?? [],
-        registered_by: "builtin-seed",
+        registered_by: "builtin-abi-seed",
       });
-      console.log(`[startup] Seeded ABI for ${meta.name} (${meta.id.slice(0, 8)}…)`);
-      seeded++;
+
+      console.log(`[abi-seed] registered ${meta.name} (${contractId})`);
     } catch (err) {
-      console.error(`[startup] Failed to seed built-in ABI ${file}:`, err.message);
+      console.error(`[abi-seed] failed to seed ${file}:`, err.message);
     }
   }
-
-  return { seeded, skipped };
 }

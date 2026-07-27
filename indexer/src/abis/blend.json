@@ -1,42 +1,53 @@
 {
-  "id": "CCCUGABBMNVF6IRDXAW5KFGHGIR2VWXE2W4ICA2V3VGHROUX45O54P2V",
+  "contractId": "CBLENDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZZZ",
   "name": "Blend",
-  "description": "Built-in ABI for the Blend lending protocol, auto-seeded on indexer startup so supply/borrow events decode out of the box.",
+  "description": "Soroban lending protocol testnet pool. The contractId above is a placeholder — the real deployed pool instance is configured via BLEND_CONTRACT_ID and substituted at seed time.",
+  "links": {
+    "homepage": "https://blend.capital"
+  },
   "functions": [
     {
       "name": "supply",
-      "description": "Supply an asset to the lending pool as collateral.",
-      "args": [
+      "template": "{from} supplied {tokens_in} {asset} to Blend pool",
+      "params": [
+        { "name": "asset", "type": "Address" },
         { "name": "from", "type": "Address" },
-        { "name": "amount", "type": "i128" },
-        { "name": "token", "type": "Symbol" }
+        { "name": "tokens_in", "type": "i128" }
       ]
     },
     {
       "name": "withdraw",
-      "description": "Withdraw previously supplied collateral from the lending pool.",
-      "args": [
+      "template": "{from} withdrew {tokens_out} {asset} from Blend pool",
+      "params": [
+        { "name": "asset", "type": "Address" },
         { "name": "from", "type": "Address" },
-        { "name": "amount", "type": "i128" },
-        { "name": "token", "type": "Symbol" }
+        { "name": "tokens_out", "type": "i128" }
       ]
     },
     {
       "name": "borrow",
-      "description": "Borrow an asset against supplied collateral.",
-      "args": [
+      "template": "{from} borrowed {tokens_out} {asset} from Blend",
+      "params": [
+        { "name": "asset", "type": "Address" },
         { "name": "from", "type": "Address" },
-        { "name": "amount", "type": "i128" },
-        { "name": "token", "type": "Symbol" }
+        { "name": "tokens_out", "type": "i128" }
       ]
     },
     {
       "name": "repay",
-      "description": "Repay a previously borrowed asset.",
-      "args": [
+      "template": "{from} repaid {tokens_in} {asset} to Blend",
+      "params": [
+        { "name": "asset", "type": "Address" },
         { "name": "from", "type": "Address" },
-        { "name": "amount", "type": "i128" },
-        { "name": "token", "type": "Symbol" }
+        { "name": "tokens_in", "type": "i128" }
+      ]
+    },
+    {
+      "name": "liquidate",
+      "template": "{filler} liquidated {user} position",
+      "params": [
+        { "name": "filler", "type": "Address" },
+        { "name": "user", "type": "Address" }
       ]
     }
   ]
