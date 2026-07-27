@@ -1,10 +1,13 @@
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
-import type { DecodedEvent } from "../api";
+import { useQueries } from "@tanstack/react-query";
+import { api } from "../api";
+import type { ContractMeta, DecodedEvent } from "../api";
 import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
 import AssetLogo from "./AssetLogo";
 import { getGasAlert } from "./GasLimitAlert";
+import ProtocolBadge from "./ProtocolBadge";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
 
 /** Stellar strkey address pattern: G.../C.../M... (56+ chars, base32 alphabet) */
@@ -194,14 +197,28 @@ function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<Decode
   );
 }
 
+/** Contract name (linked) + protocol badge — shown for events from known contracts (issue #556). */
+function ContractCell({ contractId, meta }: { contractId: string; meta?: ContractMeta }) {
+  if (!contractId) return <span style={{ color: "var(--muted)" }}>—</span>;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+      <Link to={`/contract/${contractId}`}>{meta?.name || truncateAddress(contractId)}</Link>
+      <ProtocolBadge type={meta?.protocol_type} />
+    </span>
+  );
+}
+
 /** Render a single event row (extracted so it can be reused in both modes). */
-function EventRow({ ev }: { ev: DecodedEvent }) {
+function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: ContractMeta }) {
   return (
     <>
       <td style={td}>
         <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
       </td>
       <td style={td}>{ev.ledger.toLocaleString()}</td>
+      <td style={td}>
+        <ContractCell contractId={ev.contract_id} meta={contractMeta} />
+      </td>
       <td style={td}>
         <FunctionBadge fn={ev.function} />
       </td>
@@ -271,6 +288,30 @@ export default function EventTable({ events }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef);
 
+  // Batch-fetch contract metadata for the badge shown next to each contract
+  // name (issue #556) — one request per unique contract on the page, cached
+  // by contract ID so repeat visits/pages don't refetch.
+  const contractIds = useMemo(
+    () => Array.from(new Set(events.map((e) => e.contract_id).filter(Boolean))),
+    [events],
+  );
+  const contractQueries = useQueries({
+    queries: contractIds.map((id) => ({
+      queryKey: ["contract", id],
+      queryFn: () => api.contract(id),
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+    })),
+  });
+  const contractMetaById = useMemo(() => {
+    const map = new Map<string, ContractMeta>();
+    contractIds.forEach((id, i) => {
+      const data = contractQueries[i]?.data;
+      if (data) map.set(id, data);
+    });
+    return map;
+  }, [contractIds, contractQueries]);
+
   if (!events.length)
     return (
       <p data-testid="empty-state" style={{ color: "var(--muted)" }}>
@@ -290,6 +331,7 @@ export default function EventTable({ events }: Props) {
           >
             <th style={th}>Seq</th>
             <th style={th}>Ledger</th>
+            <th style={th}>Contract</th>
             <th style={th}>Function</th>
             <th style={th}>Description</th>
           </tr>
@@ -319,7 +361,7 @@ export default function EventTable({ events }: Props) {
               >
                 <tbody>
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                    <EventRow ev={item} />
+                    <EventRow ev={item} contractMeta={contractMetaById.get(item.contract_id)} />
                   </tr>
                 </tbody>
               </table>

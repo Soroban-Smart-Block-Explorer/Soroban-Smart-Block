@@ -115,8 +115,17 @@ export const db = {
       conditions.push(`contract_id = $${params.length}`);
     }
     if (fn) {
-      params.push(fn);
-      conditions.push(`function = $${params.length}`);
+      // Comma-separated list of exact function names (e.g. "swap,swap_exact_tokens_for_tokens"
+      // for the DEX function-filter chips, issue #555). A single value keeps the
+      // plain equality comparison for backward compatibility.
+      const fns = String(fn).split(",").map((s) => s.trim()).filter(Boolean);
+      if (fns.length === 1) {
+        params.push(fns[0]);
+        conditions.push(`function = $${params.length}`);
+      } else if (fns.length > 1) {
+        params.push(fns);
+        conditions.push(`function = ANY($${params.length})`);
+      }
     }
     if (type === "soroban") {
       conditions.push(`contract_id IS NOT NULL AND contract_id <> ''`);
@@ -153,8 +162,8 @@ export const db = {
       `INSERT INTO events
          (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data,
           cpu_instructions, mem_bytes, fee_charged, is_high_bloat_risk, upgrade_info, storage_tiers, is_clawback,
-          footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls, abi_version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+          footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls, abi_version, slippage_bps)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        ON CONFLICT DO NOTHING`,
       [
         ev.contract_id,
@@ -177,6 +186,7 @@ export const db = {
         ev.archival_info ? JSON.stringify(ev.archival_info) : null,
         ev.zk_host_calls ? JSON.stringify(ev.zk_host_calls) : null,
         ev.abi_version ?? 0,
+        ev.slippage_bps ?? null,
       ],
     );
   },
