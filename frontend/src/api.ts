@@ -124,6 +124,8 @@ export interface DecodedEvent {
   sac_side_effect?: "account_created" | "trustline_opened";
   // Factory deployment trace
   factory_deployment?: FactoryDeploymentTree;
+  // DEX swap slippage in basis points (1% = 100 bps); present only when computable
+  slippage_bps?: number | null;
 }
 
 export interface SourceFile {
@@ -165,6 +167,8 @@ export interface ContractMeta {
   source_file?: string;
   source_files?: SourceFile[];
   dependency_advisory?: DependencyAdvisory | null;
+  /** Protocol type — auto-tagged from ABI functions or set explicitly. */
+  protocol_type?: "token" | "dex" | "lending" | "nft" | "bridge" | "other";
 }
 
 export interface ContractStats {
