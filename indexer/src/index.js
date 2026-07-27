@@ -6,6 +6,7 @@ import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
 import { decode } from "./decoder.js";
 import { startAbiSync } from "./githubAbiSync.js";
+import { seedBuiltinAbis } from "./abiSeeder.js";
 import { startContractVerifier } from "./contractVerifier.js";
 import { withRetry } from "./rpcRetry.js";
 import { isHighBloatRisk } from "./bloatDetector.js";
@@ -309,6 +310,7 @@ async function run() {
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
   warmCache().catch((e) => logger.warn({ err: e.message }, "cache warm failed"));
+  seedBuiltinAbis().catch((e) => logger.warn({ err: e.message }, "builtin ABI seed failed"));
   startAbiSync();
   startContractVerifier(); // periodically verify DB ABI hashes against on-chain registry
   startBurnDetector();

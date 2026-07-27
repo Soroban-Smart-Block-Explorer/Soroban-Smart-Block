@@ -136,6 +136,11 @@ const configSchema = z.object({
 
   EXPLORER_CONTRACT_ID: z.string().optional(),
 
+  // ── DEX / Lending Protocol Integrations ─────────────────────────────────────
+  STELLARSWAP_CONTRACT_ID: z.string().optional(),
+
+  BLEND_CONTRACT_ID: z.string().optional(),
+
   API_KEY: z.string().optional(),
 
   CORS_ORIGINS: z.string().default("*"),

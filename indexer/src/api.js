@@ -10,7 +10,7 @@ import swaggerUi from "swagger-ui-express";
 import { db, pool } from "./db.js";
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
-import { fetchWalletBalances, AccountNotFoundError } from "./horizonBalances.js";
+import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
 import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -976,22 +976,28 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
 
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
-  // Returns 200 with { events: [...], horizon_account?: {...} } (empty array for an
-  // unknown address) and 400 when the address is not a well-formed Stellar public key
-  // (G... base32). When Horizon is reachable, includes the account's native XLM balance.
+  // Returns 200 with { events: [...], horizon_account } (empty array for an
+  // unknown address) and 400 when the address is not a well-formed Stellar
+  // public key (G... base32). horizon_account is { sequence, subentry_count,
+  // home_domain }, fetched from Horizon concurrently with the DB query (#551).
+  // Horizon 404 (unfunded account) or any Horizon failure yields
+  // horizon_account: null rather than a 500 — the wallet response never
+  // depends on Horizon being reachable.
   app.get("/api/wallet/:address", async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
         return res.status(400).json({ error: "Invalid wallet address format" });
       }
-      const [events, horizon_account] = await Promise.all([
+      const [eventsResult, horizonResult] = await Promise.allSettled([
         db.getWalletEvents(address),
-        fetch(`${config.HORIZON_URL}/accounts/${address}`)
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null),
+        fetchAccountMeta(address),
       ]);
-      res.json({ events, horizon_account: horizon_account ?? null });
+      // A DB failure is a real error (500); a Horizon failure just degrades
+      // horizon_account to null — the two have different reliability contracts.
+      if (eventsResult.status === "rejected") throw eventsResult.reason;
+      const horizon_account = horizonResult.status === "fulfilled" ? horizonResult.value : null;
+      res.json({ events: eventsResult.value, horizon_account });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1012,6 +1018,60 @@ export function createApi({ logDestination, dbOverride } = {}) {
         return res.status(404).json({ error: "Account not found on network" });
       }
       res.status(502).json({ error: e.message });
+    }
+  });
+
+  // ── Token metadata registry (#550) ──────────────────────────────────────
+  // Backed by the `assets` table, populated as classic asset transfers are
+  // decoded (see decoder.js's classicAssetLabel).
+
+  function serializeAsset(row) {
+    return {
+      code: row.code,
+      issuer: row.issuer,
+      name: row.name,
+      decimals: row.decimals,
+      logo_url: row.logo_url,
+      home_domain: row.domain,
+    };
+  }
+
+  // GET /api/assets?after=&limit=  — paginated list of all assets seen in
+  // indexed events, cursor-based (keyset) navigation via `next_cursor`.
+  app.get("/api/assets", async (req, res) => {
+    try {
+      if (req.query.limit !== undefined) {
+        const parsedLimit = Number(req.query.limit);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      if (req.query.after !== undefined) {
+        const parsedAfter = Number(req.query.after);
+        if (!Number.isInteger(parsedAfter) || parsedAfter < 0) {
+          return res.status(422).json({ error: "Invalid after" });
+        }
+      }
+
+      const limit = req.query.limit ? Number(req.query.limit) : 25;
+      const after = req.query.after ? Number(req.query.after) : 0;
+
+      const { data, next_cursor } = await db.listAssets({ after_id: after, limit });
+      res.json({ data: data.map(serializeAsset), next_cursor });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/assets/:issuer/:code — single asset metadata.
+  app.get("/api/assets/:issuer/:code", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      const asset = await db.getAsset(code, issuer);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      res.json(serializeAsset(asset));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
     }
   });
 
