@@ -1,0 +1,55 @@
+{
+  "id": "CBPTPOUUYZGYANHS3R2HWXSEYD34ND65G6VOMP2EZ73XVL5LGRVCV3YN",
+  "name": "StellarSwap",
+  "description": "Built-in ABI for the StellarSwap AMM DEX router, auto-seeded on indexer startup so swap and liquidity events decode out of the box.",
+  "functions": [
+    {
+      "name": "swap",
+      "description": "Swap an exact input amount of one token for another.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "amount_in", "type": "i128" },
+        { "name": "token_in", "type": "Symbol" },
+        { "name": "amount_out", "type": "i128" },
+        { "name": "token_out", "type": "Symbol" },
+        { "name": "min_amount_out", "type": "i128" }
+      ]
+    },
+    {
+      "name": "swap_exact_tokens_for_tokens",
+      "description": "Router-style swap: exact input amount for a minimum guaranteed output amount.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "amount_in", "type": "i128" },
+        { "name": "token_in", "type": "Symbol" },
+        { "name": "amount_out", "type": "i128" },
+        { "name": "token_out", "type": "Symbol" },
+        { "name": "min_amount_out", "type": "i128" }
+      ]
+    },
+    {
+      "name": "add_liquidity",
+      "description": "Provide liquidity to a token pair pool in exchange for LP tokens.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "token_a", "type": "Symbol" },
+        { "name": "amount_a", "type": "i128" },
+        { "name": "token_b", "type": "Symbol" },
+        { "name": "amount_b", "type": "i128" },
+        { "name": "lp_amount", "type": "i128" }
+      ]
+    },
+    {
+      "name": "remove_liquidity",
+      "description": "Burn LP tokens to withdraw the underlying token pair from a pool.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "lp_amount", "type": "i128" },
+        { "name": "token_a", "type": "Symbol" },
+        { "name": "amount_a", "type": "i128" },
+        { "name": "token_b", "type": "Symbol" },
+        { "name": "amount_b", "type": "i128" }
+      ]
+    }
+  ]
+}

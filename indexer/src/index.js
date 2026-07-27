@@ -6,6 +6,7 @@ import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
 import { decode } from "./decoder.js";
 import { startAbiSync } from "./githubAbiSync.js";
+import { seedBuiltinAbis } from "./abiSeeder.js";
 import { startContractVerifier } from "./contractVerifier.js";
 import { withRetry } from "./rpcRetry.js";
 import { isHighBloatRisk } from "./bloatDetector.js";
@@ -296,6 +297,9 @@ let ledgersSinceReorgCheck = 0;
 
 async function run() {
   await db.init();
+  if (config.SEED_BUILTIN_ABIS) {
+    await seedBuiltinAbis().catch((err) => logger.warn({ err: err.message }, "built-in ABI seeding failed"));
+  }
   void runIntegrityChecks()
     .then((result) => {
       if (result.ok) {

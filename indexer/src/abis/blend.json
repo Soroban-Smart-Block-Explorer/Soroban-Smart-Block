@@ -1,0 +1,43 @@
+{
+  "id": "CCCUGABBMNVF6IRDXAW5KFGHGIR2VWXE2W4ICA2V3VGHROUX45O54P2V",
+  "name": "Blend",
+  "description": "Built-in ABI for the Blend lending protocol, auto-seeded on indexer startup so supply/borrow events decode out of the box.",
+  "functions": [
+    {
+      "name": "supply",
+      "description": "Supply an asset to the lending pool as collateral.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "amount", "type": "i128" },
+        { "name": "token", "type": "Symbol" }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "description": "Withdraw previously supplied collateral from the lending pool.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "amount", "type": "i128" },
+        { "name": "token", "type": "Symbol" }
+      ]
+    },
+    {
+      "name": "borrow",
+      "description": "Borrow an asset against supplied collateral.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "amount", "type": "i128" },
+        { "name": "token", "type": "Symbol" }
+      ]
+    },
+    {
+      "name": "repay",
+      "description": "Repay a previously borrowed asset.",
+      "args": [
+        { "name": "from", "type": "Address" },
+        { "name": "amount", "type": "i128" },
+        { "name": "token", "type": "Symbol" }
+      ]
+    }
+  ]
+}

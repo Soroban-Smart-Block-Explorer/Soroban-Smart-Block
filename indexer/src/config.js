@@ -149,6 +149,12 @@ const configSchema = z.object({
 
   ABI_SYNC_CRON: cronExpression("*/10 * * * *"),
 
+  // ── Built-in ABI Seeding ────────────────────────────────────────────────────
+  // Seeds the ABIs shipped in indexer/src/abis/ (e.g. StellarSwap, Blend) into
+  // the contracts table on startup, so the explorer decodes their events out of
+  // the box on a fresh database.
+  SEED_BUILTIN_ABIS: booleanWithDefault(true),
+
   // ── Gas Guzzlers ────────────────────────────────────────────────────────────
   GAS_GUZZLERS_INTERVAL_MS: positiveInt(3600000).refine((val) => val >= 60000, {
     message: "GAS_GUZZLERS_INTERVAL_MS must be at least 60000ms (1 minute)",
