@@ -361,6 +361,20 @@ describe("REST API Integration Tests", () => {
         detail: "Event sequence 9999 not found",
       });
     });
+
+    // Issue #554: slippage_bps is persisted and returned for DEX swap events.
+    it("should include slippage_bps for a swap event that has it", async () => {
+      await db.query(
+        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data, slippage_bps)
+         VALUES ('C1', 'swap', 1099, 'tx_hash_slippage', 'Address GA… swapped 100 USDC → 99 XLM on StellarSwap (slippage: 1.00%)', '[]', '{}', 100)`,
+      );
+
+      const res = await request(app).get("/api/events?fn=swap&limit=200");
+      expect(res.status).toBe(200);
+      const withSlippage = res.body.data.find((ev) => ev.tx_hash === "tx_hash_slippage");
+      expect(withSlippage).toBeDefined();
+      expect(withSlippage.slippage_bps).toBe(100);
+    });
   });
 
   // Issue #556: the frontend renders a protocol-type badge (DEX/Lending/NFT/

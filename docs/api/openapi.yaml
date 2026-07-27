@@ -1113,6 +1113,14 @@ components:
           enum: [soroban, classic]
           example: "soroban"
           description: Event category — "classic" for Horizon payment/path-payment operations, "soroban" otherwise.
+        slippage_bps:
+          type: integer
+          nullable: true
+          example: 100
+          description: >-
+            DEX swap slippage in basis points (1% = 100 bps), computed as
+            |amount_out - min_amount_out| / min_amount_out. Present only for
+            swap events where min_amount_out is known.
 
     Asset:
       type: object

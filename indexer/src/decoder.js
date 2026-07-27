@@ -98,6 +98,41 @@ function extractGasCosts(ev) {
   return result;
 }
 
+// Function names recognised as DEX swaps for slippage computation (issue #554).
+const SWAP_FUNCTIONS = new Set(["swap", "swap_exact_tokens_for_tokens"]);
+
+// Minimum slippage worth surfacing in the description — anything at or below
+// this is treated as normal execution variance rather than notable slippage.
+const SLIPPAGE_DISPLAY_THRESHOLD_BPS = 10; // 0.1%
+
+/**
+ * Slippage in basis points: |amount_out - min_amount_out| / min_amount_out * 10000.
+ * Returns null when either amount is missing/non-numeric or min_amount_out is zero
+ * (slippage is undefined relative to a zero baseline).
+ */
+export function computeSlippageBps(amountOut, minAmountOut) {
+  if (amountOut == null || minAmountOut == null) return null;
+  const out = Number(amountOut);
+  const minOut = Number(minAmountOut);
+  if (!Number.isFinite(out) || !Number.isFinite(minOut) || minOut === 0) return null;
+  return Math.round((Math.abs(out - minOut) / minOut) * 10000);
+}
+
+/**
+ * Pulls amount_out (index 3) and min_amount_out (index 5) out of swap args —
+ * shared by buildDescription() (for the inline text) and decode() (for the
+ * persisted slippage_bps column) so the positional assumption lives in one place.
+ */
+export function extractSwapSlippageBps(args) {
+  return computeSlippageBps(args?.[3], args?.[5]);
+}
+
+/** Renders " (slippage: 2.30%)" when bps is above the display threshold, else "". */
+function formatSlippageSuffix(bps) {
+  if (bps == null || bps <= SLIPPAGE_DISPLAY_THRESHOLD_BPS) return "";
+  return ` (slippage: ${(bps / 100).toFixed(2)}%)`;
+}
+
 // Native XLM Stellar Asset Contract IDs (testnet + mainnet)
 const NATIVE_SAC_IDS = new Set([
   "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", // testnet
@@ -184,6 +219,11 @@ export async function decode(ev, { currentAbi = false } = {}) {
   const heuristicParams =
     !fnAbi && !vaultMeta && !meta ? parseHeuristic([...topics.slice(1), ...(data != null ? [data] : [])]) : undefined;
 
+  // DEX swap slippage (issue #554) — only computable when the ABI-matched
+  // swap args carry a min_amount_out (6th positional arg, see buildDescription).
+  const slippageBps =
+    fnAbi && SWAP_FUNCTIONS.has(fnName) ? extractSwapSlippageBps(topics.slice(1)) : null;
+
   const decoded = {
     contract_id: contractId,
     function: fnName,
@@ -197,6 +237,7 @@ export async function decode(ev, { currentAbi = false } = {}) {
     is_resource_limit_exceeded: isResourceLimitExceeded(ev),
     ...extractGasCosts(ev),
     ...(heuristicParams && { heuristic_params: heuristicParams }),
+    ...(slippageBps != null && { slippage_bps: slippageBps }),
   };
 
   // Protocol 26: detect TTL extension host function calls on this event
@@ -343,9 +384,11 @@ function vaultDescription(fn, args, data, contractName, vaultMeta) {
  */
 export function buildDescription(fn, args, data, contractName) {
   switch (fn) {
-    case "swap": {
+    case "swap":
+    case "swap_exact_tokens_for_tokens": {
       const [from, amtIn, tokenIn, amtOut, tokenOut] = args;
-      return `Address ${fmt(from)} swapped ${amtIn} ${tokenIn} → ${amtOut} ${tokenOut} on ${contractName}`;
+      const slippageBps = extractSwapSlippageBps(args);
+      return `Address ${fmt(from)} swapped ${amtIn} ${tokenIn} → ${amtOut} ${tokenOut} on ${contractName}${formatSlippageSuffix(slippageBps)}`;
     }
     case "transfer": {
       const [from, to, amount, token] = args;
