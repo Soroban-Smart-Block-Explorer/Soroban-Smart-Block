@@ -115,8 +115,17 @@ export const db = {
       conditions.push(`contract_id = $${params.length}`);
     }
     if (fn) {
-      params.push(fn);
-      conditions.push(`function = $${params.length}`);
+      // Comma-separated list of exact function names (e.g. "swap,swap_exact_tokens_for_tokens"
+      // for the DEX function-filter chips, issue #555). A single value keeps the
+      // plain equality comparison for backward compatibility.
+      const fns = String(fn).split(",").map((s) => s.trim()).filter(Boolean);
+      if (fns.length === 1) {
+        params.push(fns[0]);
+        conditions.push(`function = $${params.length}`);
+      } else if (fns.length > 1) {
+        params.push(fns);
+        conditions.push(`function = ANY($${params.length})`);
+      }
     }
     if (type === "soroban") {
       conditions.push(`contract_id IS NOT NULL AND contract_id <> ''`);

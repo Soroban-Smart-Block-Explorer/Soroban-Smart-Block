@@ -592,7 +592,8 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
         const [{ rows }, { rows: countRows }] = await Promise.all([
           db.query(
-            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type, created_at
+            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type,
+                    protocol_type, created_at
              FROM contracts ${where}
              ORDER BY created_at DESC
              LIMIT $${params.length - 1} OFFSET $${params.length}`,

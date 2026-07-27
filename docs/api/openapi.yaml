@@ -138,8 +138,11 @@ paths:
           required: false
           schema:
             type: string
-            example: "transfer"
-          description: Filter by function name
+            example: "swap,swap_exact_tokens_for_tokens"
+          description: >-
+            Filter by function name — a single exact name, or a comma-separated
+            list of exact names (e.g. the DEX function-filter chips send
+            "swap,swap_exact_tokens_for_tokens" for the Swap chip).
         - name: type
           in: query
           required: false
