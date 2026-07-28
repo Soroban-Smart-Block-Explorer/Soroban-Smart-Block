@@ -49,6 +49,25 @@ import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
 import { resolveAsset } from "./horizonClient.js";
+import { createRequire } from "module";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+
+// ── AJV schema validator for POST /api/contracts ──────────────────────────────
+const _require = createRequire(import.meta.url);
+const _contractRegistrySchema = _require("./contractRegistry.schema.json");
+const _ajv = new Ajv({ allErrors: true, strict: false });
+addFormats(_ajv);
+// The POST body uses 'id' instead of 'contractId' — patch the schema for validation
+const _postContractSchema = {
+  ..._contractRegistrySchema,
+  required: _contractRegistrySchema.required.map((k) => (k === "contractId" ? "id" : k)),
+  properties: {
+    ..._contractRegistrySchema.properties,
+    id: _contractRegistrySchema.properties.contractId,
+  },
+};
+const _validateContractPost = _ajv.compile(_postContractSchema);
 
 function requestIdMiddleware(req, _res, next) {
   req.id = req.headers["x-request-id"] || randomUUID();
@@ -758,11 +777,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/contracts  — register ABI metadata
   app.post("/api/contracts", writeLimiter, requireApiKey, async (req, res) => {
     try {
-      const { id, functions } = req.body;
-
-      if (!id || !functions) {
-        return res.status(400).json({ error: "Missing id or functions" });
+      // ── Issue #522: AJV schema validation ────────────────────────────────
+      const valid = _validateContractPost(req.body);
+      if (!valid) {
+        const errors = (_validateContractPost.errors ?? []).map((e) => ({
+          path: e.instancePath || `/${e.params?.missingProperty ?? ""}`,
+          message: e.message ?? "invalid",
+        }));
+        return res.status(400).json({ errors });
       }
+
+      const { id, functions } = req.body;
 
       const existing = await db.getContractMeta(id);
       if (existing) {
@@ -788,8 +813,67 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
 
       await db.upsertContractMeta(req.body);
+      // ── Issue #523: store the registrant's API key ID for ownership checks
+      const keyId = req.rateContext?.keyId ?? null;
+      if (keyId) {
+        await db.query(
+          "UPDATE contracts SET registered_by_key_id = $1 WHERE id = $2",
+          [keyId, id],
+        ).catch(() => {});
+      }
       await cacheInvalidate(`contracts:single:${id}`);
       res.status(201).json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // PATCH /api/contracts/:id  — update ABI metadata (issue #523: ownership check)
+  app.patch("/api/contracts/:id", writeLimiter, async (req, res) => {
+    try {
+      // Must be authenticated
+      const keyId = req.rateContext?.keyId ?? null;
+      if (!keyId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      const contractId = req.params.id;
+      const existing = await db.getContractMeta(contractId);
+      if (!existing) {
+        return res.status(404).json({ error: "Contract not found" });
+      }
+
+      // ── Ownership / admin check ──────────────────────────────────────────
+      // Fetch the stored registered_by_key_id
+      const { rows } = await db.query(
+        "SELECT registered_by_key_id FROM contracts WHERE id = $1",
+        [contractId],
+      );
+      const registeredByKeyId = rows[0]?.registered_by_key_id ?? null;
+
+      // Check if caller is admin (tier = 'enterprise' or static admin key)
+      const isAdmin =
+        req.rateContext?.tier === "enterprise" ||
+        req.rateContext?.clientId === "static-admin-key";
+
+      if (!isAdmin && registeredByKeyId !== null && String(registeredByKeyId) !== String(keyId)) {
+        return res.status(403).json({ error: "Forbidden: you are not the owner of this contract" });
+      }
+
+      // ── Schema validation on the patch payload ───────────────────────────
+      const updateBody = { ...existing, ...req.body, id: contractId };
+      const valid = _validateContractPost(updateBody);
+      if (!valid) {
+        const errors = (_validateContractPost.errors ?? []).map((e) => ({
+          path: e.instancePath || `/${e.params?.missingProperty ?? ""}`,
+          message: e.message ?? "invalid",
+        }));
+        return res.status(400).json({ errors });
+      }
+
+      await db.upsertContractMeta(updateBody);
+      await cacheInvalidate(`contracts:single:${contractId}`);
+      res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

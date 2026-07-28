@@ -20,6 +20,12 @@ const BatchMultiCall = lazy(() => import("./pages/BatchMultiCall"));
 const SubInvocationPage = lazy(() => import("./pages/SubInvocationPage"));
 const RateLimitDashboard = lazy(() => import("./pages/RateLimitDashboard"));
 const NftGallery = lazy(() => import("./pages/NftGallery"));
+// Issue #513 — contract registration form
+const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
+// Issue #524 — registration success page
+const RegistrationSuccessPage = lazy(() => import("./pages/RegistrationSuccessPage"));
+// Issue #521 — ABI diff view between two versions
+const AbiDiffPage = lazy(() => import("./pages/AbiDiffPage"));
 
 function Fallback() {
   return <p style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>Loading…</p>;
@@ -35,8 +41,12 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/contracts" element={<RegistryPage />} />
             <Route path="/contracts/register" element={<RegisterContractPage />} />
+            {/* Issue #524: registration success page */}
+            <Route path="/contracts/register/success" element={<RegistrationSuccessPage />} />
             <Route path="/contract/:id" element={<ContractPage />} />
             <Route path="/contract/:id/workspace" element={<DeveloperWorkspace />} />
+            {/* Issue #521: ABI diff view */}
+            <Route path="/contract/:id/abi-diff" element={<AbiDiffPage />} />
             <Route path="/wallet/:address" element={<WalletPage />} />
             <Route path="/event/:seq" element={<EventPage />} />
             <Route path="/search" element={<SearchPage />} />

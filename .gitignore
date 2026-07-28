@@ -67,3 +67,7 @@ update_issues/
 
 # Local planning docs (stay on this machine only)
 plans/
+
+# Jest coverage & cache
+jest_coverage/
+.jest-cache/
