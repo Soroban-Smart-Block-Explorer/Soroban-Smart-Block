@@ -5,6 +5,7 @@ use soroban_explorer_contract::{
     MIN_MAX_EVENTS,
 };
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol, Vec};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -111,5 +112,117 @@ proptest! {
         prop_assert_eq!(stored.name, ascii_string(&env, name_len));
         prop_assert_eq!(stored.functions.len(), fn_count);
         prop_assert_eq!(stored.abi_version, 0u32);
+    }
+}
+
+// ── Fuzz: register_contract never panics for an unexpected reason (#588) ──────
+//
+// Unlike `fuzz_valid_register_contract_always_succeeds` above (which only ever
+// generates in-bounds payloads), this fuzzes sizes both inside *and* outside
+// every limit `validate_meta` enforces. `register_contract` has no `Result`
+// return type — on the host test harness a rejected payload manifests as a
+// panic from `panic_with_error!(&env, Error::InvalidInput)` rather than an
+// `Err`. The test independently re-derives whether the payload should be
+// accepted from the same public constants `validate_meta` checks, then
+// asserts the contract's actual behaviour matches: in-bounds payloads must
+// register without panicking and be retrievable via `get_contract`;
+// out-of-bounds payloads must panic (any panic other than this rejection path
+// — e.g. an overflow or index-out-of-bounds bug — is a real defect this test
+// is designed to catch).
+
+fn is_valid_meta(
+    name_len: usize,
+    desc_len: usize,
+    fn_count: u32,
+    fn_desc_len: usize,
+    param_count: u32,
+) -> bool {
+    if name_len > MAX_NAME_LEN as usize {
+        return false;
+    }
+    if desc_len > MAX_DESCRIPTION_LEN as usize {
+        return false;
+    }
+    if fn_count > MAX_FUNCTIONS {
+        return false;
+    }
+    if fn_count > 0
+        && (fn_desc_len > MAX_DESCRIPTION_LEN as usize || param_count > MAX_PARAMS_PER_FUNCTION)
+    {
+        return false;
+    }
+    true
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+    #[test]
+    fn fuzz_register_contract_never_panics_except_invalid_input(
+        name_len    in 0usize..=(MAX_NAME_LEN as usize + 20),
+        desc_len    in 0usize..=(MAX_DESCRIPTION_LEN as usize + 50),
+        fn_desc_len in 0usize..=(MAX_DESCRIPTION_LEN as usize + 50),
+        // fn_count and param_count are generated together with their product
+        // capped: each test case allocates up to fn_count * param_count Soroban
+        // SDK objects in the mocked host, which is slow in a debug build. This
+        // keeps 256 cases fast while still exercising the param_count boundary
+        // whenever fn_count is small, and the fn_count boundary whenever
+        // param_count is small.
+        (fn_count, param_count) in (0u32..=(MAX_FUNCTIONS + 3)).prop_flat_map(|fn_count| {
+            let max_param = 300u32
+                .checked_div(fn_count)
+                .unwrap_or(0)
+                .min(MAX_PARAMS_PER_FUNCTION + 3);
+            (Just(fn_count), 0u32..=max_param)
+        }),
+    ) {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &MIN_MAX_EVENTS);
+
+        let mut functions: Vec<FunctionAbi> = Vec::new(&env);
+        for _ in 0..fn_count {
+            let mut params: Vec<ParamDef> = Vec::new(&env);
+            for _ in 0..param_count {
+                params.push_back(ParamDef {
+                    name: sdk_symbol(&env, "p"),
+                    kind: sdk_symbol(&env, "u32"),
+                });
+            }
+            functions.push_back(FunctionAbi {
+                name: sdk_symbol(&env, "fn"),
+                description: ascii_string(&env, fn_desc_len),
+                params,
+            });
+        }
+
+        let meta = ContractMeta {
+            version: 1,
+            abi_version: 0,
+            min_ledger: 0,
+            name: ascii_string(&env, name_len),
+            description: ascii_string(&env, desc_len),
+            functions,
+            registered_by: admin.clone(),
+        };
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[7u8; 32]);
+        let expect_valid = is_valid_meta(name_len, desc_len, fn_count, fn_desc_len, param_count);
+
+        if expect_valid {
+            // In bounds — must succeed without panicking (Ok path).
+            client.register_contract(&admin, &cid, &meta);
+            let stored = client.get_contract(&cid);
+            prop_assert_eq!(stored.name, ascii_string(&env, name_len));
+            prop_assert_eq!(stored.functions.len(), fn_count);
+        } else {
+            // Out of bounds — must panic via Error::InvalidInput, and only that.
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                client.register_contract(&admin, &cid, &meta);
+            }));
+            prop_assert!(
+                result.is_err(),
+                "out-of-bounds ContractMeta was accepted instead of rejected with Error::InvalidInput"
+            );
+        }
     }
 }

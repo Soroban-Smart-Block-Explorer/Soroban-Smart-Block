@@ -200,6 +200,12 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
 
+      - name: Indexer concurrent-write test (#587)
+        run: node --test test/concurrentWrite.test.js
+        working-directory: indexer
+        env:
+          TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
+
       - name: Upload indexer coverage to CodeCov
         uses: codecov/codecov-action@v4
         with:
