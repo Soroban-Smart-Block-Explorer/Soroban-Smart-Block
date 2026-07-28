@@ -320,7 +320,7 @@ jobs:
           echo "✓ Response time acceptable (${RESPONSE_TIME}ms)"
 
       - name: Notify Slack on failure
-        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        if: failure()
         continue-on-error: true
         uses: slackapi/slack-github-action@v2.1.0
         with:
