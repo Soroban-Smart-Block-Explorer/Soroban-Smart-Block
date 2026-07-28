@@ -304,7 +304,7 @@ export const db = {
   // Each category matches by prefix (e.g. "swap" also matches "swap_exact", "swap_tokens").
   WALLET_EVENT_CATEGORIES: ["transfer", "swap", "mint", "burn", "stake"],
 
-  async getWalletEvents(address, { fn } = {}) {
+  async getWalletEvents(address, { fn, from, to } = {}) {
     const params = [address];
     let categoryClause = "";
 
@@ -336,6 +336,17 @@ export const db = {
       }
     }
 
+    // Date range filter (#527): filter on events.created_at using YYYY-MM-DD strings.
+    let dateClause = "";
+    if (from) {
+      params.push(from);
+      dateClause += ` AND created_at >= $${params.length}::date`;
+    }
+    if (to) {
+      params.push(to);
+      dateClause += ` AND created_at < ($${params.length}::date + interval '1 day')`;
+    }
+
     // Use the GIN full-text index via plainto_tsquery so the query uses the
     // idx_events_search_fts index instead of a full-table raw_topics::text scan.
     const { rows } = await pool.query(
@@ -346,8 +357,9 @@ export const db = {
          coalesce(raw_data, '')
        ) @@ plainto_tsquery('simple', $1)
        ${categoryClause}
+       ${dateClause}
        ORDER BY ledger DESC
-       LIMIT 100`,
+       LIMIT 500`,
       params,
     );
     return rows;
@@ -1439,7 +1451,8 @@ export const db = {
   },
 
   // data export — events (CSV/JSON)
-  async getEventsForExport({ contract, fn, type, limit = 10000 } = {}) {
+  // #528: accepts optional wallet address to filter events by address mention.
+  async getEventsForExport({ contract, fn, type, wallet, limit = 10000 } = {}) {
     const conditions = [];
     const params = [];
     if (contract) {
@@ -1456,12 +1469,25 @@ export const db = {
     if (type === "classic") {
       conditions.push(`(contract_id IS NULL OR contract_id = '')`);
     }
+    // #528: filter by wallet address — look for the address in description/topics/data
+    if (wallet) {
+      params.push(wallet);
+      conditions.push(
+        `to_tsvector('simple',
+           coalesce(description, '') || ' ' ||
+           coalesce(raw_topics::text, '') || ' ' ||
+           coalesce(raw_data, '')
+         ) @@ plainto_tsquery('simple', $${params.length})`,
+      );
+    }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(Math.min(limit, 10000));
     const { rows } = await pool.query(
-      `SELECT seq, contract_id, function, ledger, tx_hash, description,
-              cpu_instructions, mem_bytes, fee_charged, is_clawback, is_high_bloat_risk
-       FROM events ${where} ORDER BY seq DESC LIMIT $${params.length}`,
+      `SELECT e.seq, e.contract_id, c.name AS contract_name, e.function,
+              e.ledger, e.tx_hash, e.description, e.created_at
+       FROM events e
+       LEFT JOIN contracts c ON c.id = e.contract_id
+       ${where} ORDER BY e.seq DESC LIMIT $${params.length}`,
       params,
     );
     return rows;

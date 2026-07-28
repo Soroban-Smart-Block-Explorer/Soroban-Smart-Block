@@ -987,11 +987,14 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.get("/api/wallet/:address", async (req, res) => {
     try {
       const address = req.params.address;
-      if (!/^G[A-Z2-7]{55}$/.test(address)) {
-        return res.status(400).json({ error: "Invalid wallet address format" });
+      if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
+        return res.status(400).json({ error: `${address} is not a valid Stellar address` });
       }
+      // #527: accept optional from/to date filters (YYYY-MM-DD)
+      const from = req.query.from || undefined;
+      const to = req.query.to || undefined;
       const [eventsResult, horizonResult] = await Promise.allSettled([
-        db.getWalletEvents(address),
+        db.getWalletEvents(address, { from, to }),
         fetchAccountMeta(address),
       ]);
       // A DB failure is a real error (500); a Horizon failure just degrades
@@ -1768,16 +1771,13 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   const EVENT_COLUMNS = [
     "seq",
-    "contract_id",
-    "function",
     "ledger",
-    "tx_hash",
+    "contract_id",
+    "contract_name",
+    "function",
     "description",
-    "cpu_instructions",
-    "mem_bytes",
-    "fee_charged",
-    "is_clawback",
-    "is_high_bloat_risk",
+    "tx_hash",
+    "created_at",
   ];
 
   const CONTRACT_COLUMNS = [
@@ -1792,23 +1792,32 @@ export function createApi({ logDestination, dbOverride } = {}) {
     "created_at",
   ];
 
-  // GET /api/export/events?format=csv|json&contract=&fn=&type=&limit=
+  // GET /api/export/events?format=csv|json&contract=&fn=&type=&wallet=&limit=
+  // #528: accepts wallet param to export a single wallet's event history.
   app.get("/api/export/events", async (req, res) => {
     try {
       const format = req.query.format === "json" ? "json" : "csv";
       const limit = Math.min(Number(req.query.limit) || 10000, 10000);
+      const wallet = req.query.wallet || undefined;
       const rows = await db.getEventsForExport({
         contract: req.query.contract,
         fn: req.query.fn,
         type: req.query.type,
+        wallet,
         limit,
       });
       if (format === "json") {
-        res.setHeader("Content-Disposition", 'attachment; filename="events.json"');
+        const filename = wallet
+          ? `wallet-${wallet}-events.json`
+          : "events.json";
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
         res.setHeader("Content-Type", "application/json");
         return res.json(rows);
       }
-      res.setHeader("Content-Disposition", 'attachment; filename="events.csv"');
+      const filename = wallet
+        ? `wallet-${wallet}-events.csv`
+        : "events.csv";
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.setHeader("Content-Type", "text/csv");
       return res.send(rowsToCsv(rows, EVENT_COLUMNS));
     } catch (e) {
