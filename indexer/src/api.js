@@ -679,20 +679,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
-  // GET /api/contracts/:id/stats — event totals, unique callers, and a 30-day
-  // daily trend for the contract stats widget (#536). Cached for 5 minutes.
-  app.get(
-    "/api/contracts/:id/stats",
-    makeCache("contract_stats", (req) => `contracts:stats:${req.params.id}`),
-    async (req, res) => {
-      try {
-        const stats = await db.getContractStats(req.params.id);
-        res.json(stats);
-      } catch (e) {
-        res.status(500).json({ error: e.message });
-      }
-    },
-  );
+
 
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
@@ -984,7 +971,12 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // Horizon 404 (unfunded account) or any Horizon failure yields
   // horizon_account: null rather than a 500 — the wallet response never
   // depends on Horizon being reachable.
-  app.get("/api/wallet/:address", async (req, res) => {
+  // Cached for 60s (issue #534) — cache busted by index.js via
+  // cacheInvalidate("wallet:events:*") on new events.
+  app.get(
+    "/api/wallet/:address",
+    makeCache("wallet", (req) => `wallet:events:${req.params.address}`),
+    async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
@@ -1739,9 +1731,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/setup/db-init — create/upgrade the schema only.
   //
   // INTENTIONALLY MINIMAL (issue #417): this handler must call db.init() and
-  // nothing else. It does NOT seed sample data. The old seed-lib.js helper
+  // nothing else. It does NOT seed sample data. The old seed_lib helper
   // (which generated fake Stellar addresses) was removed during cleanup and must
-  // never be re-introduced here — no static import, no `await import("./seed-lib.js")`.
+  // never be re-introduced here — no static import, no `await import("./seed_lib.js")`.
   // The schema-init test in test/api/setup-db-init.test.js guards this invariant.
   app.post("/api/setup/db-init", blockInProduction, async (req, res) => {
     try {

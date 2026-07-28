@@ -190,8 +190,8 @@ describe("REST API Integration Tests", () => {
       const keyHash = await bcrypt.hash(rawKey, 12);
       const { rows } = await db.query(
         `INSERT INTO api_keys
-          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL)
+          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, verified, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, TRUE, NULL)
          RETURNING id`,
         [
           "daily-limit-key",
