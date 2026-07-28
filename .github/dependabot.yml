@@ -1,0 +1,85 @@
+version: 2
+updates:
+  # ── npm: indexer ──────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/indexer"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+    open-pull-requests-limit: 5
+    pull-request-branch-name:
+      separator: "/"
+    groups:
+      patch:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "soroban-smart-block-explorer/dev-team"
+    auto-merge: false
+
+  # ── npm: frontend ─────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    pull-request-branch-name:
+      separator: "/"
+    groups:
+      patch:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "soroban-smart-block-explorer/dev-team"
+    auto-merge: false
+
+  # ── npm: e2e ──────────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/e2e"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "05:00"
+    open-pull-requests-limit: 5
+    pull-request-branch-name:
+      separator: "/"
+    groups:
+      patch:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "soroban-smart-block-explorer/dev-team"
+    auto-merge: false
+
+  # ── Cargo (Rust) ──────────────────────────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    pull-request-branch-name:
+      separator: "/"
+    groups:
+      patch:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "soroban-smart-block-explorer/dev-team"
+    auto-merge: false
