@@ -1038,18 +1038,32 @@ export const db = {
    * @returns {Promise<{ total_events: number, unique_callers: number, first_seen_ledger: number|null, last_seen_ledger: number|null }>}
    */
   async getContractStats(contractId) {
-    const { rows } = await pool.query(
-      `SELECT COUNT(*) AS total_events,
-              COUNT(DISTINCT caller_address) AS unique_callers,
-              MIN(ledger) AS first_seen_ledger,
-              MAX(ledger) AS last_seen_ledger
-       FROM events WHERE contract_id = $1`,
-      [contractId],
-    );
-    const row = rows[0];
+    const [{ rows: totals }, { rows: callerRows }] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::INT AS total_events, MIN(ledger) AS first_seen_ledger, MAX(ledger) AS last_seen_ledger
+         FROM events WHERE contract_id = $1`,
+        [contractId],
+      ),
+      // Unique caller addresses via regexp_matches on description + raw_topics + raw_data
+      pool.query(
+        `SELECT COUNT(DISTINCT a.address)::INT AS unique_callers
+         FROM events e
+         CROSS JOIN LATERAL (
+           SELECT DISTINCT m[1] AS address
+           FROM regexp_matches(
+             coalesce(e.description, '') || ' ' || coalesce(e.raw_topics::text, '') || ' ' || coalesce(e.raw_data, ''),
+             '\\m[GCM][A-Z2-7]{55}\\M',
+             'g'
+           ) AS m
+         ) a
+         WHERE e.contract_id = $1`,
+        [contractId],
+      ),
+    ]);
+    const row = totals[0];
     return {
       total_events: Number(row.total_events),
-      unique_callers: Number(row.unique_callers),
+      unique_callers: Number(callerRows[0].unique_callers),
       first_seen_ledger: row.first_seen_ledger != null ? Number(row.first_seen_ledger) : null,
       last_seen_ledger: row.last_seen_ledger != null ? Number(row.last_seen_ledger) : null,
     };
