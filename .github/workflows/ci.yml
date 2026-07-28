@@ -163,7 +163,7 @@ jobs:
         working-directory: frontend
 
       - name: Frontend tests
-        run: npm test
+        run: npm test -- --coverage
         working-directory: frontend
 
       - name: Upload frontend test results
@@ -173,6 +173,7 @@ jobs:
           name: frontend-test-results
           path: frontend/coverage/
           retention-days: 30
+          if-no-files-found: ignore
 
   # ── Services ──────────────────────────────────────────────────────────────
   services:
