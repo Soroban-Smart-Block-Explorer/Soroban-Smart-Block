@@ -7,6 +7,8 @@ import EventTable from "../components/EventTable";
 import WalletBalances from "../components/WalletBalances";
 import { isMuxedAddress, muxedId, resolveMuxed } from "../utils/strkey";
 
+type GroupBy = "function" | "none";
+
 const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
   { key: "transfer", label: "Transfer" },
   { key: "swap", label: "Swap" },
@@ -52,12 +54,16 @@ export default function WalletPage() {
 
   const isValidAddress = VALID_ADDRESS_RE.test(address);
 
+  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
+
   const { data, isLoading } = useQuery({
     queryKey: ["wallet", address],
     queryFn: () => api.wallet(address),
     enabled: !!address && isValidAddress,
   });
   const events = data?.events ?? [];
+  const horizonAccount = data?.horizon_account ?? null;
+  const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
 
   const availableFunctions = useMemo(
     () => Array.from(new Set(events.map((ev) => ev.function))).sort(),
@@ -101,10 +107,6 @@ export default function WalletPage() {
       /* clipboard unavailable — silently ignore */
     }
   }
-
-  const events = data?.events ?? [];
-  const horizonAccount = data?.horizon_account ?? null;
-  const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
 
   if (address && !isValidAddress) {
     return (
@@ -232,7 +234,7 @@ export default function WalletPage() {
       )}
 
       <div className="card">
-        <WalletBalances address={queryAddress} />
+        <WalletBalances address={address} />
       </div>
 
       <div className="card">
