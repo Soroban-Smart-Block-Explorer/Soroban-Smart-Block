@@ -27,6 +27,7 @@ import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
 import AbiHistoryDrawer from "../components/AbiHistoryDrawer";
 import ProtocolBadge from "../components/ProtocolBadge";
+import { useMetaTags } from "../hooks/useMetaTags";
 
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff" | "abi-history";
 
@@ -129,6 +130,11 @@ export default function ContractPage() {
   const downloadAbi = () => {
     api.downloadAbi(id).catch((err) => console.error("Download ABI failed:", err));
   };
+
+  useMetaTags({
+    title: `${meta?.name || truncateAddress(id)} — Soroban Smart Block Explorer`,
+    description: `${meta?.name || truncateAddress(id)} — Soroban Smart Block Explorer`,
+  });
 
   const functions = meta?.functions ?? [];
   const sourceFiles = meta?.source_files ?? [];

@@ -6,6 +6,7 @@ import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
 import { useEventStream } from "../hooks/useEventStream";
+import { useMetaTags } from "../hooks/useMetaTags";
 
 const FUNCTIONS = ["", "swap", "transfer", "mint", "burn", "stake", "unstake", "wrap_native", "unwrap_native"];
 
@@ -41,6 +42,11 @@ const TYPE_LABELS: { key: TxType; label: string; title: string }[] = [
 ];
 
 export default function Home() {
+  useMetaTags({
+    title: "Soroban Smart Block Explorer — Decode Stellar contract events",
+    description: "Soroban Smart Block Explorer — Decode Stellar contract events",
+  });
+
   const [searchParams] = useSearchParams();
   const contractParam = searchParams.get("contract") ?? "";
 

@@ -5,7 +5,8 @@ import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import WalletBalances from "../components/WalletBalances";
-import { isMuxedAddress, muxedId, resolveMuxed } from "../utils/strkey";
+import { isMuxedAddress, muxedId, resolveMuxed, truncateAddress } from "../utils/strkey";
+import { useMetaTags } from "../hooks/useMetaTags";
 
 const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
   { key: "transfer", label: "Transfer" },
@@ -41,6 +42,11 @@ export default function WalletPage() {
   const { address = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const [copied, setCopied] = useState(false);
+
+  useMetaTags({
+    title: `Wallet ${truncateAddress(address)} — Soroban Activity`,
+    description: `Wallet ${truncateAddress(address)} — Soroban Activity`,
+  });
 
   // All filter state lives in the URL — the source of truth is read directly
   // from searchParams on every render, so a shared link always restores the
