@@ -42,6 +42,11 @@ declare module "@webcontainer/api" {
   }
 }
 
+declare module "*.css" {
+  const content: Record<string, string>;
+  export default content;
+}
+
 declare module "jszip" {
   interface JSZipGeneratorOptions {
     type?: "blob" | "nodebuffer" | "uint8array";

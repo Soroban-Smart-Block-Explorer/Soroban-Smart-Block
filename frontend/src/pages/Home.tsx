@@ -1,12 +1,24 @@
-import { useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
+import SkeletonLoader from "../components/SkeletonLoader";
 import { useEventStream } from "../hooks/useEventStream";
 
 const FUNCTIONS = ["", "swap", "transfer", "mint", "burn", "stake", "unstake", "wrap_native", "unwrap_native"];
+
+// DEX-specific function chips shown when the active ?contract= is tagged
+// protocol_type = "dex" (issue #555). Each value is the comma-separated list
+// of exact function names passed to GET /api/events?fn=.
+const DEX_FUNCTION_CHIPS = [
+  { label: "All", fn: "" },
+  { label: "Swap", fn: "swap,swap_exact_tokens_for_tokens" },
+  { label: "Add Liquidity", fn: "add_liquidity,provide_liquidity" },
+  { label: "Remove Liquidity", fn: "remove_liquidity,withdraw_liquidity" },
+];
 
 // transaction type filter
 type TxType = "all" | "soroban" | "classic";
@@ -30,6 +42,9 @@ const TYPE_LABELS: { key: TxType; label: string; title: string }[] = [
 ];
 
 export default function Home() {
+  const [searchParams] = useSearchParams();
+  const contractParam = searchParams.get("contract") ?? "";
+
   const [fnFilter, setFnFilter] = useState("");
   // Keyset pagination (#490): stack of after_seq cursors for the pages we've
   // navigated past — empty stack = first page, pop to go back.
@@ -37,11 +52,27 @@ export default function Home() {
   const [txType, setTxType] = useState<TxType>("all");
   const afterSeq = cursorStack.length ? cursorStack[cursorStack.length - 1] : undefined;
 
+  // Reset filters when the active contract changes so a stale fn filter from
+  // a previous contract doesn't silently carry over.
+  useEffect(() => {
+    setFnFilter("");
+    setCursorStack([]);
+  }, [contractParam]);
+
+  const { data: filterContractMeta } = useQuery({
+    queryKey: ["contract", contractParam],
+    queryFn: () => api.contract(contractParam),
+    enabled: !!contractParam,
+    retry: false,
+  });
+  const isDexContract = filterContractMeta?.protocol_type === "dex";
+
   const queryClient = useQueryClient();
   const { data: eventsPage, isLoading } = useQuery({
-    queryKey: ["events", fnFilter, afterSeq ?? 0, txType],
+    queryKey: ["events", contractParam, fnFilter, afterSeq ?? 0, txType],
     queryFn: () =>
       api.events({
+        contract: contractParam || undefined,
         fn: fnFilter || undefined,
         after_seq: afterSeq,
         type: txType !== "all" ? txType : undefined,
@@ -53,11 +84,15 @@ export default function Home() {
   // invalidate the event list when a live event arrives on the first page
   const handleLiveEvent = useCallback(
     (ev: DecodedEvent) => {
-      if (cursorStack.length === 0 && (!fnFilter || ev.function === fnFilter)) {
-        queryClient.invalidateQueries({ queryKey: ["events", fnFilter, 0] });
+      if (
+        cursorStack.length === 0 &&
+        (!fnFilter || ev.function === fnFilter) &&
+        (!contractParam || ev.contract_id === contractParam)
+      ) {
+        queryClient.invalidateQueries({ queryKey: ["events", contractParam, fnFilter, 0] });
       }
     },
-    [cursorStack.length, fnFilter, queryClient],
+    [contractParam, cursorStack.length, fnFilter, queryClient],
   );
 
   useEventStream(handleLiveEvent);
@@ -110,27 +145,57 @@ export default function Home() {
           ))}
         </div>
 
-        {/* Function filter */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ color: "var(--muted)" }}>Function:</label>
-          <select
-            value={fnFilter}
-            onChange={(e) => {
-              setFnFilter(e.target.value);
-              setCursorStack([]);
-            }}
-          >
-            {FUNCTIONS.map((f) => (
-              <option key={f} value={f}>
-                {f || "All"}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Function filter — DEX-specific chips replace the generic dropdown
+            when the active ?contract= is tagged protocol_type = "dex" (#555) */}
+        {isDexContract ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <label style={{ color: "var(--muted)" }}>Function:</label>
+            <div style={{ display: "flex", gap: 4 }}>
+              {DEX_FUNCTION_CHIPS.map((chip) => (
+                <button
+                  key={chip.label}
+                  onClick={() => {
+                    setFnFilter(chip.fn);
+                    setCursorStack([]);
+                  }}
+                  style={{
+                    padding: "5px 12px",
+                    borderRadius: 14,
+                    border: "1px solid var(--border)",
+                    background: fnFilter === chip.fn ? "var(--accent)" : "var(--surface)",
+                    color: fnFilter === chip.fn ? "#0d1117" : "var(--muted)",
+                    fontWeight: fnFilter === chip.fn ? 700 : 400,
+                    fontSize: 12,
+                  }}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <label style={{ color: "var(--muted)" }}>Function:</label>
+            <select
+              value={fnFilter}
+              onChange={(e) => {
+                setFnFilter(e.target.value);
+                setCursorStack([]);
+              }}
+            >
+              {FUNCTIONS.map((f) => (
+                <option key={f} value={f}>
+                  {f || "All"}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <ExportButton
           target="events"
           params={{
+            contract: contractParam || undefined,
             fn: fnFilter || undefined,
             type: txType !== "all" ? txType : undefined,
           }}
@@ -138,7 +203,7 @@ export default function Home() {
       </div>
 
       <div className="card">
-        {isLoading ? <p style={{ color: "var(--muted)" }}>Loading…</p> : <EventTable events={events} />}
+        {isLoading ? <SkeletonLoader /> : <EventTable events={events} />}
       </div>
 
       {/* Pagination */}

@@ -164,6 +164,23 @@ describe("api utility", () => {
     expect(result.events).toHaveLength(2);
   });
 
+  it("walletHistory fetches events with date params (#527)", async () => {
+    mockFetch({ events: [{ seq: 1 }], horizon_account: null });
+    const result = await api.walletHistory("GABCDEF", { from: "2026-01-01", to: "2026-03-31" });
+    expect(result.events).toHaveLength(1);
+    const [url] = (fetch as any).mock.calls[0];
+    expect(url).toContain("from=2026-01-01");
+    expect(url).toContain("to=2026-03-31");
+  });
+
+  it("walletHistory omits date params when not provided (#527)", async () => {
+    mockFetch({ events: [], horizon_account: null });
+    await api.walletHistory("GABCDEF");
+    const [url] = (fetch as any).mock.calls[0];
+    expect(url).not.toContain("from=");
+    expect(url).not.toContain("to=");
+  });
+
   it("contractStats fetches stats by contract id", async () => {
     mockFetch({ total_events: 100, unique_callers: 10, first_seen_ledger: 1, last_seen_ledger: 2, events_per_day: [] });
     const result = await api.contractStats("C1");

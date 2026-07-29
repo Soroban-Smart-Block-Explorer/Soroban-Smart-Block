@@ -190,8 +190,8 @@ describe("REST API Integration Tests", () => {
       const keyHash = await bcrypt.hash(rawKey, 12);
       const { rows } = await db.query(
         `INSERT INTO api_keys
-          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL)
+          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, verified, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, TRUE, NULL)
          RETURNING id`,
         [
           "daily-limit-key",
@@ -277,6 +277,22 @@ describe("REST API Integration Tests", () => {
       expect(res.body.data.every((ev) => ev.function === "transfer")).toBe(true);
     });
 
+    // Issue #555: the frontend's DEX function-filter chips pass a
+    // comma-separated list of exact function names, e.g.
+    // ?fn=swap,swap_exact_tokens_for_tokens.
+    it("should filter events by a comma-separated list of function names", async () => {
+      const res = await getEvents("/api/events?fn=mint,transfer&limit=50");
+      expect(res.status).toBe(200);
+      expect(res.body.data.length).toBe(50);
+      expect(res.body.data.every((ev) => ev.function === "mint" || ev.function === "transfer")).toBe(true);
+    });
+
+    it("should return no events for a function name that matches nothing", async () => {
+      const res = await getEvents("/api/events?fn=nonexistent_fn");
+      expect(res.status).toBe(200);
+      expect(res.body.data.length).toBe(0);
+    });
+
     it("should return 422 for invalid limit values", async () => {
       const invalidLimits = ["-5", "0", "999", "abc"];
       for (const val of invalidLimits) {
@@ -344,6 +360,42 @@ describe("REST API Integration Tests", () => {
         status: 404,
         detail: "Event sequence 9999 not found",
       });
+    });
+
+    // Issue #554: slippage_bps is persisted and returned for DEX swap events.
+    it("should include slippage_bps for a swap event that has it", async () => {
+      await db.query(
+        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data, slippage_bps)
+         VALUES ('C1', 'swap', 1099, 'tx_hash_slippage', 'Address GA… swapped 100 USDC → 99 XLM on StellarSwap (slippage: 1.00%)', '[]', '{}', 100)`,
+      );
+
+      const res = await request(app).get("/api/events?fn=swap&limit=200");
+      expect(res.status).toBe(200);
+      const withSlippage = res.body.data.find((ev) => ev.tx_hash === "tx_hash_slippage");
+      expect(withSlippage).toBeDefined();
+      expect(withSlippage.slippage_bps).toBe(100);
+    });
+  });
+
+  // Issue #556: the frontend renders a protocol-type badge (DEX/Lending/NFT/
+  // Token/Other) on contract cards, so the list endpoint must return it.
+  describe("GET /api/contracts (list)", () => {
+    beforeAll(async () => {
+      await db.upsertContractMeta({
+        id: "C_DEX_TEST",
+        name: "Test DEX",
+        description: "protocol_type badge fixture",
+        functions: [{ name: "swap", args: [] }],
+        registered_by: "test-admin",
+      });
+    });
+
+    it("includes protocol_type for each contract", async () => {
+      const res = await request(app).get("/api/contracts?limit=100");
+      expect(res.status).toBe(200);
+      const dex = res.body.contracts.find((c) => c.id === "C_DEX_TEST");
+      expect(dex).toBeDefined();
+      expect(dex.protocol_type).toBe("dex");
     });
   });
 

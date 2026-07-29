@@ -1,0 +1,54 @@
+{
+  "contractId": "CBLENDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZZZ",
+  "name": "Blend",
+  "description": "Soroban lending protocol testnet pool. The contractId above is a placeholder — the real deployed pool instance is configured via BLEND_CONTRACT_ID and substituted at seed time.",
+  "links": {
+    "homepage": "https://blend.capital"
+  },
+  "functions": [
+    {
+      "name": "supply",
+      "template": "{from} supplied {tokens_in} {asset} to Blend pool",
+      "params": [
+        { "name": "asset", "type": "Address" },
+        { "name": "from", "type": "Address" },
+        { "name": "tokens_in", "type": "i128" }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "template": "{from} withdrew {tokens_out} {asset} from Blend pool",
+      "params": [
+        { "name": "asset", "type": "Address" },
+        { "name": "from", "type": "Address" },
+        { "name": "tokens_out", "type": "i128" }
+      ]
+    },
+    {
+      "name": "borrow",
+      "template": "{from} borrowed {tokens_out} {asset} from Blend",
+      "params": [
+        { "name": "asset", "type": "Address" },
+        { "name": "from", "type": "Address" },
+        { "name": "tokens_out", "type": "i128" }
+      ]
+    },
+    {
+      "name": "repay",
+      "template": "{from} repaid {tokens_in} {asset} to Blend",
+      "params": [
+        { "name": "asset", "type": "Address" },
+        { "name": "from", "type": "Address" },
+        { "name": "tokens_in", "type": "i128" }
+      ]
+    },
+    {
+      "name": "liquidate",
+      "template": "{filler} liquidated {user} position",
+      "params": [
+        { "name": "filler", "type": "Address" },
+        { "name": "user", "type": "Address" }
+      ]
+    }
+  ]
+}

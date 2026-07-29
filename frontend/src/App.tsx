@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 
 const Home = lazy(() => import("./pages/Home"));
 const RegistryPage = lazy(() => import("./pages/RegistryPage"));
+const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
 const ContractPage = lazy(() => import("./pages/ContractPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
 const EventPage = lazy(() => import("./pages/EventPage"));
@@ -20,12 +21,7 @@ const BatchMultiCall = lazy(() => import("./pages/BatchMultiCall"));
 const SubInvocationPage = lazy(() => import("./pages/SubInvocationPage"));
 const RateLimitDashboard = lazy(() => import("./pages/RateLimitDashboard"));
 const NftGallery = lazy(() => import("./pages/NftGallery"));
-// Issue #513 — contract registration form
 const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
-// Issue #524 — registration success page
-const RegistrationSuccessPage = lazy(() => import("./pages/RegistrationSuccessPage"));
-// Issue #521 — ABI diff view between two versions
-const AbiDiffPage = lazy(() => import("./pages/AbiDiffPage"));
 
 function Fallback() {
   return <p style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>Loading…</p>;

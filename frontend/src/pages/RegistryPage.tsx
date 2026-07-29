@@ -13,6 +13,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { api, type ContractListItem, type ContractsListResponse } from "../api";
 import { truncateAddress } from "../utils/strkey";
+import ProtocolBadge from "../components/ProtocolBadge";
 
 const PROTOCOL_TYPES = [
   { value: "all", label: "All types" },
@@ -168,7 +169,8 @@ export default function RegistryPage() {
                 <td style={{ padding: "10px 4px" }}>
                   <Link to={`/contract/${c.id}`} style={{ fontWeight: 600 }}>
                     {c.name || truncateAddress(c.id)}
-                  </Link>
+                  </Link>{" "}
+                  <ProtocolBadge type={c.protocol_type} />
                   {c.description && (
                     <p style={{ color: "var(--muted)", marginTop: 2, fontSize: 12 }}>
                       {c.description}

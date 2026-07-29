@@ -26,8 +26,11 @@ import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
 import AbiHistoryDrawer from "../components/AbiHistoryDrawer";
+import ProtocolBadge from "../components/ProtocolBadge";
+import InvocationFrequencyChart from "../components/InvocationFrequencyChart";
+import StorageTierStackedBar from "../components/StorageTierStackedBar";
 
-type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "state-diff" | "abi-history";
+type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "abi-history";
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
@@ -61,7 +64,7 @@ function isInvocationNode(value: unknown): value is InvocationNode {
 }
 
 /** Compact header badge — mirrors the verification threshold used on the Source tab. */
-function VerifiedBadge({ contractId }: { contractId: string }) {
+function SourceVerifiedBadge({ contractId }: { contractId: string }) {
   const MIN_VERIFIED = 3;
   const { data: verifications = [] } = useQuery({
     queryKey: ["source-verifications", contractId],
@@ -234,22 +237,11 @@ export default function ContractPage() {
           <div>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
               <h2 style={{ margin: 0 }}>{meta.name || "Unnamed Contract"}</h2>
-              {(meta as any).is_verified && <VerifiedBadge ledger={(meta as any).verified_ledger} />}
-              {(meta as any).protocol_type && (meta as any).protocol_type !== "other" && (
-                <span
-                  style={{
-                    marginLeft: 10,
-                    fontSize: 11,
-                    padding: "2px 8px",
-                    borderRadius: 10,
-                    background: "var(--border)",
-                    color: "var(--muted)",
-                    textTransform: "uppercase",
-                    fontWeight: 700,
-                    letterSpacing: "0.05em",
-                  }}
-                >
-                  {(meta as any).protocol_type}
+              {(meta as any).is_verified && <VerifiedBadge ledger={(meta as any).verified_ledger} />}{' '}
+              <SourceVerifiedBadge contractId={id} />
+              {meta.protocol_type && (
+                <span style={{ marginLeft: 10 }}>
+                  <ProtocolBadge type={meta.protocol_type} />
                 </span>
               )}
             </div>

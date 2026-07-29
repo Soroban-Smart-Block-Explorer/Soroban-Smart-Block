@@ -10,7 +10,7 @@ import swaggerUi from "swagger-ui-express";
 import { db, pool } from "./db.js";
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
-import { fetchWalletBalances, AccountNotFoundError } from "./horizonBalances.js";
+import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
 import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -611,7 +611,8 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
         const [{ rows }, { rows: countRows }] = await Promise.all([
           db.query(
-            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type, created_at
+            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type,
+                    protocol_type, created_at
              FROM contracts ${where}
              ORDER BY created_at DESC
              LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -697,20 +698,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
-  // GET /api/contracts/:id/stats — event totals, unique callers, and a 30-day
-  // daily trend for the contract stats widget (#536). Cached for 5 minutes.
-  app.get(
-    "/api/contracts/:id/stats",
-    makeCache("contract_stats", (req) => `contracts:stats:${req.params.id}`),
-    async (req, res) => {
-      try {
-        const stats = await db.getContractStats(req.params.id);
-        res.json(stats);
-      } catch (e) {
-        res.status(500).json({ error: e.message });
-      }
-    },
-  );
+
 
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
@@ -1060,22 +1048,36 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
 
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
-  // Returns 200 with { events: [...], horizon_account?: {...} } (empty array for an
-  // unknown address) and 400 when the address is not a well-formed Stellar public key
-  // (G... base32). When Horizon is reachable, includes the account's native XLM balance.
-  app.get("/api/wallet/:address", async (req, res) => {
+  // Returns 200 with { events: [...], horizon_account } (empty array for an
+  // unknown address) and 400 when the address is not a well-formed Stellar
+  // public key (G... base32). horizon_account is { sequence, subentry_count,
+  // home_domain }, fetched from Horizon concurrently with the DB query (#551).
+  // Horizon 404 (unfunded account) or any Horizon failure yields
+  // horizon_account: null rather than a 500 — the wallet response never
+  // depends on Horizon being reachable.
+  // Cached for 60s (issue #534) — cache busted by index.js via
+  // cacheInvalidate("wallet:events:*") on new events.
+  app.get(
+    "/api/wallet/:address",
+    makeCache("wallet", (req) => `wallet:events:${req.params.address}`),
+    async (req, res) => {
     try {
       const address = req.params.address;
-      if (!/^G[A-Z2-7]{55}$/.test(address)) {
-        return res.status(400).json({ error: "Invalid wallet address format" });
+      if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
+        return res.status(400).json({ error: `${address} is not a valid Stellar address` });
       }
-      const [events, horizon_account] = await Promise.all([
-        db.getWalletEvents(address),
-        fetch(`${config.HORIZON_URL}/accounts/${address}`)
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null),
+      // #527: accept optional from/to date filters (YYYY-MM-DD)
+      const from = req.query.from || undefined;
+      const to = req.query.to || undefined;
+      const [eventsResult, horizonResult] = await Promise.allSettled([
+        db.getWalletEvents(address, { from, to }),
+        fetchAccountMeta(address),
       ]);
-      res.json({ events, horizon_account: horizon_account ?? null });
+      // A DB failure is a real error (500); a Horizon failure just degrades
+      // horizon_account to null — the two have different reliability contracts.
+      if (eventsResult.status === "rejected") throw eventsResult.reason;
+      const horizon_account = horizonResult.status === "fulfilled" ? horizonResult.value : null;
+      res.json({ events: eventsResult.value, horizon_account });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1096,6 +1098,60 @@ export function createApi({ logDestination, dbOverride } = {}) {
         return res.status(404).json({ error: "Account not found on network" });
       }
       res.status(502).json({ error: e.message });
+    }
+  });
+
+  // ── Token metadata registry (#550) ──────────────────────────────────────
+  // Backed by the `assets` table, populated as classic asset transfers are
+  // decoded (see decoder.js's classicAssetLabel).
+
+  function serializeAsset(row) {
+    return {
+      code: row.code,
+      issuer: row.issuer,
+      name: row.name,
+      decimals: row.decimals,
+      logo_url: row.logo_url,
+      home_domain: row.domain,
+    };
+  }
+
+  // GET /api/assets?after=&limit=  — paginated list of all assets seen in
+  // indexed events, cursor-based (keyset) navigation via `next_cursor`.
+  app.get("/api/assets", async (req, res) => {
+    try {
+      if (req.query.limit !== undefined) {
+        const parsedLimit = Number(req.query.limit);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      if (req.query.after !== undefined) {
+        const parsedAfter = Number(req.query.after);
+        if (!Number.isInteger(parsedAfter) || parsedAfter < 0) {
+          return res.status(422).json({ error: "Invalid after" });
+        }
+      }
+
+      const limit = req.query.limit ? Number(req.query.limit) : 25;
+      const after = req.query.after ? Number(req.query.after) : 0;
+
+      const { data, next_cursor } = await db.listAssets({ after_id: after, limit });
+      res.json({ data: data.map(serializeAsset), next_cursor });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/assets/:issuer/:code — single asset metadata.
+  app.get("/api/assets/:issuer/:code", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      const asset = await db.getAsset(code, issuer);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      res.json(serializeAsset(asset));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -1152,40 +1208,71 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── NFT endpoints ────────────────────────────────────────────────
 
   // GET /api/tokens/:contractId/nfts
+  // Cursor-based (keyset) pagination:
   //   ?owner=<address>  — filter to tokens owned by this address
-  //   &page=<n>         — 1-indexed page number (default 1)
   //   &limit=<n>        — results per page, max 200 (default 50)
+  //   &after=<token_id> — opaque cursor from previous page's `next_cursor`
+  //                       (omit for the first page)
   //
-  // Returns a paginated list of all minted NFT token IDs with their
-  // current owner, on-chain metadata, and last transfer ledger.
+  // Page-based pagination (legacy):
+  //   &page=<n>         — 1-indexed page number (default 1)
+  //
+  // Per issue #650, returns { token_id, owner_address, minted_ledger,
+  // minted_by, last_transfer_ledger } per item with cursor-based navigation.
   app.get("/api/tokens/:contractId/nfts", async (req, res) => {
     try {
       const { contractId } = req.params;
       const owner = req.query.owner || undefined;
-      const page = req.query.page ? Number(req.query.page) : 1;
       const limit = req.query.limit ? Number(req.query.limit) : 50;
 
-      if (isNaN(page) || page < 1) {
-        return res.status(422).json({ error: "Invalid page" });
-      }
+      // Validate limit
       if (isNaN(limit) || limit < 1 || limit > 200) {
         return res.status(422).json({ error: "Invalid limit" });
       }
 
-      const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+      // Validate after (must be a valid numeric string if provided)
+      if (req.query.after !== undefined && (isNaN(Number(req.query.after)) || String(req.query.after).trim() === "")) {
+        return res.status(422).json({ error: "Invalid after" });
+      }
 
-      const totalPages = Math.ceil(total / limit);
-      res.json({
-        contract_id: contractId,
-        tokens,
-        pagination: {
-          page,
+      // Cursor-based pagination (issue #650) — default unless page param is explicitly provided
+      if (req.query.page === undefined) {
+        const after = req.query.after || undefined;
+
+        const { tokens, next_cursor } = await db.getNftTokensCursor(contractId, {
+          owner,
+          after,
           limit,
-          total,
-          total_pages: totalPages,
-          has_next: page < totalPages,
-        },
-      });
+        });
+
+        res.json({
+          contract_id: contractId,
+          tokens,
+          next_cursor,
+        });
+      } else {
+        // Legacy page-based pagination (backward compatible)
+        const page = req.query.page ? Number(req.query.page) : 1;
+
+        if (isNaN(page) || page < 1) {
+          return res.status(422).json({ error: "Invalid page" });
+        }
+
+        const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+
+        const totalPages = Math.ceil(total / limit);
+        res.json({
+          contract_id: contractId,
+          tokens,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: totalPages,
+            has_next: page < totalPages,
+          },
+        });
+      }
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1762,9 +1849,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/setup/db-init — create/upgrade the schema only.
   //
   // INTENTIONALLY MINIMAL (issue #417): this handler must call db.init() and
-  // nothing else. It does NOT seed sample data. The old seed-lib.js helper
+  // nothing else. It does NOT seed sample data. The old seed_lib helper
   // (which generated fake Stellar addresses) was removed during cleanup and must
-  // never be re-introduced here — no static import, no `await import("./seed-lib.js")`.
+  // never be re-introduced here — no static import, no `await import("./seed_lib.js")`.
   // The schema-init test in test/api/setup-db-init.test.js guards this invariant.
   app.post("/api/setup/db-init", blockInProduction, async (req, res) => {
     try {
@@ -1791,16 +1878,13 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   const EVENT_COLUMNS = [
     "seq",
-    "contract_id",
-    "function",
     "ledger",
-    "tx_hash",
+    "contract_id",
+    "contract_name",
+    "function",
     "description",
-    "cpu_instructions",
-    "mem_bytes",
-    "fee_charged",
-    "is_clawback",
-    "is_high_bloat_risk",
+    "tx_hash",
+    "created_at",
   ];
 
   const CONTRACT_COLUMNS = [
@@ -1815,23 +1899,32 @@ export function createApi({ logDestination, dbOverride } = {}) {
     "created_at",
   ];
 
-  // GET /api/export/events?format=csv|json&contract=&fn=&type=&limit=
+  // GET /api/export/events?format=csv|json&contract=&fn=&type=&wallet=&limit=
+  // #528: accepts wallet param to export a single wallet's event history.
   app.get("/api/export/events", async (req, res) => {
     try {
       const format = req.query.format === "json" ? "json" : "csv";
       const limit = Math.min(Number(req.query.limit) || 10000, 10000);
+      const wallet = req.query.wallet || undefined;
       const rows = await db.getEventsForExport({
         contract: req.query.contract,
         fn: req.query.fn,
         type: req.query.type,
+        wallet,
         limit,
       });
       if (format === "json") {
-        res.setHeader("Content-Disposition", 'attachment; filename="events.json"');
+        const filename = wallet
+          ? `wallet-${wallet}-events.json`
+          : "events.json";
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
         res.setHeader("Content-Type", "application/json");
         return res.json(rows);
       }
-      res.setHeader("Content-Disposition", 'attachment; filename="events.csv"');
+      const filename = wallet
+        ? `wallet-${wallet}-events.csv`
+        : "events.csv";
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.setHeader("Content-Type", "text/csv");
       return res.send(rowsToCsv(rows, EVENT_COLUMNS));
     } catch (e) {

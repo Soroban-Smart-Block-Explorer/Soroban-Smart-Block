@@ -18,8 +18,9 @@ export async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 100 } = {})
 function isRetryableError(err) {
   if (!err) return false;
   const status = err?.response?.status ?? err?.status ?? err?.statusCode;
-  if (status === 429) return true;
-  if (err?.code === "ECONNRESET" || err?.code === "ETIMEDOUT") return true;
-  if (err?.message && /timeout|rate\s*limit|too\s*many\s*requests/i.test(err.message)) return true;
+  // 429 Too Many Requests, 503 Service Unavailable (RPC blackout), 502/504 gateway errors
+  if (status === 429 || status === 503 || status === 502 || status === 504) return true;
+  if (err?.code === "ECONNRESET" || err?.code === "ETIMEDOUT" || err?.code === "ECONNREFUSED") return true;
+  if (err?.message && /timeout|rate\s*limit|too\s*many\s*requests|service\s*unavailable|ECONNREFUSED/i.test(err.message)) return true;
   return false;
 }

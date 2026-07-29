@@ -6,11 +6,14 @@ import WalletPage from "../src/pages/WalletPage";
 
 const VALID_ADDR = "GA5ZSEJYB37FRCONJ3LQUMTZHKWZ6BIGZU3U2XHRJHXBVWMGHMV36TJQ";
 
-const mockWallet = vi.fn();
+const mockWalletHistory = vi.fn();
 
 vi.mock("../src/api", () => ({
   api: {
-    wallet: (...args: unknown[]) => mockWallet(...args),
+    // #525 / #527: walletHistory replaces wallet() — accepts optional date params.
+    walletHistory: (...args: unknown[]) => mockWalletHistory(...args),
+    // contract metadata is fetched in grouped view (#526)
+    contract: vi.fn().mockResolvedValue(null),
   },
 }));
 
@@ -18,11 +21,11 @@ function makeQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
 
-function renderWalletPage(address: string) {
+function renderWalletPage(address: string, search = "") {
   const qc = makeQueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[`/wallet/${address}`]}>
+      <MemoryRouter initialEntries={[`/wallet/${address}${search}`]}>
         <Routes>
           <Route path="/wallet/:address" element={<WalletPage />} />
         </Routes>
@@ -34,12 +37,13 @@ function renderWalletPage(address: string) {
 describe("WalletPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSearchParams = new URLSearchParams();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  // ── #525: Basic rendering ─────────────────────────────────────────────────
 
   it("renders events from a mock API response", async () => {
     const mockEvents = [
@@ -63,7 +67,7 @@ describe("WalletPage", () => {
       },
     ];
 
-    mockWallet.mockResolvedValue({ events: mockEvents, horizon_account: null });
+    mockWalletHistory.mockResolvedValue({ events: mockEvents, horizon_account: null });
 
     renderWalletPage(VALID_ADDR);
 
@@ -76,26 +80,58 @@ describe("WalletPage", () => {
     expect(screen.getByText("swap")).toBeDefined();
   });
 
-  it("shows 'invalid address' error for GFOO", async () => {
+  it("shows a friendly error for an invalid address (#525)", async () => {
     renderWalletPage("GFOO");
 
-    const errorEl = await screen.findByText("Invalid wallet address format");
+    // #525: error message must include the bad address
+    const errorEl = await screen.findByText(/GFOO is not a valid Stellar address/i);
     expect(errorEl).toBeDefined();
-
-    expect(mockWallet).not.toHaveBeenCalled();
+    expect(mockWalletHistory).not.toHaveBeenCalled();
   });
 
-  it("shows empty state when the events array is empty", async () => {
-    mockWallet.mockResolvedValue({ events: [], horizon_account: null });
+  it("shows empty state with register-contract link when no events found (#525)", async () => {
+    mockWalletHistory.mockResolvedValue({ events: [], horizon_account: null });
 
     renderWalletPage(VALID_ADDR);
 
-    const emptyMsg = await screen.findByText("No Soroban interactions found for this address");
+    const emptyMsg = await screen.findByText("No Soroban interactions found for this address.");
     expect(emptyMsg).toBeDefined();
+
+    // #525: link to register a contract in empty state
+    const registerLink = await screen.findByText(/Register a contract/i);
+    expect(registerLink).toBeDefined();
+  });
+
+  it("shows summary row with event count and unique contracts (#525)", async () => {
+    const mockEvents = [
+      {
+        seq: 1,
+        contract_id: "CCEMOFO5TE7FGOAJXR3RDHPC6RWO4FM2GOPUKI5N6KJQ4MOLOFPFJN6B",
+        function: "transfer",
+        ledger: 1000,
+        description: "Transfer event",
+        raw_topics: [],
+      },
+      {
+        seq: 2,
+        contract_id: "CDLZFC3SYJYDZT7K67VZ75HRJDTIKI7BF6RQD7MFPK5QERZUTXX7YV7V",
+        function: "swap",
+        ledger: 1001,
+        description: "Swap event",
+        raw_topics: [],
+      },
+    ];
+    mockWalletHistory.mockResolvedValue({ events: mockEvents, horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    // Summary: 2 total events, 2 unique contracts
+    expect(await screen.findByText("2")).toBeDefined();
+    expect(screen.getByText(/total event/i)).toBeDefined();
   });
 
   it("renders XLM balance when horizon_account is present in the response", async () => {
-    mockWallet.mockResolvedValue({
+    mockWalletHistory.mockResolvedValue({
       events: [],
       horizon_account: {
         id: VALID_ADDR,
@@ -120,37 +156,104 @@ describe("WalletPage", () => {
     expect(screen.getByText("1250.0000000 XLM")).toBeDefined();
   });
 
-  it("restores filter state from the URL (issue #533 permalink)", async () => {
-    mockSearchParams = new URLSearchParams({ from: "100", to: "200", fn: "transfer", group: "function" });
-    const { api } = await import("../src/api");
-    (api.wallet as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      events: [{ seq: 1, ledger: 150, function: "transfer", description: "moved tokens" }],
+  // ── #527: Date range filter ───────────────────────────────────────────────
+
+  it("restores date range filter from URL params (#527)", async () => {
+    mockWalletHistory.mockResolvedValue({
+      events: [
+        {
+          seq: 1,
+          contract_id: "CCEMOFO5TE7FGOAJXR3RDHPC6RWO4FM2GOPUKI5N6KJQ4MOLOFPFJN6B",
+          function: "transfer",
+          ledger: 150,
+          description: "moved tokens",
+          raw_topics: [],
+        },
+      ],
+      horizon_account: null,
     });
 
-    const WalletPage = (await import("../src/pages/WalletPage")).default;
-    render(
-      <Wrapper>
-        <WalletPage />
-      </Wrapper>
-    );
-    expect(await screen.findByDisplayValue("100")).toBeDefined();
-    expect(screen.getByDisplayValue("200")).toBeDefined();
-    expect(screen.getByDisplayValue("transfer")).toBeDefined();
-    expect(screen.getByDisplayValue("Function")).toBeDefined();
+    renderWalletPage(VALID_ADDR, "?from=2026-01-01&to=2026-03-31");
+
+    // Date inputs should be pre-filled from URL
+    const fromInput = await screen.findByDisplayValue("2026-01-01");
+    expect(fromInput).toBeDefined();
+    const toInput = screen.getByDisplayValue("2026-03-31");
+    expect(toInput).toBeDefined();
   });
 
-  it("copies the current URL and shows a transient 'Link copied!' toast on Share click", async () => {
+  it("passes from/to params to the API on date filter change (#527)", async () => {
+    mockWalletHistory.mockResolvedValue({ events: [], horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    await screen.findByText("No Soroban interactions found for this address.");
+
+    // walletHistory should have been called
+    expect(mockWalletHistory).toHaveBeenCalledWith(
+      VALID_ADDR,
+      expect.objectContaining({ from: "", to: "" }),
+    );
+  });
+
+  // ── #526: Group by contract ───────────────────────────────────────────────
+
+  it("renders group-by-contract toggle in the filter bar (#526)", async () => {
+    mockWalletHistory.mockResolvedValue({ events: [], horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    await screen.findByText("No Soroban interactions found for this address.");
+
+    // Group-by select must exist
+    const groupSelect = screen.getByDisplayValue("Flat list");
+    expect(groupSelect).toBeDefined();
+  });
+
+  it("restores group=contract from the URL (#526)", async () => {
+    mockWalletHistory.mockResolvedValue({
+      events: [
+        {
+          seq: 1,
+          contract_id: "CCEMOFO5TE7FGOAJXR3RDHPC6RWO4FM2GOPUKI5N6KJQ4MOLOFPFJN6B",
+          function: "transfer",
+          ledger: 100,
+          description: "Transfer",
+          raw_topics: [],
+        },
+      ],
+      horizon_account: null,
+    });
+
+    renderWalletPage(VALID_ADDR, "?group=contract");
+
+    // The select should show "Contract" when group=contract is in URL
+    const groupSelect = await screen.findByDisplayValue("Contract");
+    expect(groupSelect).toBeDefined();
+  });
+
+  // ── #528: Export CSV ──────────────────────────────────────────────────────
+
+  it("renders Export CSV button (#528)", async () => {
+    mockWalletHistory.mockResolvedValue({ events: [], horizon_account: null });
+
+    renderWalletPage(VALID_ADDR);
+
+    const exportBtn = await screen.findByText("↓ Export CSV");
+    expect(exportBtn).toBeDefined();
+  });
+
+  it("Share button copies URL and shows toast (#525)", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
 
-    const WalletPage = (await import("../src/pages/WalletPage")).default;
-    render(
-      <Wrapper>
-        <WalletPage />
-      </Wrapper>
-    );
+    mockWalletHistory.mockResolvedValue({ events: [], horizon_account: null });
 
-    fireEvent.click(await screen.findByText("🔗 Share"));
+    renderWalletPage(VALID_ADDR);
+
+    const shareBtn = await screen.findByTitle("Copy a shareable link with the current filters");
+    fireEvent.click(shareBtn);
+
     expect(writeText).toHaveBeenCalledWith(window.location.href);
     expect(await screen.findByText("Link copied!")).toBeDefined();
   });
