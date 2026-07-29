@@ -98,8 +98,14 @@ export default function RegisterContractPage() {
     try {
       await api.registerContract(payload);
       showToast("success", `Contract ${contractId} registered successfully!`);
-      // Navigate to the contract detail page after brief toast
-      setTimeout(() => navigate(`/contract/${contractId}`), 1200);
+      // Navigate to the success page with contract ID and name in URL
+      setTimeout(
+        () =>
+          navigate(
+            `/contracts/register/success?id=${encodeURIComponent(contractId)}&name=${encodeURIComponent(name.trim())}`,
+          ),
+        800,
+      );
     } catch (err: unknown) {
       const apiErr = err as { status?: number; data?: { error?: string }; message?: string };
       if (apiErr.status === 409) {

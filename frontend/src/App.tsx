@@ -37,8 +37,12 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/contracts" element={<RegistryPage />} />
             <Route path="/contracts/register" element={<RegisterContractPage />} />
+            {/* Issue #524: registration success page */}
+            <Route path="/contracts/register/success" element={<RegistrationSuccessPage />} />
             <Route path="/contract/:id" element={<ContractPage />} />
             <Route path="/contract/:id/workspace" element={<DeveloperWorkspace />} />
+            {/* Issue #521: ABI diff view */}
+            <Route path="/contract/:id/abi-diff" element={<AbiDiffPage />} />
             <Route path="/wallet/:address" element={<WalletPage />} />
             <Route path="/event/:seq" element={<EventPage />} />
             <Route path="/search" element={<SearchPage />} />
