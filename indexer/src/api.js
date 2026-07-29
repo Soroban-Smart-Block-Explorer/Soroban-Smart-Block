@@ -180,7 +180,20 @@ const writeLimiter = rateLimit({
 
 export function createApi({ logDestination, dbOverride } = {}) {
   const app = express();
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          connectSrc: ["'self'", "ws:"],
+        },
+      },
+    }),
+  );
+  app.use((req, res, next) => {
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=()");
+    next();
+  });
   const isWildcard = process.env.CORS_ORIGINS === '*';
   const allowedOrigins = isWildcard
     ? []
@@ -236,6 +249,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // app.use(generalLimiter);
 
   // ── Admin routes (auth-gated) ─────────────────────────────────────────────
+  app.use("/api/admin", (req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
   registerAdminRoutes(app);
 
   // ── API Documentation ────────────────────────────────────────────────────────

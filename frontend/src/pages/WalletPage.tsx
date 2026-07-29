@@ -5,7 +5,8 @@ import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import WalletBalances from "../components/WalletBalances";
-import { isMuxedAddress, muxedId, resolveMuxed } from "../utils/strkey";
+import { isMuxedAddress, muxedId, resolveMuxed, truncateAddress } from "../utils/strkey";
+import { useMetaTags } from "../hooks/useMetaTags";
 
 type GroupBy = "function" | "none";
 

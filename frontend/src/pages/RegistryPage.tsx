@@ -11,9 +11,39 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
-import { api, type ContractListItem, type ContractsListResponse } from "../api";
+import { api, type ContractListItem, type ContractsListResponse, type ContractStats } from "../api";
 import { truncateAddress } from "../utils/strkey";
 import ProtocolBadge from "../components/ProtocolBadge";
+
+// Max concurrent /stats requests when batch-fetching activity for the visible page (#609).
+const MAX_CONCURRENT_STATS_FETCHES = 10;
+
+function timeAgo(dateStr: string): string {
+  const diffDays = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86_400_000);
+  if (diffDays <= 0) return "today";
+  if (diffDays === 1) return "1 day ago";
+  return `${diffDays} days ago`;
+}
+
+/** 7-day daily event-count sparkline — plain SVG, no chart library. */
+function MiniSparkline({ data }: { data: { date: string; count: number }[] }) {
+  const w = 80;
+  const h = 20;
+  const maxCount = Math.max(...data.map((d) => d.count), 1);
+  const pts = data
+    .map((d, i) => {
+      const x = (i / (data.length - 1 || 1)) * w;
+      const y = h - (d.count / maxCount) * h;
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-label="Events over the last 7 days" style={{ display: "block", flexShrink: 0 }}>
+      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
 
 const PROTOCOL_TYPES = [
   { value: "all", label: "All types" },
@@ -26,7 +56,7 @@ const PROTOCOL_TYPES = [
 function SkeletonRow() {
   return (
     <tr style={{ borderBottom: "1px solid var(--border)" }}>
-      {[180, 300, 140, 100].map((w, i) => (
+      {[180, 300, 140, 100, 90].map((w, i) => (
         <td key={i} style={{ padding: "12px 4px" }}>
           <span
             style={{
@@ -88,6 +118,39 @@ export default function RegistryPage() {
 
   const contracts = data?.contracts ?? [];
   const pagination = data?.pagination;
+
+  // Batch-fetch event-count / last-activity stats for the visible contracts,
+  // capped at MAX_CONCURRENT_STATS_FETCHES concurrent requests (#609).
+  const [statsById, setStatsById] = useState<Record<string, ContractStats>>({});
+
+  useEffect(() => {
+    const ids = contracts.map((c) => c.id).filter((id) => !(id in statsById));
+    if (ids.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      for (let i = 0; i < ids.length; i += MAX_CONCURRENT_STATS_FETCHES) {
+        const batch = ids.slice(i, i + MAX_CONCURRENT_STATS_FETCHES);
+        const results = await Promise.all(batch.map((id) => api.contractStats(id).catch(() => null)));
+        if (cancelled) return;
+        setStatsById((prev) => {
+          const next = { ...prev };
+          batch.forEach((id, idx) => {
+            const stats = results[idx];
+            if (stats && typeof stats.total_events === "number" && Array.isArray(stats.events_per_day)) {
+              next[id] = stats;
+            }
+          });
+          return next;
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [contracts]);
 
   function handleFilterChange(e: React.ChangeEvent<HTMLSelectElement>) {
     setFilterType(e.target.value);
@@ -160,6 +223,7 @@ export default function RegistryPage() {
               <th style={{ padding: "8px 4px" }}>Contract ID</th>
               <th style={{ padding: "8px 4px" }}>Registered By</th>
               <th style={{ padding: "8px 4px" }}>Created At</th>
+              <th style={{ padding: "8px 4px" }}>Activity</th>
             </tr>
           </thead>
           <tbody>
@@ -187,6 +251,28 @@ export default function RegistryPage() {
                 </td>
                 <td style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 12 }}>
                   {new Date(c.created_at).toLocaleString()}
+                </td>
+                <td style={{ padding: "10px 4px" }}>
+                  {statsById[c.id] ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 12 }}>
+                          {statsById[c.id].total_events.toLocaleString()} events
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                          {(() => {
+                            const lastActive = [...statsById[c.id].events_per_day]
+                              .reverse()
+                              .find((d) => d.count > 0);
+                            return lastActive ? `Last active ${timeAgo(lastActive.date)}` : "No activity";
+                          })()}
+                        </div>
+                      </div>
+                      <MiniSparkline data={statsById[c.id].events_per_day.slice(-7)} />
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>—</span>
+                  )}
                 </td>
               </tr>
             ))}

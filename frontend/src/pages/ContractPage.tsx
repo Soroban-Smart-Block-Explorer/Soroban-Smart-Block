@@ -132,6 +132,11 @@ export default function ContractPage() {
     api.downloadAbi(id).catch((err) => console.error("Download ABI failed:", err));
   };
 
+  useMetaTags({
+    title: `${meta?.name || truncateAddress(id)} — Soroban Smart Block Explorer`,
+    description: `${meta?.name || truncateAddress(id)} — Soroban Smart Block Explorer`,
+  });
+
   const functions = meta?.functions ?? [];
   const sourceFiles = meta?.source_files ?? [];
   const invocationTree = (meta as any)?.invocation_tree;
