@@ -38,6 +38,7 @@ fn setup() -> (Env, TicketContractClient<'static>, Address, Address) {
 }
 
 /// Setup with custom capacity.
+#[allow(dead_code)]
 fn setup_with_capacity(max: u64) -> (Env, TicketContractClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();

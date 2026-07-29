@@ -679,20 +679,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
-  // GET /api/contracts/:id/stats — event totals, unique callers, and a 30-day
-  // daily trend for the contract stats widget (#536). Cached for 5 minutes.
-  app.get(
-    "/api/contracts/:id/stats",
-    makeCache("contract_stats", (req) => `contracts:stats:${req.params.id}`),
-    async (req, res) => {
-      try {
-        const stats = await db.getContractStats(req.params.id);
-        res.json(stats);
-      } catch (e) {
-        res.status(500).json({ error: e.message });
-      }
-    },
-  );
+
 
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
@@ -984,7 +971,12 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // Horizon 404 (unfunded account) or any Horizon failure yields
   // horizon_account: null rather than a 500 — the wallet response never
   // depends on Horizon being reachable.
-  app.get("/api/wallet/:address", async (req, res) => {
+  // Cached for 60s (issue #534) — cache busted by index.js via
+  // cacheInvalidate("wallet:events:*") on new events.
+  app.get(
+    "/api/wallet/:address",
+    makeCache("wallet", (req) => `wallet:events:${req.params.address}`),
+    async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
@@ -1132,40 +1124,71 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── NFT endpoints ────────────────────────────────────────────────
 
   // GET /api/tokens/:contractId/nfts
+  // Cursor-based (keyset) pagination:
   //   ?owner=<address>  — filter to tokens owned by this address
-  //   &page=<n>         — 1-indexed page number (default 1)
   //   &limit=<n>        — results per page, max 200 (default 50)
+  //   &after=<token_id> — opaque cursor from previous page's `next_cursor`
+  //                       (omit for the first page)
   //
-  // Returns a paginated list of all minted NFT token IDs with their
-  // current owner, on-chain metadata, and last transfer ledger.
+  // Page-based pagination (legacy):
+  //   &page=<n>         — 1-indexed page number (default 1)
+  //
+  // Per issue #650, returns { token_id, owner_address, minted_ledger,
+  // minted_by, last_transfer_ledger } per item with cursor-based navigation.
   app.get("/api/tokens/:contractId/nfts", async (req, res) => {
     try {
       const { contractId } = req.params;
       const owner = req.query.owner || undefined;
-      const page = req.query.page ? Number(req.query.page) : 1;
       const limit = req.query.limit ? Number(req.query.limit) : 50;
 
-      if (isNaN(page) || page < 1) {
-        return res.status(422).json({ error: "Invalid page" });
-      }
+      // Validate limit
       if (isNaN(limit) || limit < 1 || limit > 200) {
         return res.status(422).json({ error: "Invalid limit" });
       }
 
-      const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+      // Validate after (must be a valid numeric string if provided)
+      if (req.query.after !== undefined && (isNaN(Number(req.query.after)) || String(req.query.after).trim() === "")) {
+        return res.status(422).json({ error: "Invalid after" });
+      }
 
-      const totalPages = Math.ceil(total / limit);
-      res.json({
-        contract_id: contractId,
-        tokens,
-        pagination: {
-          page,
+      // Cursor-based pagination (issue #650) — default unless page param is explicitly provided
+      if (req.query.page === undefined) {
+        const after = req.query.after || undefined;
+
+        const { tokens, next_cursor } = await db.getNftTokensCursor(contractId, {
+          owner,
+          after,
           limit,
-          total,
-          total_pages: totalPages,
-          has_next: page < totalPages,
-        },
-      });
+        });
+
+        res.json({
+          contract_id: contractId,
+          tokens,
+          next_cursor,
+        });
+      } else {
+        // Legacy page-based pagination (backward compatible)
+        const page = req.query.page ? Number(req.query.page) : 1;
+
+        if (isNaN(page) || page < 1) {
+          return res.status(422).json({ error: "Invalid page" });
+        }
+
+        const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+
+        const totalPages = Math.ceil(total / limit);
+        res.json({
+          contract_id: contractId,
+          tokens,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: totalPages,
+            has_next: page < totalPages,
+          },
+        });
+      }
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1742,9 +1765,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/setup/db-init — create/upgrade the schema only.
   //
   // INTENTIONALLY MINIMAL (issue #417): this handler must call db.init() and
-  // nothing else. It does NOT seed sample data. The old seed-lib.js helper
+  // nothing else. It does NOT seed sample data. The old seed_lib helper
   // (which generated fake Stellar addresses) was removed during cleanup and must
-  // never be re-introduced here — no static import, no `await import("./seed-lib.js")`.
+  // never be re-introduced here — no static import, no `await import("./seed_lib.js")`.
   // The schema-init test in test/api/setup-db-init.test.js guards this invariant.
   app.post("/api/setup/db-init", blockInProduction, async (req, res) => {
     try {

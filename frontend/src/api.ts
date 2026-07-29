@@ -630,6 +630,8 @@ export const api = {
     if (type) q.set("type", type);
     return get<ContractsListResponse>(`/contracts?${q}`);
   },
+  /** ABI version history — GET /api/contracts/:id/abi-history */
+  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
   wallet: (address: string) =>
@@ -941,7 +943,4 @@ export const api = {
       if (!r.ok) throw Object.assign(new Error(data.error ?? `API ${r.status}`), { status: r.status, data });
       return data as { ok: boolean };
     }),
-
-  // Issue #516: ABI version history for a contract
-  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
 };

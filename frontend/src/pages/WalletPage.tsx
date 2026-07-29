@@ -5,39 +5,20 @@ import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import WalletBalances from "../components/WalletBalances";
-import ProtocolBadge from "../components/ProtocolBadge";
-import {
-  isMuxedAddress,
-  muxedId,
-  resolveMuxed,
-  truncateAddress,
-  isAccountAddress,
-  isContractAddress,
-} from "../utils/strkey";
+import { isMuxedAddress, muxedId, resolveMuxed } from "../utils/strkey";
 
-// ── Types ────────────────────────────────────────────────────────────────────
+type GroupBy = "function" | "none";
 
-type GroupBy = "none" | "contract";
+const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
+  { key: "transfer", label: "Transfer" },
+  { key: "swap", label: "Swap" },
+  { key: "mint", label: "Mint" },
+  { key: "burn", label: "Burn" },
+  { key: "stake", label: "Stake" },
+  { key: "other", label: "Other" },
+];
 
-// ── Address validation ───────────────────────────────────────────────────────
-// Accepts G… (ed25519 account), M… (muxed account), C… (contract) strkeys.
-const VALID_ADDRESS_RE = /^[GMC][A-Z2-7]{55,}$/;
-
-function isValidStellarAddress(addr: string): boolean {
-  return VALID_ADDRESS_RE.test(addr);
-}
-
-// ── Small UI helpers ─────────────────────────────────────────────────────────
-
-function Chip({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
+function Chip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -210,23 +191,16 @@ export default function WalletPage() {
     document.title = `Wallet ${truncateAddress(address)} — Soroban Explorer`;
   }
 
-  // ── Fetch events (#525, #527) ─────────────────────────────────────────────
-  // Pass date params so the API can do server-side filtering.
-  const walletQuery = useQuery({
-    queryKey: ["wallet", resolvedAddress, fromDate, toDate],
-    queryFn: () => api.walletHistory(resolvedAddress, { from: fromDate, to: toDate }),
-    enabled: !!resolvedAddress && isValidAddress,
+  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["wallet", address],
+    queryFn: () => api.wallet(address),
+    enabled: !!address && isValidAddress,
   });
-
-  const allEvents: DecodedEvent[] = walletQuery.data?.events ?? [];
-  const horizonAccount = walletQuery.data?.horizon_account ?? null;
+  const events = data?.events ?? [];
+  const horizonAccount = data?.horizon_account ?? null;
   const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
-
-  // ── Client-side function filter ───────────────────────────────────────────
-  const filtered = useMemo(() => {
-    if (!fnFilter) return allEvents;
-    return allEvents.filter((ev) => ev.function === fnFilter);
-  }, [allEvents, fnFilter]);
 
   const availableFunctions = useMemo(
     () => Array.from(new Set(allEvents.map((ev) => ev.function))).sort(),
@@ -294,20 +268,6 @@ export default function WalletPage() {
     }
   }
 
-  // ── Export CSV (#528) ─────────────────────────────────────────────────────
-  function exportCsv() {
-    const q = new URLSearchParams({ format: "csv", wallet: resolvedAddress });
-    if (fnFilter) q.set("fn", fnFilter);
-    const url = `/api/export/events?${q}`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `wallet-${resolvedAddress}-events.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }
-
-  // ── Invalid address error banner (#525) ───────────────────────────────────
   if (address && !isValidAddress) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -495,7 +455,7 @@ export default function WalletPage() {
 
       {/* Wallet token balances */}
       <div className="card">
-        <WalletBalances address={resolvedAddress} />
+        <WalletBalances address={address} />
       </div>
 
       {/* Events section */}

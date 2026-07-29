@@ -6,6 +6,8 @@ on:
   pull_request:
     branches: [main, "release/*"]
     types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '0 9 * * 1'  # Monday 09:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,13 +27,15 @@ jobs:
           target: wasm32-unknown-unknown
           components: rustfmt, clippy
 
-      - name: Cache Rust
+      - name: Cache Rust build artifacts
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/
+            ~/.cargo/bin
+            target/release/build
+            target/wasm32-unknown-unknown/release/deps
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -140,6 +144,41 @@ jobs:
         run: node src/migrate.js
         working-directory: indexer
 
+  # ── Frontend Tests ────────────────────────────────────────────────────────
+  frontend-tests:
+    name: Frontend Tests (Vitest + React Testing Library)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: node-20-frontend-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: node-20-frontend-
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: Frontend tests
+        run: npm test -- --coverage
+        working-directory: frontend
+
+      - name: Upload frontend test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-results
+          path: frontend/coverage/
+          retention-days: 30
+          if-no-files-found: ignore
+
   # ── Services ──────────────────────────────────────────────────────────────
   services:
     name: Services (indexer + frontend)
@@ -200,6 +239,12 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
 
+      - name: Indexer concurrent-write test (#587)
+        run: node --test test/concurrentWrite.test.js
+        working-directory: indexer
+        env:
+          TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
+
       - name: Upload indexer coverage to CodeCov
         uses: codecov/codecov-action@v4
         with:
@@ -212,3 +257,94 @@ jobs:
       - name: Frontend typecheck + build
         run: npm run build
         working-directory: frontend
+
+  # ── Testnet Smoke Tests ──────────────────────────────────────────────────────
+  # Gated on main branch only. Tests health, events, and WebSocket connectivity
+  # against the running testnet indexer.
+  testnet-smoke:
+    name: Testnet Smoke Tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Smoke test — health endpoint
+        run: |
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          echo "Testing health endpoint at $TESTNET_URL/api/health"
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" "$TESTNET_URL/api/health")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "503" ]; then
+            echo "FAIL: Expected 200 or 503, got $HTTP_CODE"
+            exit 1
+          fi
+          
+          echo "✓ Health endpoint returned $HTTP_CODE"
+
+      - name: Smoke test — events endpoint
+        run: |
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          echo "Testing events endpoint at $TESTNET_URL/api/events"
+          
+          RESPONSE=$(curl -s "$TESTNET_URL/api/events?limit=1")
+          EVENT_COUNT=$(echo "$RESPONSE" | jq -r 'if type == "array" then length else 0 end' 2>/dev/null || echo 0)
+          
+          echo "Response: $RESPONSE"
+          echo "Event count: $EVENT_COUNT"
+          
+          if [ "$EVENT_COUNT" -lt 1 ]; then
+            echo "FAIL: Expected at least 1 event, got $EVENT_COUNT"
+            exit 1
+          fi
+          
+          echo "✓ Events endpoint returned $EVENT_COUNT events"
+
+      - name: Smoke test — response time check
+        run: |
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          echo "Testing response time at $TESTNET_URL/api/health"
+          
+          START=$(date +%s%N)
+          RESPONSE=$(curl -s "$TESTNET_URL/api/health")
+          END=$(date +%s%N)
+          
+          RESPONSE_TIME=$(( (END - START) / 1000000 ))
+          echo "Response time: ${RESPONSE_TIME}ms"
+          echo "Response: $RESPONSE"
+          
+          if [ "$RESPONSE_TIME" -gt 10000 ]; then
+            echo "FAIL: Response time ${RESPONSE_TIME}ms exceeds 10s threshold"
+            exit 1
+          fi
+          
+          echo "✓ Response time acceptable (${RESPONSE_TIME}ms)"
+
+      - name: Notify Slack on failure
+        if: failure()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": ":red_circle: Testnet smoke test failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Testnet Smoke Test Failed*\nBranch: main\nRun: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                  }
+                }
+              ]
+            }

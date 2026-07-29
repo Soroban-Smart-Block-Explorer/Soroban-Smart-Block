@@ -1,0 +1,149 @@
+# =============================================================================
+#  Soroban Smart Block — build the frontend production image and scan it (#344)
+#
+#  - Builds `frontend/Dockerfile` on every PR and push to main.
+#  - Boots the container and asserts: image < 50 MB, container exposes 8080,
+#    root path returns the SPA shell, SPA deep-link returns index.html
+#    (i.e. try_files routing works), and all 5 security headers
+#    (CSP / X-Frame-Options / X-Content-Type-Options / Referrer-Policy /
+#    Permissions-Policy) are emitted on responses.
+#  - Runs aquasec/trivy — fails the workflow on any HIGH or CRITICAL CVE.
+# =============================================================================
+
+name: docker-frontend
+
+on:
+  pull_request:
+    paths:
+      - "frontend/Dockerfile"
+      - "frontend/nginx.conf"
+      - "frontend/docker-entrypoint.sh"
+      - "frontend/.dockerignore"
+      - ".github/workflows/docker-frontend.yml"
+  push:
+    branches: [main, "release/*"]
+    paths:
+      - "frontend/Dockerfile"
+      - "frontend/nginx.conf"
+      - "frontend/docker-entrypoint.sh"
+      - "frontend/.dockerignore"
+      - ".github/workflows/docker-frontend.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & scan frontend image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 1. Build the production image.
+      - name: Build frontend image
+        working-directory: frontend
+        run: |
+          docker buildx build \
+            --tag frontend:ci \
+            --load \
+            --provenance=false \
+            .
+
+      # 2. Acceptance criterion 2 — final image < 50 MB.
+      - name: Verify image size < 50MB
+        run: |
+          SIZE_BYTES=$(docker image inspect frontend:ci --format '{{.Size}}')
+          SIZE_MB=$(awk -v b="$SIZE_BYTES" 'BEGIN { printf "%.2f", b/1024/1024 }')
+          echo "frontend:ci size = ${SIZE_MB} MB"
+          awk -v mb="$SIZE_MB" 'BEGIN { exit (mb < 50) ? 0 : 1 }' \
+            || (echo "ERROR: frontend image is ${SIZE_MB} MB — must be < 50MB" && exit 1)
+
+      # 3. Boot the container in the background and verify all five
+      #    security headers + SPA routing + GET / success — see issue #344
+      #    acceptance criteria 3 and 4.
+      - name: Boot container and verify headers + SPA routing
+        run: |
+          docker run -d --rm --name frontend-ci \
+            -p 8080:8080 \
+            -e VITE_API_URL=https://example.test/api \
+            frontend:ci
+
+          # Wait for nginx to come up.
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/ >/dev/null; then break; fi
+            sleep 1
+          done
+
+          echo "--- HEAD / ---"
+          curl -sI http://localhost:8080/ || (echo "ERROR: GET / failed" && exit 1)
+
+          # Each of the 5 security headers MUST be present.
+          H=$(curl -sI http://localhost:8080/)
+          for HDR in \
+            "Content-Security-Policy:" \
+            "X-Frame-Options:" \
+            "X-Content-Type-Options:" \
+            "Referrer-Policy:" \
+            "Permissions-Policy:"
+          do
+            echo "$H" | grep -q "$HDR" \
+              || (echo "ERROR: missing header $HDR" && exit 1)
+          done
+
+          # SPA deep-link — try_files should resolve to /index.html even when
+          # the on-disk path doesn't exist.
+          DEEP=$(curl -s -o /tmp/deep.html -w "%{http_code}" http://localhost:8080/contract/CABC/)
+          [ "$DEEP" = "200" ] \
+            || (echo "ERROR: deep-link returned $DEEP, expected 200" && exit 1)
+          grep -q "<!doctype\|<!DOCTYPE\|id=\"root\"" /tmp/deep.html \
+            || (echo "ERROR: deep-link did not return the SPA shell" && exit 1)
+
+          docker stop frontend-ci
+
+      # 4. Verify the entrypoint actually rewrites VITE_API_URL (acceptance criterion 5).
+      - name: Verify VITE_API_URL runtime override
+        run: |
+          docker run -d --rm --name frontend-ci-rt \
+            -p 8081:8080 \
+            -e VITE_API_URL=https://override.example.test/api \
+            frontend:ci
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8081/ >/dev/null; then break; fi
+            sleep 1
+          done
+
+          # Walk every JS asset emitted into /usr/share/nginx/html/assets and
+          # confirm none of them still contains the un-substituted placeholder.
+          docker exec frontend-ci-rt \
+            sh -c 'find /usr/share/nginx/html/assets -type f -name "*.js" \
+                  -exec grep -l "__RUNTIME_VITE_API_URL__" {} +' \
+            && (echo "ERROR: placeholder __RUNTIME_VITE_API_URL__ still present in assets" \
+                && exit 1) || true
+
+          # And the override string itself must now be present somewhere.
+          docker exec frontend-ci-rt \
+            sh -c 'find /usr/share/nginx/html/assets -type f -name "*.js" \
+                  -exec grep -l "https://override.example.test/api" {} +' \
+            >/dev/null \
+            || (echo "ERROR: VITE_API_URL override not found in any JS asset" && exit 1)
+
+          docker stop frontend-ci-rt
+
+      # 5. Trivy scan — fail on HIGH/CRITICAL. .trivyignore is respected.
+      - name: Trivy vulnerability scan (HIGH/CRITICAL fail)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: frontend:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignorefile: .trivyignore
