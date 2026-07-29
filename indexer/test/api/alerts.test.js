@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";

@@ -24,13 +24,20 @@ const BUILTIN_ABIS = [
 ];
 
 export async function seedBuiltinAbis() {
+  let seeded = 0;
+  let skipped = 0;
   for (const { file, configKey } of BUILTIN_ABIS) {
     const contractId = config[configKey];
-    if (!contractId) continue; // not configured for this deployment
+    if (!contractId) {
+      continue; // not configured for this deployment
+    }
 
     try {
       const existing = await db.getContractMeta(contractId);
-      if (existing) continue; // already registered
+      if (existing) {
+        skipped++;
+        continue; // already registered
+      }
 
       const raw = await readFile(path.join(ABIS_DIR, file), "utf8");
       const meta = JSON.parse(raw);
@@ -40,12 +47,14 @@ export async function seedBuiltinAbis() {
         name: meta.name,
         description: meta.description ?? null,
         functions: meta.functions ?? [],
-        registered_by: "builtin-abi-seed",
+        registered_by: "builtin-seed",
       });
 
+      seeded++;
       console.log(`[abi-seed] registered ${meta.name} (${contractId})`);
     } catch (err) {
       console.error(`[abi-seed] failed to seed ${file}:`, err.message);
     }
   }
+  return { seeded, skipped };
 }

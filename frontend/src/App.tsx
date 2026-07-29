@@ -21,6 +21,7 @@ const BatchMultiCall = lazy(() => import("./pages/BatchMultiCall"));
 const SubInvocationPage = lazy(() => import("./pages/SubInvocationPage"));
 const RateLimitDashboard = lazy(() => import("./pages/RateLimitDashboard"));
 const NftGallery = lazy(() => import("./pages/NftGallery"));
+const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
 
 function Fallback() {
   return <p style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>Loading…</p>;
