@@ -1,4 +1,5 @@
 import { BatchCall } from "./types/batch";
+import { getCsrfToken, refreshCsrfToken } from "./hooks/useCsrf";
 
 const BASE = "/api";
 
@@ -323,6 +324,49 @@ async function get<T>(path: string): Promise<T> {
   const res = await fetch(BASE + path);
   if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
   return res.json();
+}
+
+/**
+ * Wrapper for state-changing fetch calls (POST / PATCH / DELETE).
+ *
+ * Automatically attaches the X-CSRF-Token header from the cached token.
+ * On a 403 CSRF mismatch, refreshes the token once and retries the request
+ * before propagating the error.
+ */
+async function mutationFetch(
+  url: string,
+  options: RequestInit & { headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const buildHeaders = (token: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...options.headers,
+    ...(token ? { "X-CSRF-Token": token } : {}),
+  });
+
+  const res = await fetch(url, {
+    credentials: "include",
+    ...options,
+    headers: buildHeaders(getCsrfToken()),
+  });
+
+  // On CSRF mismatch refresh the token and retry exactly once.
+  if (res.status === 403) {
+    let body: { error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    if (
+      body.error === "CSRF token missing" ||
+      body.error === "CSRF token mismatch"
+    ) {
+      await refreshCsrfToken();
+      return fetch(url, {
+        credentials: "include",
+        ...options,
+        headers: buildHeaders(getCsrfToken()),
+      });
+    }
+  }
+
+  return res;
 }
 
 // Resolved classic asset metadata (GET /api/assets/:issuer/:code)
@@ -709,9 +753,8 @@ export const api = {
       compiler_hash: string;
     },
   ) =>
-    fetch(`${BASE}/contracts/${id}/source-verifications`, {
+    mutationFetch(`${BASE}/contracts/${id}/source-verifications`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then((r) => {
       if (!r.ok) throw new Error(`API ${r.status}`);
@@ -754,27 +797,23 @@ export const api = {
 
   // Batch Multi-Call endpoints
   batchSimulate: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/simulate`, {
+    mutationFetch(`${BASE}/batch/simulate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchEstimateGas: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/estimate-gas`, {
+    mutationFetch(`${BASE}/batch/estimate-gas`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchOptimize: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/optimize`, {
+    mutationFetch(`${BASE}/batch/optimize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchValidate: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/validate`, {
+    mutationFetch(`${BASE}/batch/validate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
 
@@ -905,9 +944,8 @@ export const api = {
     functions: { name: string; description: string; params: { name: string; kind: string }[] }[];
     registered_by: string;
   }) =>
-    fetch(`${BASE}/contracts`, {
+    mutationFetch(`${BASE}/contracts`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(async (r) => {
       const data = await r.json();
