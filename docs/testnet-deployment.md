@@ -87,7 +87,7 @@ export CONTRACT_ID=<returned-contract-id>
 
 ## 3. Initialize The Contract
 
-Run the project initialization entrypoint with the testnet admin account. Replace function and argument names with the concrete names used by the current contract if they differ.
+Call `init`, the contract's actual initialization entrypoint, with the testnet admin account. `init` must be called exactly once — a second call returns an error. `max_events` may be set to `0` to use the contract's default event retention capacity.
 
 ```bash
 stellar contract invoke \
@@ -95,15 +95,12 @@ stellar contract invoke \
   --source deployer \
   --network testnet \
   -- \
-  initialize \
-  --admin "$STELLAR_ADMIN_PUBLIC"
+  init \
+  --admin "$STELLAR_ADMIN_PUBLIC" \
+  --max_events 0
 ```
 
-Verify initialized state with a read-only call, for example:
-
-```bash
-stellar contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- get_admin
-```
+Confirm the guard works by calling `init` a second time and checking that it returns an error rather than exiting 0.
 
 ## 4. Fund The Admin Account
 
