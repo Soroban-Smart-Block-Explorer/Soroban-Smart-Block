@@ -11,7 +11,7 @@
  * - Actionable validation error messages
  * - Fail-fast on invalid configuration
  */
-
+import "dotenv/config";
 import { z } from "zod";
 
 // ── Helper: Positive integer with default ─────────────────────────────────────

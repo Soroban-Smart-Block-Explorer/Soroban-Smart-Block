@@ -7,7 +7,7 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
-import { db, pool } from "./db.js";
+import { db as defaultDb, pool } from "./db.js";
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
@@ -15,7 +15,7 @@ import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTr
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus } from "./rpcMultiNode.js";
-import { cacheHitTotal, cacheMissTotal } from "./metrics.js";
+import { cacheHitTotal, cacheMissTotal, apiRequestDuration } from "./metrics.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
 import { geoIpRateLimiter } from "./rateLimit/geoIpLimiter.js";
@@ -71,19 +71,38 @@ const _validateContractPost = _ajv.compile(_postContractSchema);
 
 function requestIdMiddleware(req, _res, next) {
   req.id = req.headers["x-request-id"] || randomUUID();
+  // Echo the request id in responses so clients and tests can observe it.
+  _res.setHeader && _res.setHeader("X-Request-Id", req.id);
+  // Preserve incoming traceparent header if present
+  const tp = req.headers["traceparent"];
+  if (tp) _res.setHeader && _res.setHeader("traceparent", tp);
   next();
 }
 
-function createHttpLogger(_logDestination) {
+function createHttpLogger(logDestination) {
   return (req, res, next) => {
     res.on("finish", () => {
-      console.log(`[api] ${req.method} ${req.url} ${res.statusCode}`);
+      const line = `[api] ${req.method} ${req.url} ${res.statusCode} ${req.id || ''}\n`;
+      try {
+        if (logDestination && typeof logDestination.write === "function") {
+          logDestination.write(line);
+        } else {
+          console.log(line.trim());
+        }
+      } catch (e) {
+        console.log(line.trim());
+      }
     });
     next();
   };
 }
 
-function metricsMiddleware(_req, _res, next) {
+function metricsMiddleware(req, res, next) {
+  const endTimer = apiRequestDuration.startTimer();
+  res.on("finish", () => {
+    const route = req.route && req.route.path ? req.route.path : req.path || req.url;
+    endTimer({ method: req.method, route: String(route), status: String(res.statusCode) });
+  });
   next();
 }
 
@@ -179,6 +198,9 @@ const writeLimiter = rateLimit({
 });
 
 export function createApi({ logDestination, dbOverride } = {}) {
+  // Allow callers (tests) to inject a fake DB implementation via `dbOverride`.
+  const db = dbOverride || defaultDb;
+  const runningUnderTest = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
   const app = express();
   app.use(
     helmet({
@@ -258,19 +280,25 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── API Documentation ────────────────────────────────────────────────────────
   const openApiPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../docs/api/openapi.yaml");
   if (fs.existsSync(openApiPath)) {
-    const yaml = fs.readFileSync(openApiPath, "utf8");
-    import("yaml")
-      .then(({ parse }) => {
-        const spec = parse(yaml);
-        app.use(
-          "/api/docs",
-          swaggerUi.serve,
-          swaggerUi.setup(spec, {
-            customCss: ".swagger-ui .topbar { display: none }",
-          }),
-        );
-      })
-      .catch(() => {});
+    // Avoid dynamic imports during test runs which may resolve after Jest
+    // tears down the environment and cause 'import after teardown' errors.
+    // Detect test runs started by Jest (NODE_ENV may not always be set).
+    const runningUnderTest = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
+    if (!runningUnderTest) {
+      const yaml = fs.readFileSync(openApiPath, "utf8");
+      import("yaml")
+        .then(({ parse }) => {
+          const spec = parse(yaml);
+          app.use(
+            "/api/docs",
+            swaggerUi.serve,
+            swaggerUi.setup(spec, {
+              customCss: ".swagger-ui .topbar { display: none }",
+            }),
+          );
+        })
+        .catch(() => {});
+    }
   }
 
   app.get("/api/openapi.yaml", (_req, res) => {
@@ -1999,7 +2027,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   );
 
   // ── GraphQL endpoint ───────────────────────────────────────────
-  attachGraphQL(app);
+  if (!runningUnderTest) attachGraphQL(app);
 
   // ── Batch Multi-Call Endpoints ───────────────────────────────────────
 
@@ -2141,9 +2169,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Start HTTP + WebSocket server ───────────────────────────────────────────
   const server = http.createServer(app);
-  attachWebSocketServer(server);
+  if (!runningUnderTest) attachWebSocketServer(server);
 
   server.on("close", () => console.log("[api] server closed"));
+
+  // During test runs we avoid calling `listen()` to prevent port conflicts
+  // and background handles that outlive the Jest environment. Tests will
+  // use the returned `app` or server object directly via supertest.
+  if (process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID) {
+    return app;
+  }
+
   server.listen(PORT, () => console.log(`API listening on :${PORT}`));
   return server;
 }
