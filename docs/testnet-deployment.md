@@ -105,6 +105,14 @@ Verify initialized state with a read-only call, for example:
 stellar contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- get_admin
 ```
 
+Confirm the contract starts with zero recorded events:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- event_count
+```
+
+The output must be `0`.
+
 ## 4. Fund The Admin Account
 
 The admin account must have enough testnet XLM for initialization, upgrades, and operational calls.
