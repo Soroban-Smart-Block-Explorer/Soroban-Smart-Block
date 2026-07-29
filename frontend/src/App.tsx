@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 
 const Home = lazy(() => import("./pages/Home"));
 const RegistryPage = lazy(() => import("./pages/RegistryPage"));
+const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
 const ContractPage = lazy(() => import("./pages/ContractPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
 const EventPage = lazy(() => import("./pages/EventPage"));
