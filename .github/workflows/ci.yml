@@ -6,6 +6,8 @@ on:
   pull_request:
     branches: [main, "release/*"]
     types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '0 9 * * 1'  # Monday 09:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,13 +27,15 @@ jobs:
           target: wasm32-unknown-unknown
           components: rustfmt, clippy
 
-      - name: Cache Rust
+      - name: Cache Rust build artifacts
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/
+            ~/.cargo/bin
+            target/release/build
+            target/wasm32-unknown-unknown/release/deps
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
