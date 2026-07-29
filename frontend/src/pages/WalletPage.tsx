@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import type { DecodedEvent } from "../api";
+import type { ContractMeta, DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import WalletBalances from "../components/WalletBalances";
 import { isMuxedAddress, muxedId, resolveMuxed } from "../utils/strkey";
@@ -30,6 +30,7 @@ function Chip({ active, label, onClick }: { active: boolean; label: string; onCl
         borderRadius: 999,
         padding: "4px 12px",
         fontSize: 13,
+        cursor: "pointer",
       }}
     >
       {label}
@@ -37,22 +38,158 @@ function Chip({ active, label, onClick }: { active: boolean; label: string; onCl
   );
 }
 
-const VALID_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+// Contract group section — collapsible, collapsed by default when > 3 contracts
+function ContractSection({
+  contractId,
+  contractMeta,
+  events,
+  defaultOpen,
+}: {
+  contractId: string;
+  contractMeta: ContractMeta | null | undefined;
+  events: DecodedEvent[];
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const name = contractMeta?.name ?? null;
+  const protocolType = contractMeta?.protocol_type ?? null;
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        overflow: "hidden",
+      }}
+    >
+      {/* Section header */}
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 16px",
+          background: "var(--surface)",
+          border: "none",
+          borderBottom: open ? "1px solid var(--border)" : "none",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <span style={{ color: "var(--muted)", fontSize: 12, minWidth: 14 }}>
+          {open ? "▾" : "▸"}
+        </span>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>
+          {name ?? truncateAddress(contractId)}
+        </span>
+        {!name && (
+          <code
+            style={{ fontSize: 11, color: "var(--muted)" }}
+            title={contractId}
+          >
+            {truncateAddress(contractId)}
+          </code>
+        )}
+        {protocolType && <ProtocolBadge type={protocolType} />}
+        <span
+          style={{
+            marginLeft: "auto",
+            fontSize: 12,
+            color: "var(--muted)",
+            fontWeight: 400,
+          }}
+        >
+          {events.length} event{events.length !== 1 ? "s" : ""}
+        </span>
+      </button>
+      {open && (
+        <div style={{ padding: "12px 0" }}>
+          <EventTable events={events} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Summary bar ──────────────────────────────────────────────────────────────
+
+function WalletSummary({ events }: { events: DecodedEvent[] }) {
+  const uniqueContracts = useMemo(
+    () => new Set(events.map((e) => e.contract_id).filter(Boolean)).size,
+    [events],
+  );
+  const ledgers = events.map((e) => e.ledger).filter(Boolean);
+  const firstLedger = ledgers.length ? Math.min(...ledgers) : null;
+  const lastLedger = ledgers.length ? Math.max(...ledgers) : null;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 32,
+        flexWrap: "wrap",
+        fontSize: 13,
+        color: "var(--muted)",
+      }}
+    >
+      <span>
+        <strong style={{ color: "var(--fg, #e6edf3)" }}>{events.length}</strong>{" "}
+        total event{events.length !== 1 ? "s" : ""}
+      </span>
+      <span>
+        <strong style={{ color: "var(--fg, #e6edf3)" }}>{uniqueContracts}</strong>{" "}
+        unique contract{uniqueContracts !== 1 ? "s" : ""}
+      </span>
+      {firstLedger != null && (
+        <span>
+          First: ledger{" "}
+          <strong style={{ color: "var(--fg, #e6edf3)" }}>
+            {firstLedger.toLocaleString()}
+          </strong>
+        </span>
+      )}
+      {lastLedger != null && (
+        <span>
+          Last: ledger{" "}
+          <strong style={{ color: "var(--fg, #e6edf3)" }}>
+            {lastLedger.toLocaleString()}
+          </strong>
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
 
 export default function WalletPage() {
-  const { address = "" } = useParams();
+  const { address = "" } = useParams<{ address: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const [copied, setCopied] = useState(false);
 
-  // All filter state lives in the URL — the source of truth is read directly
-  // from searchParams on every render, so a shared link always restores the
-  // exact same view (#533).
-  const fromLedger = searchParams.get("from") ?? "";
-  const toLedger = searchParams.get("to") ?? "";
-  const fnFilter = searchParams.get("fn") ?? "";
-  const groupBy = (searchParams.get("group") === "function" ? "function" : "none") as GroupBy;
+  // ── Resolve muxed addresses ──────────────────────────────────────────────
+  // M... muxed addresses resolve to a base G... account for querying.
+  const resolvedAddress = isMuxedAddress(address) ? (resolveMuxed(address) ?? address) : address;
+  const muxId = isMuxedAddress(address) ? muxedId(address) : null;
 
-  const isValidAddress = VALID_ADDRESS_RE.test(address);
+  // ── Validate address ─────────────────────────────────────────────────────
+  const isValidAddress = isValidStellarAddress(address);
+
+  // ── Filter state lives in the URL (permalink support, #527) ─────────────
+  const fromDate = searchParams.get("from") ?? "";
+  const toDate = searchParams.get("to") ?? "";
+  const fnFilter = searchParams.get("fn") ?? "";
+  const groupBy = (
+    searchParams.get("group") === "contract" ? "contract" : "none"
+  ) as GroupBy;
+
+  // ── Update document title (#525) ─────────────────────────────────────────
+  if (address) {
+    document.title = `Wallet ${truncateAddress(address)} — Soroban Explorer`;
+  }
 
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
 
@@ -66,31 +203,53 @@ export default function WalletPage() {
   const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
 
   const availableFunctions = useMemo(
-    () => Array.from(new Set(events.map((ev) => ev.function))).sort(),
-    [events],
+    () => Array.from(new Set(allEvents.map((ev) => ev.function))).sort(),
+    [allEvents],
   );
 
-  const filtered = useMemo(() => {
-    const from = fromLedger ? Number(fromLedger) : null;
-    const to = toLedger ? Number(toLedger) : null;
-    return events.filter((ev) => {
-      if (from != null && !isNaN(from) && ev.ledger < from) return false;
-      if (to != null && !isNaN(to) && ev.ledger > to) return false;
-      if (fnFilter && ev.function !== fnFilter) return false;
-      return true;
-    });
-  }, [events, fromLedger, toLedger, fnFilter]);
+  // ── Fetch contract metadata for all unique contracts (#526) ──────────────
+  const contractIds = useMemo(
+    () => Array.from(new Set(filtered.map((e) => e.contract_id).filter(Boolean))),
+    [filtered],
+  );
 
-  const groups = useMemo(() => {
-    if (groupBy !== "function") return null;
-    const byFn = new Map<string, DecodedEvent[]>();
+  // We use individual queries per contract so TanStack Query can cache each one.
+  // Limit to 20 contracts to avoid request flooding.
+  const contractQueries = useQuery({
+    queryKey: ["contractsMeta", contractIds.slice(0, 20)],
+    queryFn: async () => {
+      const results = await Promise.allSettled(
+        contractIds.slice(0, 20).map((id) => api.contract(id)),
+      );
+      return Object.fromEntries(
+        contractIds.slice(0, 20).map((id, i) => {
+          const r = results[i];
+          return [id, r.status === "fulfilled" ? r.value : null];
+        }),
+      ) as Record<string, ContractMeta | null>;
+    },
+    enabled: contractIds.length > 0 && groupBy === "contract",
+    staleTime: 60_000,
+  });
+
+  const contractMetas: Record<string, ContractMeta | null> = contractQueries.data ?? {};
+
+  // ── Group by contract (#526) ──────────────────────────────────────────────
+  const contractGroups = useMemo((): [string, DecodedEvent[]][] | null => {
+    if (groupBy !== "contract") return null;
+    const byContract = new Map<string, DecodedEvent[]>();
     for (const ev of filtered) {
-      if (!byFn.has(ev.function)) byFn.set(ev.function, []);
-      byFn.get(ev.function)!.push(ev);
+      const key = ev.contract_id || "__unknown__";
+      if (!byContract.has(key)) byContract.set(key, []);
+      byContract.get(key)!.push(ev);
     }
-    return [...byFn.entries()].sort(([a], [b]) => a.localeCompare(b));
+    // Sort by event count desc
+    return [...byContract.entries()].sort(([, a], [, b]) => b.length - a.length);
   }, [filtered, groupBy]);
 
+  const totalContracts = contractGroups?.length ?? 0;
+
+  // ── URL param helper ──────────────────────────────────────────────────────
   function updateParam(key: string, value: string) {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
@@ -98,6 +257,7 @@ export default function WalletPage() {
     setSearchParams(next, { replace: true });
   }
 
+  // ── Share / copy link ─────────────────────────────────────────────────────
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(window.location.href);
@@ -113,61 +273,76 @@ export default function WalletPage() {
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         <div className="card">
           <h2 style={{ marginBottom: 4 }}>Wallet History</h2>
-          <code
-            style={{
-              fontSize: 12,
-              color: "var(--muted)",
-              wordBreak: "break-all",
-            }}
-          >
+          <code style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}>
             {address}
           </code>
         </div>
-
         <div className="card">
-          <p style={{ color: "#ef4444" }}>Invalid wallet address format</p>
+          <p style={{ color: "#ef4444" }}>
+            <strong>{address}</strong> is not a valid Stellar address.
+            Valid addresses start with G (account), M (muxed), or C (contract).
+          </p>
         </div>
       </div>
     );
   }
 
-  function toggleType(key: string) {
-    const next = new Set(selectedTypes);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    const params = new URLSearchParams(searchParams);
-    if (next.size) params.set("fn", [...next].join(","));
-    else params.delete("fn");
-    setSearchParams(params, { replace: true });
-  }
-
-  function clearTypes() {
-    const params = new URLSearchParams(searchParams);
-    params.delete("fn");
-    setSearchParams(params, { replace: true });
-  }
-
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Header card */}
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
           <div>
             <h2 style={{ marginBottom: 4 }}>Wallet History</h2>
             <code
-              style={{
-                fontSize: 12,
-                color: "var(--muted)",
-                wordBreak: "break-all",
-              }}
+              style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}
+              title={address}
             >
               {address}
             </code>
+            {muxId && (
+              <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                Muxed ID: {muxId} → base account{" "}
+                <Link to={`/wallet/${resolvedAddress}`}>
+                  {truncateAddress(resolvedAddress)}
+                </Link>
+              </p>
+            )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {copied && <span style={{ fontSize: 12, color: "var(--green, #22c55e)" }}>Link copied!</span>}
+            {copied && (
+              <span style={{ fontSize: 12, color: "var(--green, #22c55e)" }}>
+                Link copied!
+              </span>
+            )}
             <button
               onClick={copyLink}
               title="Copy a shareable link with the current filters"
+              style={{
+                padding: "8px 16px",
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                cursor: "pointer",
+                fontSize: 13,
+                color: "var(--muted)",
+              }}
+            >
+              🔗 Share
+            </button>
+            {/* Export CSV button (#528) */}
+            <button
+              onClick={exportCsv}
+              title="Download wallet event history as CSV"
               style={{
                 padding: "8px 16px",
                 background: "var(--accent)",
@@ -178,37 +353,54 @@ export default function WalletPage() {
                 fontSize: 13,
               }}
             >
-              🔗 Share
+              ↓ Export CSV
             </button>
           </div>
         </div>
+
+        {/* Summary row (#525) */}
+        {allEvents.length > 0 && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+            <WalletSummary events={allEvents} />
+          </div>
+        )}
       </div>
 
-      {/* Filters row */}
-      <div className="card" style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+      {/* Filters row (#527 date range + existing filters) */}
+      <div
+        className="card"
+        style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}
+      >
+        {/* Date range (#527) */}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ color: "var(--muted)" }}>From ledger:</label>
+          <label style={{ color: "var(--muted)", fontSize: 13 }}>From:</label>
           <input
-            type="number"
-            value={fromLedger}
+            type="date"
+            value={fromDate}
             onChange={(e) => updateParam("from", e.target.value)}
-            placeholder="min"
-            style={{ width: 100 }}
+            style={{ fontSize: 13 }}
+            title="Filter events from this date"
           />
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ color: "var(--muted)" }}>To ledger:</label>
+          <label style={{ color: "var(--muted)", fontSize: 13 }}>To:</label>
           <input
-            type="number"
-            value={toLedger}
+            type="date"
+            value={toDate}
             onChange={(e) => updateParam("to", e.target.value)}
-            placeholder="max"
-            style={{ width: 100 }}
+            style={{ fontSize: 13 }}
+            title="Filter events up to this date"
           />
         </div>
+
+        {/* Function filter */}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ color: "var(--muted)" }}>Function:</label>
-          <select value={fnFilter} onChange={(e) => updateParam("fn", e.target.value)}>
+          <label style={{ color: "var(--muted)", fontSize: 13 }}>Function:</label>
+          <select
+            value={fnFilter}
+            onChange={(e) => updateParam("fn", e.target.value)}
+            style={{ fontSize: 13 }}
+          >
             <option value="">All</option>
             {availableFunctions.map((fn) => (
               <option key={fn} value={fn}>
@@ -217,15 +409,43 @@ export default function WalletPage() {
             ))}
           </select>
         </div>
+
+        {/* Group by (#526) */}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ color: "var(--muted)" }}>Group by:</label>
-          <select value={groupBy} onChange={(e) => updateParam("group", e.target.value === "function" ? "function" : "")}>
-            <option value="none">None</option>
-            <option value="function">Function</option>
+          <label style={{ color: "var(--muted)", fontSize: 13 }}>Group by:</label>
+          <select
+            value={groupBy}
+            onChange={(e) =>
+              updateParam("group", e.target.value === "contract" ? "contract" : "")
+            }
+            style={{ fontSize: 13 }}
+          >
+            <option value="none">Flat list</option>
+            <option value="contract">Contract</option>
           </select>
         </div>
+
+        {/* Clear filters */}
+        {(fromDate || toDate || fnFilter || groupBy !== "none") && (
+          <button
+            type="button"
+            onClick={() => setSearchParams({}, { replace: true })}
+            style={{
+              padding: "4px 12px",
+              background: "transparent",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 12,
+              color: "var(--muted)",
+            }}
+          >
+            ✕ Clear filters
+          </button>
+        )}
       </div>
 
+      {/* XLM balance */}
       {xlmBalance && (
         <div className="card">
           <h3 style={{ marginBottom: 4 }}>XLM Balance</h3>
@@ -233,36 +453,48 @@ export default function WalletPage() {
         </div>
       )}
 
+      {/* Wallet token balances */}
       <div className="card">
         <WalletBalances address={address} />
       </div>
 
+      {/* Events section */}
       <div className="card">
-        <div style={{ marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <Chip active={selectedTypes.size === 0} label="All" onClick={clearTypes} />
-          {EVENT_TYPE_CHIPS.map((c) => (
-            <Chip key={c.key} active={selectedTypes.has(c.key)} label={c.label} onClick={() => toggleType(c.key)} />
-          ))}
-        </div>
-
-        {isLoading ? (
+        {walletQuery.isLoading ? (
           <p style={{ color: "var(--muted)" }}>Loading…</p>
-        ) : events.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No Soroban interactions found for this address</p>
+        ) : allEvents.length === 0 ? (
+          /* Empty state (#525) */
+          <div style={{ textAlign: "center", padding: "32px 16px" }}>
+            <p style={{ color: "var(--muted)", marginBottom: 12 }}>
+              No Soroban interactions found for this address.
+            </p>
+            <Link
+              to="/contracts/register"
+              style={{ color: "var(--accent)", fontSize: 14 }}
+            >
+              Register a contract to start seeing decoded events →
+            </Link>
+          </div>
         ) : filtered.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No events match the current filters</p>
-        ) : groups ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            {groups.map(([fn, fnEvents]) => (
-              <div key={fn}>
-                <h3 style={{ fontSize: 14, marginBottom: 8 }}>
-                  {fn} <span style={{ color: "var(--muted)", fontWeight: 400 }}>({fnEvents.length})</span>
-                </h3>
-                <EventTable events={fnEvents} />
-              </div>
-            ))}
+          <p style={{ color: "var(--muted)" }}>No events match the current filters.</p>
+        ) : groupBy === "contract" && contractGroups ? (
+          /* Grouped by contract (#526) */
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {contractGroups.map((entry: [string, DecodedEvent[]], idx: number) => {
+              const [contractId, contractEvents] = entry;
+              return (
+                <ContractSection
+                  key={contractId}
+                  contractId={contractId}
+                  contractMeta={contractMetas[contractId] ?? null}
+                  events={contractEvents}
+                  defaultOpen={totalContracts <= 3 || idx === 0}
+                />
+              );
+            })}
           </div>
         ) : (
+          /* Flat list (#525) */
           <EventTable events={filtered} />
         )}
       </div>
