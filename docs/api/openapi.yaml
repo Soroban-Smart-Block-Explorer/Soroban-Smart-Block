@@ -350,6 +350,45 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/stats:
+    get:
+      summary: Get contract statistics
+      description: >-
+        Returns aggregate statistics for a contract: total events, unique
+        callers, first/last seen ledger, and a 30-day events-per-day series.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: Contract statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractStats"
+        "404":
+          description: Contract not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/contracts/{id}/abi-history:
     get:
       summary: ABI version history for a contract (Issue #517)
@@ -1464,13 +1503,14 @@ components:
 
     FunctionSpec:
       type: object
-      required: [name, description, args]
+      required: [name, args]
       properties:
         name:
           type: string
           example: "transfer"
         description:
           type: string
+          nullable: true
           example: "Transfers tokens between wallets"
         args:
           type: array

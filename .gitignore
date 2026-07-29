@@ -29,9 +29,6 @@ coverage/
 contracts/**/test_snapshots/
 **/test_snapshots/
 
-# Soroban contract test snapshots
-contracts/**/test_snapshots/
-
 # Playwright & e2e artifacts
 e2e/test-results/
 e2e/playwright-report/
@@ -61,9 +58,24 @@ build/
 playwright-report/
 test-results/
 
+# Vitest / jest coverage artifacts
+lcov.info
+*.lcov
+*.coveragerc
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Vite temp build files
+.vite-temp/
+
 # Local AI/agent artifacts
 .kiro/
 update_issues/
 
 # Local planning docs (stay on this machine only)
 plans/
+
+# Jest coverage & cache
+jest_coverage/
+.jest-cache/

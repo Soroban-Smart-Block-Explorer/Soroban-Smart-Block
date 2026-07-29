@@ -631,11 +631,40 @@ export const api = {
     return get<ContractsListResponse>(`/contracts?${q}`);
   },
   /** ABI version history — GET /api/contracts/:id/abi-history */
-  abiHistory: (id: string) => get<AbiHistoryResponse>(`/contracts/${id}/abi-history`),
+  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
   wallet: (address: string) =>
     get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(`/wallet/${address}`),
+
+  /** #527 / #525: wallet event history with optional date-range filter.
+   *  from / to are YYYY-MM-DD strings; omit to fetch all events. */
+  walletHistory: (
+    address: string,
+    params: { from?: string; to?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    const qs = q.toString();
+    return get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(
+      `/wallet/${address}${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  /** #528: Download wallet event history as CSV.
+   *  Triggers a browser file download directly. */
+  exportWalletCsv: (address: string, params: { fn?: string } = {}) => {
+    const q = new URLSearchParams({ format: "csv", wallet: address });
+    if (params.fn) q.set("fn", params.fn);
+    const url = `/api/export/events?${q}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `wallet-${address}-events.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
 
   // NFT collection tokens with optional owner filter and pagination
@@ -914,7 +943,4 @@ export const api = {
       if (!r.ok) throw Object.assign(new Error(data.error ?? `API ${r.status}`), { status: r.status, data });
       return data as { ok: boolean };
     }),
-
-  // Issue #516: ABI version history for a contract
-  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
 };

@@ -5,6 +5,7 @@ import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
+import SkeletonLoader from "../components/SkeletonLoader";
 import { useEventStream } from "../hooks/useEventStream";
 import { useMetaTags } from "../hooks/useMetaTags";
 
@@ -208,7 +209,7 @@ export default function Home() {
       </div>
 
       <div className="card">
-        {isLoading ? <p style={{ color: "var(--muted)" }}>Loading…</p> : <EventTable events={events} />}
+        {isLoading ? <SkeletonLoader /> : <EventTable events={events} />}
       </div>
 
       {/* Pagination */}

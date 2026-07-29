@@ -49,6 +49,25 @@ import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
 import { resolveAsset } from "./horizonClient.js";
+import { createRequire } from "module";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+
+// ── AJV schema validator for POST /api/contracts ──────────────────────────────
+const _require = createRequire(import.meta.url);
+const _contractRegistrySchema = _require("./contractRegistry.schema.json");
+const _ajv = new Ajv({ allErrors: true, strict: false });
+addFormats(_ajv);
+// The POST body uses 'id' instead of 'contractId' — patch the schema for validation
+const _postContractSchema = {
+  ..._contractRegistrySchema,
+  required: _contractRegistrySchema.required.map((k) => (k === "contractId" ? "id" : k)),
+  properties: {
+    ..._contractRegistrySchema.properties,
+    id: _contractRegistrySchema.properties.contractId,
+  },
+};
+const _validateContractPost = _ajv.compile(_postContractSchema);
 
 function requestIdMiddleware(req, _res, next) {
   req.id = req.headers["x-request-id"] || randomUUID();
@@ -696,20 +715,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
-  // GET /api/contracts/:id/stats — event totals, unique callers, and a 30-day
-  // daily trend for the contract stats widget (#536). Cached for 5 minutes.
-  app.get(
-    "/api/contracts/:id/stats",
-    makeCache("contract_stats", (req) => `contracts:stats:${req.params.id}`),
-    async (req, res) => {
-      try {
-        const stats = await db.getContractStats(req.params.id);
-        res.json(stats);
-      } catch (e) {
-        res.status(500).json({ error: e.message });
-      }
-    },
-  );
+
 
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
@@ -776,11 +782,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/contracts  — register ABI metadata
   app.post("/api/contracts", writeLimiter, requireApiKey, async (req, res) => {
     try {
-      const { id, functions } = req.body;
-
-      if (!id || !functions) {
-        return res.status(400).json({ error: "Missing id or functions" });
+      // ── Issue #522: AJV schema validation ────────────────────────────────
+      const valid = _validateContractPost(req.body);
+      if (!valid) {
+        const errors = (_validateContractPost.errors ?? []).map((e) => ({
+          path: e.instancePath || `/${e.params?.missingProperty ?? ""}`,
+          message: e.message ?? "invalid",
+        }));
+        return res.status(400).json({ errors });
       }
+
+      const { id, functions } = req.body;
 
       const existing = await db.getContractMeta(id);
       if (existing) {
@@ -806,8 +818,67 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
 
       await db.upsertContractMeta(req.body);
+      // ── Issue #523: store the registrant's API key ID for ownership checks
+      const keyId = req.rateContext?.keyId ?? null;
+      if (keyId) {
+        await db.query(
+          "UPDATE contracts SET registered_by_key_id = $1 WHERE id = $2",
+          [keyId, id],
+        ).catch(() => {});
+      }
       await cacheInvalidate(`contracts:single:${id}`);
       res.status(201).json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // PATCH /api/contracts/:id  — update ABI metadata (issue #523: ownership check)
+  app.patch("/api/contracts/:id", writeLimiter, async (req, res) => {
+    try {
+      // Must be authenticated
+      const keyId = req.rateContext?.keyId ?? null;
+      if (!keyId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      const contractId = req.params.id;
+      const existing = await db.getContractMeta(contractId);
+      if (!existing) {
+        return res.status(404).json({ error: "Contract not found" });
+      }
+
+      // ── Ownership / admin check ──────────────────────────────────────────
+      // Fetch the stored registered_by_key_id
+      const { rows } = await db.query(
+        "SELECT registered_by_key_id FROM contracts WHERE id = $1",
+        [contractId],
+      );
+      const registeredByKeyId = rows[0]?.registered_by_key_id ?? null;
+
+      // Check if caller is admin (tier = 'enterprise' or static admin key)
+      const isAdmin =
+        req.rateContext?.tier === "enterprise" ||
+        req.rateContext?.clientId === "static-admin-key";
+
+      if (!isAdmin && registeredByKeyId !== null && String(registeredByKeyId) !== String(keyId)) {
+        return res.status(403).json({ error: "Forbidden: you are not the owner of this contract" });
+      }
+
+      // ── Schema validation on the patch payload ───────────────────────────
+      const updateBody = { ...existing, ...req.body, id: contractId };
+      const valid = _validateContractPost(updateBody);
+      if (!valid) {
+        const errors = (_validateContractPost.errors ?? []).map((e) => ({
+          path: e.instancePath || `/${e.params?.missingProperty ?? ""}`,
+          message: e.message ?? "invalid",
+        }));
+        return res.status(400).json({ errors });
+      }
+
+      await db.upsertContractMeta(updateBody);
+      await cacheInvalidate(`contracts:single:${contractId}`);
+      res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1001,14 +1072,22 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // Horizon 404 (unfunded account) or any Horizon failure yields
   // horizon_account: null rather than a 500 — the wallet response never
   // depends on Horizon being reachable.
-  app.get("/api/wallet/:address", async (req, res) => {
+  // Cached for 60s (issue #534) — cache busted by index.js via
+  // cacheInvalidate("wallet:events:*") on new events.
+  app.get(
+    "/api/wallet/:address",
+    makeCache("wallet", (req) => `wallet:events:${req.params.address}`),
+    async (req, res) => {
     try {
       const address = req.params.address;
-      if (!/^G[A-Z2-7]{55}$/.test(address)) {
-        return res.status(400).json({ error: "Invalid wallet address format" });
+      if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
+        return res.status(400).json({ error: `${address} is not a valid Stellar address` });
       }
+      // #527: accept optional from/to date filters (YYYY-MM-DD)
+      const from = req.query.from || undefined;
+      const to = req.query.to || undefined;
       const [eventsResult, horizonResult] = await Promise.allSettled([
-        db.getWalletEvents(address),
+        db.getWalletEvents(address, { from, to }),
         fetchAccountMeta(address),
       ]);
       // A DB failure is a real error (500); a Horizon failure just degrades
@@ -1146,40 +1225,71 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── NFT endpoints ────────────────────────────────────────────────
 
   // GET /api/tokens/:contractId/nfts
+  // Cursor-based (keyset) pagination:
   //   ?owner=<address>  — filter to tokens owned by this address
-  //   &page=<n>         — 1-indexed page number (default 1)
   //   &limit=<n>        — results per page, max 200 (default 50)
+  //   &after=<token_id> — opaque cursor from previous page's `next_cursor`
+  //                       (omit for the first page)
   //
-  // Returns a paginated list of all minted NFT token IDs with their
-  // current owner, on-chain metadata, and last transfer ledger.
+  // Page-based pagination (legacy):
+  //   &page=<n>         — 1-indexed page number (default 1)
+  //
+  // Per issue #650, returns { token_id, owner_address, minted_ledger,
+  // minted_by, last_transfer_ledger } per item with cursor-based navigation.
   app.get("/api/tokens/:contractId/nfts", async (req, res) => {
     try {
       const { contractId } = req.params;
       const owner = req.query.owner || undefined;
-      const page = req.query.page ? Number(req.query.page) : 1;
       const limit = req.query.limit ? Number(req.query.limit) : 50;
 
-      if (isNaN(page) || page < 1) {
-        return res.status(422).json({ error: "Invalid page" });
-      }
+      // Validate limit
       if (isNaN(limit) || limit < 1 || limit > 200) {
         return res.status(422).json({ error: "Invalid limit" });
       }
 
-      const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+      // Validate after (must be a valid numeric string if provided)
+      if (req.query.after !== undefined && (isNaN(Number(req.query.after)) || String(req.query.after).trim() === "")) {
+        return res.status(422).json({ error: "Invalid after" });
+      }
 
-      const totalPages = Math.ceil(total / limit);
-      res.json({
-        contract_id: contractId,
-        tokens,
-        pagination: {
-          page,
+      // Cursor-based pagination (issue #650) — default unless page param is explicitly provided
+      if (req.query.page === undefined) {
+        const after = req.query.after || undefined;
+
+        const { tokens, next_cursor } = await db.getNftTokensCursor(contractId, {
+          owner,
+          after,
           limit,
-          total,
-          total_pages: totalPages,
-          has_next: page < totalPages,
-        },
-      });
+        });
+
+        res.json({
+          contract_id: contractId,
+          tokens,
+          next_cursor,
+        });
+      } else {
+        // Legacy page-based pagination (backward compatible)
+        const page = req.query.page ? Number(req.query.page) : 1;
+
+        if (isNaN(page) || page < 1) {
+          return res.status(422).json({ error: "Invalid page" });
+        }
+
+        const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+
+        const totalPages = Math.ceil(total / limit);
+        res.json({
+          contract_id: contractId,
+          tokens,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: totalPages,
+            has_next: page < totalPages,
+          },
+        });
+      }
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1756,9 +1866,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/setup/db-init — create/upgrade the schema only.
   //
   // INTENTIONALLY MINIMAL (issue #417): this handler must call db.init() and
-  // nothing else. It does NOT seed sample data. The old seed-lib.js helper
+  // nothing else. It does NOT seed sample data. The old seed_lib helper
   // (which generated fake Stellar addresses) was removed during cleanup and must
-  // never be re-introduced here — no static import, no `await import("./seed-lib.js")`.
+  // never be re-introduced here — no static import, no `await import("./seed_lib.js")`.
   // The schema-init test in test/api/setup-db-init.test.js guards this invariant.
   app.post("/api/setup/db-init", blockInProduction, async (req, res) => {
     try {
@@ -1785,16 +1895,13 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   const EVENT_COLUMNS = [
     "seq",
-    "contract_id",
-    "function",
     "ledger",
-    "tx_hash",
+    "contract_id",
+    "contract_name",
+    "function",
     "description",
-    "cpu_instructions",
-    "mem_bytes",
-    "fee_charged",
-    "is_clawback",
-    "is_high_bloat_risk",
+    "tx_hash",
+    "created_at",
   ];
 
   const CONTRACT_COLUMNS = [
@@ -1809,23 +1916,32 @@ export function createApi({ logDestination, dbOverride } = {}) {
     "created_at",
   ];
 
-  // GET /api/export/events?format=csv|json&contract=&fn=&type=&limit=
+  // GET /api/export/events?format=csv|json&contract=&fn=&type=&wallet=&limit=
+  // #528: accepts wallet param to export a single wallet's event history.
   app.get("/api/export/events", async (req, res) => {
     try {
       const format = req.query.format === "json" ? "json" : "csv";
       const limit = Math.min(Number(req.query.limit) || 10000, 10000);
+      const wallet = req.query.wallet || undefined;
       const rows = await db.getEventsForExport({
         contract: req.query.contract,
         fn: req.query.fn,
         type: req.query.type,
+        wallet,
         limit,
       });
       if (format === "json") {
-        res.setHeader("Content-Disposition", 'attachment; filename="events.json"');
+        const filename = wallet
+          ? `wallet-${wallet}-events.json`
+          : "events.json";
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
         res.setHeader("Content-Type", "application/json");
         return res.json(rows);
       }
-      res.setHeader("Content-Disposition", 'attachment; filename="events.csv"');
+      const filename = wallet
+        ? `wallet-${wallet}-events.csv`
+        : "events.csv";
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.setHeader("Content-Type", "text/csv");
       return res.send(rowsToCsv(rows, EVENT_COLUMNS));
     } catch (e) {

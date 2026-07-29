@@ -164,7 +164,7 @@ export const db = {
           cpu_instructions, mem_bytes, fee_charged, is_high_bloat_risk, upgrade_info, storage_tiers, is_clawback,
           footprint_contention, ttl_extension, fee_bump, archival_info, zk_host_calls, abi_version, slippage_bps)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-       ON CONFLICT DO NOTHING`,
+       ON CONFLICT (contract_id, ledger, tx_hash) DO NOTHING`,
       [
         ev.contract_id,
         ev.function,
@@ -304,7 +304,7 @@ export const db = {
   // Each category matches by prefix (e.g. "swap" also matches "swap_exact", "swap_tokens").
   WALLET_EVENT_CATEGORIES: ["transfer", "swap", "mint", "burn", "stake"],
 
-  async getWalletEvents(address, { fn } = {}) {
+  async getWalletEvents(address, { fn, from, to } = {}) {
     const params = [address];
     let categoryClause = "";
 
@@ -336,6 +336,17 @@ export const db = {
       }
     }
 
+    // Date range filter (#527): filter on events.created_at using YYYY-MM-DD strings.
+    let dateClause = "";
+    if (from) {
+      params.push(from);
+      dateClause += ` AND created_at >= $${params.length}::date`;
+    }
+    if (to) {
+      params.push(to);
+      dateClause += ` AND created_at < ($${params.length}::date + interval '1 day')`;
+    }
+
     // Use the GIN full-text index via plainto_tsquery so the query uses the
     // idx_events_search_fts index instead of a full-table raw_topics::text scan.
     const { rows } = await pool.query(
@@ -346,8 +357,9 @@ export const db = {
          coalesce(raw_data, '')
        ) @@ plainto_tsquery('simple', $1)
        ${categoryClause}
+       ${dateClause}
        ORDER BY ledger DESC
-       LIMIT 100`,
+       LIMIT 500`,
       params,
     );
     return rows;
@@ -1038,18 +1050,32 @@ export const db = {
    * @returns {Promise<{ total_events: number, unique_callers: number, first_seen_ledger: number|null, last_seen_ledger: number|null }>}
    */
   async getContractStats(contractId) {
-    const { rows } = await pool.query(
-      `SELECT COUNT(*) AS total_events,
-              COUNT(DISTINCT caller_address) AS unique_callers,
-              MIN(ledger) AS first_seen_ledger,
-              MAX(ledger) AS last_seen_ledger
-       FROM events WHERE contract_id = $1`,
-      [contractId],
-    );
-    const row = rows[0];
+    const [{ rows: totals }, { rows: callerRows }] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::INT AS total_events, MIN(ledger) AS first_seen_ledger, MAX(ledger) AS last_seen_ledger
+         FROM events WHERE contract_id = $1`,
+        [contractId],
+      ),
+      // Unique caller addresses via regexp_matches on description + raw_topics + raw_data
+      pool.query(
+        `SELECT COUNT(DISTINCT a.address)::INT AS unique_callers
+         FROM events e
+         CROSS JOIN LATERAL (
+           SELECT DISTINCT m[1] AS address
+           FROM regexp_matches(
+             coalesce(e.description, '') || ' ' || coalesce(e.raw_topics::text, '') || ' ' || coalesce(e.raw_data, ''),
+             '\\m[GCM][A-Z2-7]{55}\\M',
+             'g'
+           ) AS m
+         ) a
+         WHERE e.contract_id = $1`,
+        [contractId],
+      ),
+    ]);
+    const row = totals[0];
     return {
       total_events: Number(row.total_events),
-      unique_callers: Number(row.unique_callers),
+      unique_callers: Number(callerRows[0].unique_callers),
       first_seen_ledger: row.first_seen_ledger != null ? Number(row.first_seen_ledger) : null,
       last_seen_ledger: row.last_seen_ledger != null ? Number(row.last_seen_ledger) : null,
     };
@@ -1284,8 +1310,8 @@ export const db = {
   // ── NFT token queries ──────────────────────────────────────────────────────
 
   /**
-   * Return all minted NFT tokens for a collection contract, with pagination
-   * and optional owner-address filter.
+   * Return all minted NFT tokens for a collection contract, with page-based
+   * pagination and optional owner-address filter.
    *
    * Each row in token_holders where token_id IS NOT NULL represents one
    * minted NFT. The current owner is the `address` column.
@@ -1332,6 +1358,71 @@ export const db = {
         last_transfer_ledger: r.last_transfer_ledger != null ? Number(r.last_transfer_ledger) : null,
       })),
       total,
+    };
+  },
+
+  /**
+   * Return all minted NFT tokens for a collection contract, with cursor-based
+   * (keyset) pagination via the `after` parameter and optional owner filter.
+   *
+   * Each row in token_holders where token_id IS NOT NULL represents one
+   * minted NFT. Mint metadata (minted_ledger, minted_by) is derived from the
+   * earliest event referencing the token holder.
+   *
+   * @param {string} contractId
+   * @param {{ owner?: string, after?: string, limit?: number }} opts
+   *   after — the last `token_id` from the previous page (opaque cursor).
+   *           Omit for the first page. Sorted by token_id ASC.
+   * @returns {Promise<{ tokens: object[], next_cursor: string|null }>}
+   */
+  async getNftTokensCursor(contractId, { owner, after, limit = 50 } = {}) {
+    const limitN = Math.min(200, Math.max(1, Number(limit) || 50));
+
+    const params = [contractId];
+    let ownerFilter = "";
+    if (owner) {
+      params.push(owner);
+      ownerFilter = `AND th.address = $${params.length}`;
+    }
+
+    let afterFilter = "";
+    if (after) {
+      params.push(after);
+      afterFilter = `AND th.token_id::NUMERIC > $${params.length}`;
+    }
+
+    // Fetch limit+1 to detect whether a next page exists
+    params.push(limitN + 1);
+    const { rows } = await pool.query(
+      `SELECT th.token_id,
+              th.address AS owner_address,
+              th.metadata_json,
+              th.last_transfer_ledger,
+              th.minted_ledger,
+              th.minted_by
+       FROM token_holders th
+       WHERE th.contract_id = $1
+         AND th.token_id IS NOT NULL
+         ${ownerFilter}
+         ${afterFilter}
+       ORDER BY th.token_id::NUMERIC ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+
+    const hasMore = rows.length > limitN;
+    const data = hasMore ? rows.slice(0, limitN) : rows;
+    const next_cursor = hasMore ? String(data[data.length - 1].token_id) : null;
+
+    return {
+      tokens: data.map((r) => ({
+        token_id: r.token_id,
+        owner_address: r.owner_address,
+        minted_ledger: r.minted_ledger != null ? Number(r.minted_ledger) : null,
+        minted_by: r.minted_by,
+        last_transfer_ledger: r.last_transfer_ledger != null ? Number(r.last_transfer_ledger) : null,
+      })),
+      next_cursor,
     };
   },
 
@@ -1439,7 +1530,8 @@ export const db = {
   },
 
   // data export — events (CSV/JSON)
-  async getEventsForExport({ contract, fn, type, limit = 10000 } = {}) {
+  // #528: accepts optional wallet address to filter events by address mention.
+  async getEventsForExport({ contract, fn, type, wallet, limit = 10000 } = {}) {
     const conditions = [];
     const params = [];
     if (contract) {
@@ -1456,12 +1548,25 @@ export const db = {
     if (type === "classic") {
       conditions.push(`(contract_id IS NULL OR contract_id = '')`);
     }
+    // #528: filter by wallet address — look for the address in description/topics/data
+    if (wallet) {
+      params.push(wallet);
+      conditions.push(
+        `to_tsvector('simple',
+           coalesce(description, '') || ' ' ||
+           coalesce(raw_topics::text, '') || ' ' ||
+           coalesce(raw_data, '')
+         ) @@ plainto_tsquery('simple', $${params.length})`,
+      );
+    }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(Math.min(limit, 10000));
     const { rows } = await pool.query(
-      `SELECT seq, contract_id, function, ledger, tx_hash, description,
-              cpu_instructions, mem_bytes, fee_charged, is_clawback, is_high_bloat_risk
-       FROM events ${where} ORDER BY seq DESC LIMIT $${params.length}`,
+      `SELECT e.seq, e.contract_id, c.name AS contract_name, e.function,
+              e.ledger, e.tx_hash, e.description, e.created_at
+       FROM events e
+       LEFT JOIN contracts c ON c.id = e.contract_id
+       ${where} ORDER BY e.seq DESC LIMIT $${params.length}`,
       params,
     );
     return rows;
