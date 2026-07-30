@@ -5,7 +5,9 @@ import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
+import SkeletonLoader from "../components/SkeletonLoader";
 import { useEventStream } from "../hooks/useEventStream";
+import { useMetaTags } from "../hooks/useMetaTags";
 
 const FUNCTIONS = ["", "swap", "transfer", "mint", "burn", "stake", "unstake", "wrap_native", "unwrap_native"];
 
@@ -41,6 +43,11 @@ const TYPE_LABELS: { key: TxType; label: string; title: string }[] = [
 ];
 
 export default function Home() {
+  useMetaTags({
+    title: "Soroban Smart Block Explorer — Decode Stellar contract events",
+    description: "Soroban Smart Block Explorer — Decode Stellar contract events",
+  });
+
   const [searchParams] = useSearchParams();
   const contractParam = searchParams.get("contract") ?? "";
 
@@ -202,7 +209,7 @@ export default function Home() {
       </div>
 
       <div className="card">
-        {isLoading ? <p style={{ color: "var(--muted)" }}>Loading…</p> : <EventTable events={events} />}
+        {isLoading ? <SkeletonLoader /> : <EventTable events={events} />}
       </div>
 
       {/* Pagination */}

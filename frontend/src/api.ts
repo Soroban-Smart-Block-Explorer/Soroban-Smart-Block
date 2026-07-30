@@ -1,4 +1,5 @@
 import { BatchCall } from "./types/batch";
+import { getCsrfToken, refreshCsrfToken } from "./hooks/useCsrf";
 
 const BASE = "/api";
 
@@ -325,6 +326,49 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+/**
+ * Wrapper for state-changing fetch calls (POST / PATCH / DELETE).
+ *
+ * Automatically attaches the X-CSRF-Token header from the cached token.
+ * On a 403 CSRF mismatch, refreshes the token once and retries the request
+ * before propagating the error.
+ */
+async function mutationFetch(
+  url: string,
+  options: RequestInit & { headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const buildHeaders = (token: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...options.headers,
+    ...(token ? { "X-CSRF-Token": token } : {}),
+  });
+
+  const res = await fetch(url, {
+    credentials: "include",
+    ...options,
+    headers: buildHeaders(getCsrfToken()),
+  });
+
+  // On CSRF mismatch refresh the token and retry exactly once.
+  if (res.status === 403) {
+    let body: { error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    if (
+      body.error === "CSRF token missing" ||
+      body.error === "CSRF token mismatch"
+    ) {
+      await refreshCsrfToken();
+      return fetch(url, {
+        credentials: "include",
+        ...options,
+        headers: buildHeaders(getCsrfToken()),
+      });
+    }
+  }
+
+  return res;
+}
+
 // Resolved classic asset metadata (GET /api/assets/:issuer/:code)
 export interface AssetInfo {
   code: string;
@@ -631,11 +675,40 @@ export const api = {
     return get<ContractsListResponse>(`/contracts?${q}`);
   },
   /** ABI version history — GET /api/contracts/:id/abi-history */
-  abiHistory: (id: string) => get<AbiHistoryResponse>(`/contracts/${id}/abi-history`),
+  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
   wallet: (address: string) =>
     get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(`/wallet/${address}`),
+
+  /** #527 / #525: wallet event history with optional date-range filter.
+   *  from / to are YYYY-MM-DD strings; omit to fetch all events. */
+  walletHistory: (
+    address: string,
+    params: { from?: string; to?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    const qs = q.toString();
+    return get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(
+      `/wallet/${address}${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  /** #528: Download wallet event history as CSV.
+   *  Triggers a browser file download directly. */
+  exportWalletCsv: (address: string, params: { fn?: string } = {}) => {
+    const q = new URLSearchParams({ format: "csv", wallet: address });
+    if (params.fn) q.set("fn", params.fn);
+    const url = `/api/export/events?${q}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `wallet-${address}-events.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
 
   // NFT collection tokens with optional owner filter and pagination
@@ -709,9 +782,8 @@ export const api = {
       compiler_hash: string;
     },
   ) =>
-    fetch(`${BASE}/contracts/${id}/source-verifications`, {
+    mutationFetch(`${BASE}/contracts/${id}/source-verifications`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then((r) => {
       if (!r.ok) throw new Error(`API ${r.status}`);
@@ -754,27 +826,23 @@ export const api = {
 
   // Batch Multi-Call endpoints
   batchSimulate: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/simulate`, {
+    mutationFetch(`${BASE}/batch/simulate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchEstimateGas: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/estimate-gas`, {
+    mutationFetch(`${BASE}/batch/estimate-gas`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchOptimize: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/optimize`, {
+    mutationFetch(`${BASE}/batch/optimize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchValidate: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/validate`, {
+    mutationFetch(`${BASE}/batch/validate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
 
@@ -905,16 +973,12 @@ export const api = {
     functions: { name: string; description: string; params: { name: string; kind: string }[] }[];
     registered_by: string;
   }) =>
-    fetch(`${BASE}/contracts`, {
+    mutationFetch(`${BASE}/contracts`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(async (r) => {
       const data = await r.json();
       if (!r.ok) throw Object.assign(new Error(data.error ?? `API ${r.status}`), { status: r.status, data });
       return data as { ok: boolean };
     }),
-
-  // Issue #516: ABI version history for a contract
-  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
 };

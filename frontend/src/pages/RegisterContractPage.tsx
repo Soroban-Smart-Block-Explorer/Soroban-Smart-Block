@@ -98,8 +98,14 @@ export default function RegisterContractPage() {
     try {
       await api.registerContract(payload);
       showToast("success", `Contract ${contractId} registered successfully!`);
-      // Navigate to the contract detail page after brief toast
-      setTimeout(() => navigate(`/contract/${contractId}`), 1200);
+      // Navigate to the success page with contract ID and name in URL
+      setTimeout(
+        () =>
+          navigate(
+            `/contracts/register/success?id=${encodeURIComponent(contractId)}&name=${encodeURIComponent(name.trim())}`,
+          ),
+        800,
+      );
     } catch (err: unknown) {
       const apiErr = err as { status?: number; data?: { error?: string }; message?: string };
       if (apiErr.status === 409) {
@@ -134,6 +140,15 @@ export default function RegisterContractPage() {
         <h1 style={{ fontSize: 22, marginBottom: 4 }}>Register Contract ABI</h1>
         <p style={{ color: "var(--muted)" }}>
           Add your Soroban contract's ABI so that events can be decoded into human-readable form.
+          New to this?{" "}
+          <a
+            href="https://github.com/Soroban-Smart-Block-Explorer/Soroban-Smart-Block/blob/main/docs/guides/register-abi.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Read the ABI registration guide
+          </a>
+          .
         </p>
       </div>
 
