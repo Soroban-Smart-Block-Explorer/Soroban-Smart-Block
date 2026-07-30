@@ -4,7 +4,7 @@
   "title": "Community Contract Registry Entry",
   "description": "Schema for manually submitted Soroban contract metadata and custom ABI interpretations.",
   "type": "object",
-  "required": ["contractId", "name"],
+  "required": ["contractId", "name", "functions"],
   "additionalProperties": false,
   "properties": {
     "contractId": {

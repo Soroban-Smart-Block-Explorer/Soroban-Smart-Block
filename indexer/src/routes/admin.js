@@ -48,6 +48,7 @@ const AUDIT_LOG_COLUMNS = [
   'response_time_ms',
   'rate_limit_remaining',
   'user_agent',
+  'request_body_hash',
 ];
 
 const EVENT_COLUMNS = [
@@ -383,7 +384,8 @@ export default function registerAdminRoutes(app) {
 
       const { rows } = await pool.query(
         `SELECT id, timestamp, api_key_id, key_name, tier, ip, method,
-                endpoint, status_code, response_time_ms, rate_limit_remaining, user_agent
+                endpoint, status_code, response_time_ms, rate_limit_remaining,
+                user_agent, request_body_hash
          FROM api_audit_log
          ${where}
          ORDER BY timestamp DESC
@@ -448,7 +450,8 @@ export default function registerAdminRoutes(app) {
 
       const { rows } = await pool.query(
         `SELECT id, timestamp, api_key_id, key_name, tier, ip, method,
-                endpoint, status_code, response_time_ms, rate_limit_remaining, user_agent
+                endpoint, status_code, response_time_ms, rate_limit_remaining,
+                user_agent, request_body_hash
          FROM api_audit_log
          ${where}
          ORDER BY timestamp DESC

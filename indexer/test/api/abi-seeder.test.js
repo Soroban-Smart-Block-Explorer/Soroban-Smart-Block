@@ -4,6 +4,8 @@
 
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
 process.env.DATABASE_URL = DB_URL;
+process.env.STELLARSWAP_CONTRACT_ID = "CBPTPOUUYZGYANHS3R2HWXSEYD34ND65G6VOMP2EZ73XVL5LGRVCV3YN";
+process.env.BLEND_CONTRACT_ID = "CCCUGABBMNVF6IRDXAW5KFGHGIR2VWXE2W4ICA2V3VGHROUX45O54P2V";
 
 const { db } = await import("../../src/db.js");
 const { seedBuiltinAbis } = await import("../../src/abiSeeder.js");
