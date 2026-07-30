@@ -6,6 +6,7 @@ import type { ContractMeta, DecodedEvent } from "../api";
 import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
 import AssetLogo from "./AssetLogo";
+import CopyableAddress from "./CopyableAddress";
 import { getGasAlert } from "./GasLimitAlert";
 import ProtocolBadge from "./ProtocolBadge";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
@@ -15,7 +16,7 @@ const ADDRESS_RE = /\b([GCM][A-Z2-7]{55,})\b/g;
 
 /**
  * Render a description string with any Stellar addresses (G..., C..., M...)
- * replaced by clickable <Link> elements.
+ * replaced by clickable <Link> elements with copy-to-clipboard functionality.
  * M... muxed addresses link to the base G... wallet page via addressRoute().
  */
 function LinkedDescription({ text }: { text: string }) {
@@ -31,14 +32,12 @@ function LinkedDescription({ text }: { text: string }) {
     if (route) {
       parts.push(
         <Link key={match.index} to={route} title={addr}>
-          {truncateAddress(addr)}
+          <CopyableAddress fullValue={addr} displayValue={truncateAddress(addr)} />
         </Link>,
       );
     } else {
       parts.push(
-        <span key={match.index} title={addr}>
-          {truncateAddress(addr)}
-        </span>,
+        <CopyableAddress key={match.index} fullValue={addr} displayValue={truncateAddress(addr)} />,
       );
     }
     last = match.index + match[0].length;
@@ -202,7 +201,9 @@ function ContractCell({ contractId, meta }: { contractId: string; meta?: Contrac
   if (!contractId) return <span style={{ color: "var(--muted)" }}>—</span>;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-      <Link to={`/contract/${contractId}`}>{meta?.name || truncateAddress(contractId)}</Link>
+      <Link to={`/contract/${contractId}`}>
+        <CopyableAddress fullValue={contractId} displayValue={meta?.name || truncateAddress(contractId)} />
+      </Link>
       <ProtocolBadge type={meta?.protocol_type} />
     </span>
   );

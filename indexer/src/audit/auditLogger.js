@@ -14,6 +14,7 @@
  *     month's partition and drops partitions older than 90 days.
  */
 
+import crypto from 'crypto';
 import cron from 'node-cron';
 import { pool } from '../db.js';
 
@@ -52,8 +53,8 @@ async function _flushQueue() {
   try {
     // Build a multi-row VALUES clause.
     const valuePlaceholders = batch.map((_, i) => {
-      const base = i * 11;
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}::INET, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`;
+      const base = i * 12;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}::INET, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12})`;
     });
 
     const params = batch.flatMap((e) => [
@@ -68,12 +69,14 @@ async function _flushQueue() {
       e.response_time_ms ?? 0,
       e.rate_limit_remaining ?? null,
       e.user_agent ?? null,
+      e.request_body_hash ?? null,
     ]);
 
     await pool.query(
       `INSERT INTO api_audit_log
          (timestamp, api_key_id, key_name, tier, ip, method, endpoint,
-          status_code, response_time_ms, rate_limit_remaining, user_agent)
+          status_code, response_time_ms, rate_limit_remaining, user_agent,
+          request_body_hash)
        VALUES ${valuePlaceholders.join(', ')}`,
       params,
     );
@@ -122,6 +125,16 @@ function auditLoggerMiddleware(req, res, next) {
         ? String(forwarded).split(',')[0].trim()
         : req.socket?.remoteAddress ?? '0.0.0.0';
 
+      let request_body_hash = null;
+      if (req.body && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+        try {
+          const bodyStr = JSON.stringify(req.body);
+          request_body_hash = crypto.createHash('sha256').update(bodyStr).digest('hex');
+        } catch {
+          // Non-serializable body — leave hash as null
+        }
+      }
+
       createAuditLogEntry({
         timestamp: new Date(),
         api_key_id: req.rateContext?.keyId ?? null,
@@ -134,6 +147,7 @@ function auditLoggerMiddleware(req, res, next) {
         response_time_ms: Date.now() - req._startTime,
         rate_limit_remaining: req.rateLimitState?.remaining ?? null,
         user_agent: req.headers['user-agent'] ?? null,
+        request_body_hash,
       });
     } catch (err) {
       // Never let audit logging affect the request lifecycle.

@@ -59,9 +59,14 @@ function AssetLogo({ code, issuer }: { code: string; issuer: string | null }) {
 export default function WalletBalances({ address }: Props) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["walletBalances", address],
-    queryFn: () => api.walletBalances(address),
+    queryFn: () => api.wallet(address).then((r) => r.horizon_account?.balances ?? []),
     enabled: !!address,
     retry: false,
+    select: (balances) => ({
+      balances,
+      xlm: balances.find((b) => b.asset_type === "native"),
+      assets: balances.filter((b) => b.asset_type !== "native"),
+    }),
   });
 
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Loading balances…</p>;
@@ -74,15 +79,15 @@ export default function WalletBalances({ address }: Props) {
     );
   }
 
-  const balances = data?.balances ?? [];
-  const xlm = balances.find((b) => b.is_native);
-  const assets = balances.filter((b) => !b.is_native);
+  const xlm = data?.xlm ?? null;
+  const assets = data?.assets ?? [];
+  const xlmBalance = xlm?.balance ?? "0";
 
   return (
     <div>
       <div style={{ fontSize: 13, color: "var(--muted)" }}>XLM Balance</div>
       <div style={{ fontSize: 30, fontWeight: 700, marginTop: 2 }}>
-        {xlm ? formatAmount(xlm.balance) : "0"} <span style={{ fontSize: 15, color: "var(--muted)" }}>XLM</span>
+        {formatAmount(xlmBalance)} <span style={{ fontSize: 15, color: "var(--muted)" }}>XLM</span>
       </div>
 
       {assets.length > 0 && (
@@ -100,11 +105,10 @@ export default function WalletBalances({ address }: Props) {
                 <tr key={`${b.asset_code}:${b.asset_issuer}`} style={{ borderBottom: "1px solid var(--border)" }}>
                   <td style={{ padding: "6px 8px" }}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                      <AssetLogo code={b.asset_code} issuer={b.asset_issuer} />
+                      <AssetLogo code={b.asset_code ?? ""} issuer={b.asset_issuer ?? null} />
                       {b.asset_code}
                     </span>
-                  </td>
-                  <td style={{ padding: "6px 8px", fontSize: 12, color: "var(--muted)" }} title={b.asset_issuer ?? undefined}>
+                  </td>                    <td style={{ padding: "6px 8px", fontSize: 12, color: "var(--muted)" }} title={b.asset_issuer ?? ""}>
                     {b.asset_issuer ? truncateAddress(b.asset_issuer) : "—"}
                   </td>
                   <td style={{ padding: "6px 8px", textAlign: "right" }}>{formatAmount(b.balance)}</td>
