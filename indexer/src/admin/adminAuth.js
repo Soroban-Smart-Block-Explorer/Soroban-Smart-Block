@@ -9,6 +9,7 @@
  */
 
 import crypto from 'crypto';
+import { getClientIp, ipInCidrList } from './ipUtils.js';
 
 /**
  * Express middleware that enforces admin authentication via a Bearer token.
@@ -24,6 +25,17 @@ function adminAuthMiddleware(req, res, next) {
   // If ADMIN_SECRET is not configured, block all admin access.
   if (!adminSecret) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // Optional IP allowlist: if set, enforce it BEFORE checking the token so
+  // that disallowed IPs receive 403 even without a valid auth header.
+  const allowlist = process.env.ADMIN_IP_ALLOWLIST;
+  if (allowlist) {
+    const cidrs = allowlist.split(',').map((s) => s.trim()).filter(Boolean);
+    const clientIp = getClientIp(req);
+    if (!ipInCidrList(clientIp, cidrs)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
   }
 
   const authHeader = req.headers['authorization'];

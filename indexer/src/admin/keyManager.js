@@ -260,25 +260,81 @@ async function deleteKey(id) {
 async function rotateKey(id) {
   if (!id) throw new Error('id is required');
 
-  const rawKey = generateRawKey();
-  const keyPrefix = rawKey.slice(0, 8);
-  const keyHash = await bcrypt.hash(rawKey, BCRYPT_COST);
+  // Grace window length (minutes) — default 60. Parse as integer and
+  // coerce to >= 0. If 0, rotation_grace_until will be now (immediate expiry).
+  const graceMinutes = Math.max(0, Number.parseInt(process.env.KEY_ROTATION_GRACE_MINUTES ?? '60', 10) || 0);
 
-  const { rows } = await pool.query(
-    `UPDATE api_keys
-     SET key_hash = $1, key_prefix = $2, updated_at = NOW()
-     WHERE id = $3
-     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
-               allowed_ips, allowed_endpoints, expires_at,
-               revoked, last_used_at, usage_count, created_at, updated_at`,
-    [keyHash, keyPrefix, id],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (rows.length === 0) {
-    throw new Error(`API key not found: ${id}`);
+    // Load the existing record to copy metadata.
+    const { rows: existingRows } = await client.query(
+      `SELECT name, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified
+       FROM api_keys WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+
+    if (existingRows.length === 0) {
+      await client.query('ROLLBACK');
+      throw new Error(`API key not found: ${id}`);
+    }
+
+    const existing = existingRows[0];
+
+    // Generate new key material and insert a new row with the same metadata.
+    const rawKey = generateRawKey();
+    const keyPrefix = rawKey.slice(0, 8);
+    const keyHash = await bcrypt.hash(rawKey, BCRYPT_COST);
+
+    const { rows: insertRows } = await client.query(
+      `INSERT INTO api_keys
+         (name, key_hash, key_prefix, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
+                 allowed_ips, allowed_endpoints, expires_at,
+                 revoked, last_used_at, usage_count, created_at, updated_at`,
+      [
+        existing.name,
+        keyHash,
+        keyPrefix,
+        existing.tier,
+        existing.rate_limit ?? null,
+        existing.daily_limit ?? null,
+        existing.allowed_ips ?? null,
+        existing.allowed_endpoints ?? null,
+        existing.expires_at ?? null,
+        existing.verified ?? null,
+      ],
+    );
+
+    // Compute rotation_grace_until timestamp (ISO string) or null.
+    const rotationGraceUntil = new Date(Date.now() + graceMinutes * 60_000).toISOString();
+
+    // Mark the old row as revoked and set rotation timestamps.
+    await client.query(
+      `UPDATE api_keys
+       SET revoked = TRUE,
+           rotated_at = NOW(),
+           rotation_grace_until = $1,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [rotationGraceUntil, id],
+    );
+
+    await client.query('COMMIT');
+
+    return { key: rawKey, record: stripKeyHash(insertRows[0]) };
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    throw e;
+  } finally {
+    client.release();
   }
-
-  return { key: rawKey, record: stripKeyHash(rows[0]) };
 }
 
 // ── getKeyUsage ───────────────────────────────────────────────────────────────
