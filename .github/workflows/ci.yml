@@ -230,8 +230,11 @@ jobs:
             exit 1
           fi
 
-      - name: Validate OpenAPI spec
+      - name: Validate OpenAPI spec (swagger-cli)
         run: npx -y @apidevtools/swagger-cli validate docs/api/openapi.yaml
+
+      - name: Validate OpenAPI spec (redocly lint)
+        run: npx -y @redocly/cli lint docs/api/openapi.yaml --format=stylish
 
       - name: Indexer tests
         run: npm test -- --coverage --coverageReporters=lcov
