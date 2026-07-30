@@ -2,7 +2,57 @@ openapi: "3.1.0"
 info:
   title: Soroban Smart Block Explorer API
   version: "0.1.0"
-  description: Human-readable Soroban contract event explorer for the Stellar blockchain.
+  description: |
+    Human-readable Soroban contract event explorer for the Stellar blockchain.
+
+    ## Rate Limiting
+
+    Every response includes the following headers regardless of status code:
+
+    | Header | Description |
+    |---|---|
+    | `X-RateLimit-Limit` | Maximum requests allowed in the current window for the active tier and endpoint group |
+    | `X-RateLimit-Remaining` | Tokens remaining in the current window |
+    | `X-RateLimit-Reset` | Unix timestamp (seconds) when the current window resets |
+    | `X-RateLimit-Tier` | Active tier name (`unauthenticated`, `free`, `pro`, `enterprise`) |
+
+    Additionally, **429 responses** include:
+
+    | Header | Description |
+    |---|---|
+    | `Retry-After` | Seconds to wait before retrying |
+
+    ### Rate limit tiers
+
+    Requests are identified by the `x-api-key` header (authenticated) or by
+    a hashed client IP (unauthenticated). The following sustained requests-per-minute
+    (rpm) limits apply per endpoint group:
+
+    | Endpoint group | unauthenticated | free | pro | enterprise |
+    |---|---|---|---|---|
+    | `/api/events*` | 60 rpm | 1 000 rpm | 10 000 rpm | configurable |
+    | `/api/search*`, `/api/wallet*` | 30 rpm | 500 rpm | 5 000 rpm | configurable |
+    | `/api/contracts*`, `/api/spec*`, `/api/verify*` | 10 rpm | 100 rpm | 1 000 rpm | configurable |
+    | `/api/simulate*`, `/api/sandbox/simulate*` | 5 rpm | 50 rpm | 500 rpm | configurable |
+    | WebSocket (`/ws*`, `/api/ws*`) | 3 rpm | 30 rpm | 300 rpm | configurable |
+    | Everything else | 60 rpm | 1 000 rpm | 10 000 rpm | configurable |
+
+    Burst allowances (extra tokens above the sustained rate):
+    `unauthenticated` = 10 · `free` = 50 · `pro` = 200 · `enterprise` = 500
+
+    ## CSRF Protection
+
+    All state-changing requests (POST / PATCH / DELETE) from browser clients require a
+    valid CSRF token following the **double-submit cookie** pattern:
+
+    1. Call `GET /api/csrf-token` to receive the token in the response body and
+       as an `HttpOnly` cookie.
+    2. Include the token value in the `X-CSRF-Token` request header on every
+       POST / PATCH / DELETE.
+
+    **Exemptions:** requests that include a valid `x-api-key` header (machine-to-machine)
+    and WebSocket upgrade requests are exempt from CSRF verification.
+
 
 servers:
   - url: http://localhost:3001
@@ -117,6 +167,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReadinessStatus"
 
+  /api/csrf-token:
+    get:
+      summary: Issue a CSRF token (Issue #613)
+      security: []
+      description: |
+        Generates a cryptographically random CSRF token, sets it as an `HttpOnly`
+        `csrf-token` cookie, and returns the same value in the response body.
+
+        The frontend must:
+        1. Call this endpoint once on app initialisation.
+        2. Store the `csrfToken` value from the body.
+        3. Include it as the `X-CSRF-Token` header on every POST / PATCH / DELETE request.
+
+        The cookie and header are compared server-side with a constant-time comparison.
+        The cookie is re-used when it is already present and valid, so multiple calls
+        are safe (they return the same token).
+      responses:
+        "200":
+          description: CSRF token issued and set as HttpOnly cookie
+          headers:
+            Set-Cookie:
+              description: |
+                `csrf-token=<hex64>; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`
+                (SameSite is Lax in non-production environments)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [csrfToken]
+                properties:
+                  csrfToken:
+                    type: string
+                    description: 64-character hex CSRF token to attach as X-CSRF-Token header
+                    example: "a3f9e2b1c8d74e5f6a7b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f"
+
   /api/events:
     get:
       summary: List contract events (keyset pagination)
@@ -170,6 +257,15 @@ paths:
       responses:
         "200":
           description: Paginated events with next_cursor
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
           content:
             application/json:
               schema:
@@ -187,7 +283,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
-          description: Too many requests
+          description: Too many requests — back off for Retry-After seconds
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
           content:
             application/json:
               schema:
@@ -586,7 +693,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
     post:
       summary: Register contract ABI metadata
-      description: Registers metadata for a new contract ID. Requires API key authentication.
+      description: |
+        Registers metadata for a new contract ID. Requires API key authentication.
+
+        **Browser clients** must also include the `X-CSRF-Token` header obtained
+        from `GET /api/csrf-token`. Machine-to-machine callers that supply a
+        valid `x-api-key` header are exempt from CSRF verification.
       security:
         - ApiKeyAuth: []
         - BearerAuth: []
@@ -613,6 +725,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: CSRF token missing or mismatch (browser clients without x-api-key)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missing:
+                  value: { "error": "CSRF token missing" }
+                mismatch:
+                  value: { "error": "CSRF token mismatch" }
         "409":
           description: Contract already exists
           content:
@@ -627,6 +750,9 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Too many requests
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
           content:
             application/json:
               schema:
@@ -1594,3 +1720,40 @@ components:
           type: string
           nullable: true
           example: "centre.io"
+
+  headers:
+    X-RateLimit-Limit:
+      description: >-
+        Maximum requests allowed in the current window for the active tier
+        and endpoint group (sustained rpm).
+      schema:
+        type: integer
+        example: 60
+    X-RateLimit-Remaining:
+      description: >-
+        Tokens remaining in the current window. Always ≥ 0.
+      schema:
+        type: integer
+        example: 42
+    X-RateLimit-Reset:
+      description: >-
+        Unix timestamp (seconds since epoch) when the current rate-limit window
+        resets and the bucket is replenished.
+      schema:
+        type: integer
+        format: int64
+        example: 1722211200
+    X-RateLimit-Tier:
+      description: >-
+        Active rate-limit tier for this request.
+        One of: `unauthenticated`, `free`, `pro`, `enterprise`.
+      schema:
+        type: string
+        enum: [unauthenticated, free, pro, enterprise]
+        example: "free"
+    Retry-After:
+      description: >-
+        Number of seconds to wait before retrying. Only present on 429 responses.
+      schema:
+        type: integer
+        example: 5

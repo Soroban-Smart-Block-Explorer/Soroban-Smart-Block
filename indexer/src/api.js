@@ -27,6 +27,7 @@ import { rateLimitHeaderWriter } from "./rateLimit/headers.js";
 import { auditLoggerMiddleware } from "./audit/auditLogger.js";
 import registerAdminRoutes from "./routes/admin.js";
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
+import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
 import {
   cacheInvalidate,
   cacheGet,
@@ -204,7 +205,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   const corsOptionsDelegate = (req, callback) => {
     const corsOptions = {
       methods: ['GET', 'POST', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-API-Key', 'X-CSRF-Token'],
       maxAge: 86400,
     };
 
@@ -231,6 +232,18 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.use(requestIdMiddleware);
   app.use(createHttpLogger(logDestination));
   app.use(metricsMiddleware);
+
+  // ── CSRF token endpoint ────────────────────────────────────────────────────
+  // Must be registered BEFORE verifyCsrf so it is exempt from CSRF checking
+  // (it is what issues the token in the first place).
+  app.get("/api/csrf-token", csrfTokenHandler);
+
+  // ── CSRF verification — applied globally to all state-changing methods ─────
+  // Exemptions (handled inside verifyCsrf):
+  //   • x-api-key header present (machine-to-machine)
+  //   • WebSocket upgrade requests
+  //   • GET / HEAD / OPTIONS (safe methods)
+  app.use(verifyCsrf);
 
   // ── Auth & Rate Limiting Middleware Stack ─────────────────────────────────
   // Order matters: audit logger sets _startTime first, then auth resolves tier,
