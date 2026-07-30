@@ -77,6 +77,15 @@ export const cacheMissTotal = new Counter({
   registers: [registry],
 });
 
+/** Histogram of HTTP request durations in seconds with labels. */
+export const apiRequestDuration = new Histogram({
+  name: "api_request_duration_seconds",
+  help: "HTTP request duration in seconds",
+  labelNames: ["method", "route", "status"],
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.3, 1, 2, 5],
+  registers: [registry],
+});
+
 /**
  * Update DB pool gauges from a pg.Pool instance.
  * Call this periodically (e.g. every 15 s).
