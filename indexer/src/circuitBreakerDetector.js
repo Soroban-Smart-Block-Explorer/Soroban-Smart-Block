@@ -25,11 +25,11 @@ export function hasCircuitBreaker(meta) {
  * Looks for pause/unpause events to determine current state.
  *
  * @param {array} events - Array of decoded events for the contract
- * @returns {object} - { isPaused: boolean, lastStatusChange: number|null, reason?: string }
+ * @returns {object} - { isPaused: boolean, lastStatusChange: number|null, txHash?: string|null, reason?: string }
  */
 export function determinePauseStatus(events) {
   if (!events || events.length === 0) {
-    return { isPaused: false, lastStatusChange: null };
+    return { isPaused: false, lastStatusChange: null, txHash: null };
   }
 
   // Sort events by ledger descending to find most recent status change
@@ -42,6 +42,7 @@ export function determinePauseStatus(events) {
       return {
         isPaused: true,
         lastStatusChange: event.ledger,
+        txHash: event.tx_hash ?? null,
         reason: event.description,
       };
     }
@@ -50,12 +51,13 @@ export function determinePauseStatus(events) {
       return {
         isPaused: false,
         lastStatusChange: event.ledger,
+        txHash: event.tx_hash ?? null,
         reason: event.description,
       };
     }
   }
 
-  return { isPaused: false, lastStatusChange: null };
+  return { isPaused: false, lastStatusChange: null, txHash: null };
 }
 
 /**

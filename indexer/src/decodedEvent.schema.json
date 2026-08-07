@@ -9,8 +9,7 @@
   "properties": {
     "contract_id": {
       "type": "string",
-      "description": "Contract identifier.",
-      "minLength": 1
+      "description": "Contract identifier. Empty string for classic (non-Soroban) events."
     },
     "function": {
       "type": "string",
@@ -94,21 +93,15 @@
       "type": "integer",
       "minimum": 0
     },
-    "decoded": {
-      "type": "boolean",
-      "description": "Whether the event was successfully decoded by a known ABI."
+    "slippage_bps": {
+      "type": "integer",
+      "description": "DEX swap slippage in basis points: |amount_out - min_amount_out| / min_amount_out * 10000.",
+      "minimum": 0
     },
-    "is_failed": {
-      "type": "boolean",
-      "description": "Whether the originating transaction failed."
-    },
-    "failure_reason": {
-      "type": ["string", "null"],
-      "description": "Human-readable failure reason from the failed transaction."
-    },
-    "batch_description": {
-      "type": ["string", "null"],
-      "description": "Aggregate description when multiple events share the same tx_hash."
+    "type": {
+      "type": "string",
+      "description": "Event category — \"classic\" for Horizon payment/path-payment operations, omitted for Soroban contract events.",
+      "enum": ["classic"]
     }
   }
 }

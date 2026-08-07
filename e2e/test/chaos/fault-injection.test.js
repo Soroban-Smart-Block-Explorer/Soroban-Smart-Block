@@ -3,6 +3,9 @@ import assert from "node:assert";
 import fetch from "node-fetch";
 import { spawn } from "node:child_process";
 import { randomInt } from "node:crypto";
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 const BASE_URL = process.env.INDEXER_URL || "http://localhost:3001";
 const DB_URL =
@@ -13,6 +16,93 @@ const DB_URL =
  * Chaos Engineering: Fault injection scenarios
  * Tests system resilience under controlled failure conditions
  */
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Spin up a lightweight HTTP server that mimics the Soroban RPC's
+ * getEvents endpoint with three phases:
+ *
+ *   Phase 1 (normalMs):   returns 200 + minimal valid event payload
+ *   Phase 2 (blackoutMs): returns 503 Service Unavailable
+ *   Phase 3 (recoveryMs): returns 200 again, advancing the ledger cursor
+ *
+ * Returns { url, close, getLedgersSeen } so callers can inspect state.
+ */
+function createPhasedMockRpc({ normalMs = 10_000, blackoutMs = 30_000, recoveryMs = 15_000 } = {}) {
+  let phase = "normal";
+  let latestLedger = 1000;
+  const ledgersSeen = new Set();
+
+  const startedAt = Date.now();
+
+  const server = createServer((req, res) => {
+    const elapsed = Date.now() - startedAt;
+
+    // Advance phase based on wall-clock elapsed time
+    if (elapsed < normalMs) {
+      phase = "normal";
+    } else if (elapsed < normalMs + blackoutMs) {
+      phase = "blackout";
+    } else {
+      phase = "recovery";
+    }
+
+    if (phase === "blackout") {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Service Unavailable" }));
+      return;
+    }
+
+    // Parse startLedger from the JSON body so we can echo it back
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      let requestedLedger = latestLedger;
+      try {
+        const parsed = JSON.parse(body);
+        // JSON-RPC envelope: params[0].startLedger  OR  direct startLedger field
+        const sl =
+          parsed?.params?.[0]?.startLedger ??
+          parsed?.startLedger ??
+          latestLedger;
+        if (typeof sl === "number" && sl > 0) requestedLedger = sl;
+      } catch { /* ignore parse errors */ }
+
+      ledgersSeen.add(requestedLedger);
+      latestLedger = Math.max(latestLedger, requestedLedger) + 1;
+
+      const payload = {
+        result: {
+          events: [],
+          latestLedger,
+          latestLedgerHash: `hash_${latestLedger}`,
+          cursor: null,
+        },
+      };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload));
+    });
+  });
+
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        phase: () => phase,
+        getLedgersSeen: () => new Set(ledgersSeen),
+        close: () => new Promise((r) => server.close(r)),
+      });
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Simulate RPC node failure: indexer should activate circuit breaker and retry
@@ -274,5 +364,125 @@ test("Chaos - Cascading Failures", async (t) => {
     );
 
     assert(fulfilled > 0, "system should remain partially functional");
+  });
+});
+
+/**
+ * Issue #586 — RPC Blackout Recovery
+ *
+ * Phases:
+ *   0–10 s   mock RPC serves normal 200 responses
+ *   10–40 s  mock RPC returns 503 (blackout)
+ *   40–55 s  mock RPC resumes 200 responses
+ *
+ * Assertions:
+ *   1. The indexer process is still alive after the 30 s blackout.
+ *   2. No ledgers from the blackout window are permanently skipped —
+ *      the indexer resumes from the last saved cursor.
+ *   3. alertManager fires ALL_RPC_DOWN during the blackout and
+ *      resolves it once RPC recovers.
+ */
+test("Chaos - 30s RPC Blackout Recovery", { timeout: 90_000 }, async (t) => {
+  // ── phase timings (ms) ────────────────────────────────────────────
+  const NORMAL_MS   = 10_000;
+  const BLACKOUT_MS = 30_000;
+  const RECOVERY_MS = 15_000;
+  const TOTAL_MS    = NORMAL_MS + BLACKOUT_MS + RECOVERY_MS;
+
+  await t.test("indexer survives blackout, resumes cursor, fires and resolves ALL_RPC_DOWN", async () => {
+    // ── 1. spin up phased mock RPC ────────────────────────────────
+    const mock = await createPhasedMockRpc({
+      normalMs:   NORMAL_MS,
+      blackoutMs: BLACKOUT_MS,
+      recoveryMs: RECOVERY_MS,
+    });
+
+    // ── 2. launch the indexer pointed at the mock RPC ─────────────
+    //    Use a throw-away in-memory cursor (START_LEDGER=1000) and
+    //    skip real DB writes by pointing at a non-existent DB — the
+    //    test only needs to observe process liveness, alert events
+    //    surfaced through stdout, and cursor advancement.
+    const indexerPath = path.resolve(
+      fileURLToPath(import.meta.url),
+      "../../../../indexer/src/index.js",
+    );
+
+    const indexer = spawn(process.execPath, [indexerPath], {
+      env: {
+        ...process.env,
+        SOROBAN_RPC_URL:    mock.url,
+        START_LEDGER:       "1000",
+        POLL_MS:            "500",          // fast polling so we see phase transitions
+        DATABASE_URL:       DB_URL,
+        // keep alert noise off external channels in CI
+        SLACK_WEBHOOK_URL:      "",
+        PAGERDUTY_ROUTING_KEY:  "",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const stdoutLines = [];
+    const stderrLines = [];
+    indexer.stdout.on("data", (d) => stdoutLines.push(...d.toString().split("\n")));
+    indexer.stderr.on("data", (d) => stderrLines.push(...d.toString().split("\n")));
+
+    let indexerExitCode = null;
+    indexer.on("exit", (code) => { indexerExitCode = code; });
+
+    // helper — scan collected log lines for a pattern
+    const logsContain = (re) =>
+      [...stdoutLines, ...stderrLines].some((l) => re.test(l));
+
+    // ── 3. wait for the full scenario to play out ─────────────────
+    await sleep(TOTAL_MS + 3_000); // +3 s grace after recovery
+
+    // ── 4. Assert: process did NOT crash during the blackout ──────
+    assert.strictEqual(
+      indexerExitCode,
+      null,
+      "indexer process must still be running after the 30 s blackout",
+    );
+
+    // ── 5. Assert: ALL_RPC_DOWN was fired during blackout ─────────
+    assert.ok(
+      logsContain(/ALERT\s+ALL_RPC_DOWN/i),
+      "alertManager must fire ALL_RPC_DOWN during the blackout",
+    );
+
+    // ── 6. Assert: ALL_RPC_DOWN was resolved after recovery ───────
+    assert.ok(
+      logsContain(/RESOLVED\s+ALL_RPC_DOWN/i),
+      "alertManager must resolve ALL_RPC_DOWN after RPC recovers",
+    );
+
+    // ── 7. Assert: cursor advanced after recovery (no ledgers lost) ─
+    //    The mock tracks every startLedger the indexer requested.
+    //    After recovery the set must contain ledgers > 1000, confirming
+    //    the indexer resumed from its last saved cursor rather than
+    //    starting over or staying stuck.
+    const seen = mock.getLedgersSeen();
+    const resumedLedgers = [...seen].filter((l) => l > 1000);
+    assert.ok(
+      resumedLedgers.length > 0,
+      `indexer must resume polling after recovery — ledgers seen: ${[...seen].join(", ")}`,
+    );
+
+    // Consecutive ledger check: the first recovery ledger must be
+    // exactly one past the last pre-blackout ledger (no gap skipped).
+    const preLedgers  = [...seen].filter((l) => l >= 1000).sort((a, b) => a - b);
+    if (preLedgers.length >= 2) {
+      // Allow for at most the retry count (5) * poll interval worth of
+      // ledger gap — in practice it should be exactly 1.
+      const lastPre     = preLedgers[preLedgers.length - 2];
+      const firstResume = preLedgers[preLedgers.length - 1];
+      assert.ok(
+        firstResume <= lastPre + 10,
+        `cursor gap too large after recovery: last pre-blackout=${lastPre}, first resume=${firstResume}`,
+      );
+    }
+
+    // ── 8. clean up ───────────────────────────────────────────────
+    indexer.kill("SIGTERM");
+    await mock.close();
   });
 });

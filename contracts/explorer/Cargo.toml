@@ -11,8 +11,12 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = { version = "21.7.7", features = ["alloc"] }
 
+[features]
+testutils = ["soroban-sdk/testutils"]
+
 [dev-dependencies]
 soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+proptest    = { version = "1.4", default-features = false, features = ["alloc"] }
 
 [[test]]
 name = "auth_tests"
@@ -33,3 +37,7 @@ path = "tests/integration.rs"
 [[test]]
 name = "snapshot"
 path = "tests/snapshot.rs"
+
+[[test]]
+name = "proptest"
+path = "tests/proptest.rs"

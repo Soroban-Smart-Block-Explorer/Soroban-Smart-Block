@@ -29,7 +29,7 @@ echo "✅ WASM found"
 if [ "${NETWORK}" = "testnet" ]; then
     echo ""
     echo "💰 Funding deployer via Friendbot..."
-    ADDR=$(soroban config identity address "${IDENTITY}")
+    ADDR=$(stellar keys address "${IDENTITY}")
     curl -sf "https://friendbot.stellar.org?addr=${ADDR}" > /dev/null
     echo "   ✅ Friendbot request sent"
     
@@ -41,7 +41,7 @@ fi
 echo ""
 echo "🔍 Verifying balance..."
 if [ "${NETWORK}" = "testnet" ]; then
-    ADDR=$(soroban config identity address "${IDENTITY}")
+    ADDR=$(stellar keys address "${IDENTITY}")
     BALANCE=$(curl -sf "https://horizon-testnet.stellar.org/accounts/${ADDR}" | jq -r '.balances[] | select(.asset_type=="native") | .balance')
 else
     BALANCE=$(stellar account show "${IDENTITY}" --network "${NETWORK}" | grep -E 'XLM\s+' | awk '{print $2}')
@@ -59,7 +59,7 @@ echo "   ✅ Sufficient balance"
 # 4. Deploy contract
 echo ""
 echo "📦 Deploying contract..."
-DEPLOY_OUTPUT=$(soroban contract deploy \
+DEPLOY_OUTPUT=$(stellar contract deploy \
     --wasm "${WASM_PATH}" \
     --source "${IDENTITY}" \
     --network "${NETWORK}")

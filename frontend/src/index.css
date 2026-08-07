@@ -74,3 +74,4 @@ button:hover { opacity: 0.85; }
 .badge.wrap { background: #0d2a3a; color: #15a2e4; }
 .badge.unwrap { background: #2a1a0d; color: #e8a44a; }
 .badge.clawback { background: #3a0d0d; color: #f85149; }
+.badge.classic { background: #21262d; color: #8b949e; }

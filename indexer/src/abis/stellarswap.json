@@ -1,0 +1,57 @@
+{
+  "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+  "name": "StellarSwap",
+  "description": "Testnet AMM/DEX on Soroban. The contractId above is a placeholder — the real deployed instance is configured via STELLARSWAP_CONTRACT_ID and substituted at seed time.",
+  "links": {
+    "homepage": "https://stellarswap.io"
+  },
+  "functions": [
+    {
+      "name": "swap",
+      "template": "{trader} swapped {amount_in} {token_in} for {amount_out} {token_out}",
+      "params": [
+        { "name": "trader", "type": "Address" },
+        { "name": "token_in", "type": "Address" },
+        { "name": "token_out", "type": "Address" },
+        { "name": "amount_in", "type": "i128" },
+        { "name": "amount_out", "type": "i128" },
+        { "name": "amount_out_expected", "type": "i128" }
+      ]
+    },
+    {
+      "name": "swap_exact_tokens_for_tokens",
+      "template": "{trader} swapped {amount_in} {token_in} for {amount_out} {token_out}",
+      "params": [
+        { "name": "trader", "type": "Address" },
+        { "name": "token_in", "type": "Address" },
+        { "name": "token_out", "type": "Address" },
+        { "name": "amount_in", "type": "i128" },
+        { "name": "amount_out", "type": "i128" },
+        { "name": "amount_out_expected", "type": "i128" }
+      ]
+    },
+    {
+      "name": "add_liquidity",
+      "template": "{from} added {amount_a} {token_a} + {amount_b} {token_b} to the pool",
+      "params": [
+        { "name": "from", "type": "Address" },
+        { "name": "token_a", "type": "Address" },
+        { "name": "amount_a", "type": "i128" },
+        { "name": "token_b", "type": "Address" },
+        { "name": "amount_b", "type": "i128" }
+      ]
+    },
+    {
+      "name": "remove_liquidity",
+      "template": "{from} removed {lp_amount} LP tokens from the pool",
+      "params": [
+        { "name": "from", "type": "Address" },
+        { "name": "lp_amount", "type": "i128" },
+        { "name": "token_a", "type": "Address" },
+        { "name": "amount_a", "type": "i128" },
+        { "name": "token_b", "type": "Address" },
+        { "name": "amount_b", "type": "i128" }
+      ]
+    }
+  ]
+}
