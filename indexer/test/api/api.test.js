@@ -1,5 +1,7 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 import pg from "pg";
+import bcrypt from "bcryptjs";
 
 // Ensure process.env uses TEST_DATABASE_URL
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
@@ -7,8 +9,8 @@ process.env.DATABASE_URL = DB_URL;
 process.env.API_KEY = "test-api-key";
 process.env.VERIFY_ABI = "false";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
 
 describe("REST API Integration Tests", () => {
   let app;
@@ -51,6 +53,16 @@ describe("REST API Integration Tests", () => {
     // Seed 50 events
     for (let i = 1; i <= 50; i++) {
       const contractId = i % 3 === 1 ? "C1" : i % 3 === 2 ? "C2" : "C3";
+      const contract = req.query.contract?.trim();
+
+if (
+  contract &&
+  !/^C[A-Z2-7]{55}$/.test(contract)
+) {
+  return res.status(400).json({
+    error: "Invalid contract id",
+  });
+}
       const fn = i % 2 === 0 ? "transfer" : "mint";
       const ledger = 1000 + i;
       const txHash = `tx_hash_${i}`;
@@ -64,6 +76,12 @@ describe("REST API Integration Tests", () => {
         [contractId, fn, ledger, txHash, description, JSON.stringify(rawTopics), rawData]
       );
     }
+
+    await db.query(
+      `INSERT INTO daemon_state (key, value)
+       VALUES ('cursor', '1051'), ('last_indexed_ledger', '1050')
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    );
 
     // Start Express app
     server = startApi();
@@ -134,6 +152,91 @@ describe("REST API Integration Tests", () => {
     });
   });
 
+  describe("GET /api/admin/integrity", () => {
+    const adminAuth = { Authorization: `Bearer ${process.env.ADMIN_SECRET || "test-admin-secret"}` };
+
+    beforeAll(() => {
+      process.env.ADMIN_SECRET = "test-admin-secret";
+    });
+
+    it("should return OK on a clean database", async () => {
+      const res = await request(app).get("/api/admin/integrity").set(adminAuth);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+    });
+
+    it("should fail when a row is deleted and a seq gap appears", async () => {
+      await db.query(`DELETE FROM events WHERE seq = 25`);
+
+      const res = await request(app).get("/api/admin/integrity").set(adminAuth);
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(false);
+      expect(Array.isArray(res.body.failed)).toBe(true);
+      expect(res.body.failed.some((item) => item.check === "seq_gap")).toBe(true);
+
+      await db.query(
+        `INSERT INTO events (seq, contract_id, function, ledger, tx_hash, description, raw_topics, raw_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          25,
+          "C1",
+          "mint",
+          1025,
+          "tx_hash_25_restored",
+          "Event 25 restored",
+          JSON.stringify([wallet1, wallet2]),
+          JSON.stringify({ amount: "2500" }),
+        ],
+      );
+    });
+  });
+
+  describe("API key daily usage enforcement", () => {
+    const rawKey = "daily-limit-test-key-123";
+
+    beforeAll(async () => {
+      const keyHash = await bcrypt.hash(rawKey, 12);
+      const { rows } = await db.query(
+        `INSERT INTO api_keys
+          (name, key_hash, key_prefix, tier, daily_limit, allowed_ips, allowed_endpoints, revoked, verified, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, TRUE, NULL)
+         RETURNING id`,
+        [
+          "daily-limit-key",
+          keyHash,
+          rawKey.slice(0, 8),
+          "free",
+          2,
+          JSON.stringify([]),
+          JSON.stringify([]),
+        ],
+      );
+
+      await db.query(
+        `INSERT INTO api_key_usage (api_key_id, date, request_count)
+         VALUES ($1, CURRENT_DATE, 0)
+         ON CONFLICT (api_key_id, date)
+         DO NOTHING`,
+        [rows[0].id],
+      );
+    });
+
+    it("should return 429 on the N+1 request once the daily limit is reached", async () => {
+      const headers = { "x-api-key": rawKey, "X-Forwarded-For": "10.90.0.200" };
+
+      const first = await request(app).get("/api/events?limit=1").set(headers);
+      const second = await request(app).get("/api/events?limit=1").set(headers);
+      const third = await request(app).get("/api/events?limit=1").set(headers);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(third.status).toBe(429);
+      expect(third.body).toEqual({ error: "Daily API key usage limit exceeded" });
+    });
+  });
+
   describe("GET /api/events (Keyset cursor)", () => {
     // Each test uses a distinct X-Forwarded-For so the per-IP unauthenticated
     // rate-limit bucket (burst 10) is not shared with the rest of the suite.
@@ -182,6 +285,22 @@ describe("REST API Integration Tests", () => {
       const res = await getEvents("/api/events?fn=transfer");
       expect(res.status).toBe(200);
       expect(res.body.data.every((ev) => ev.function === "transfer")).toBe(true);
+    });
+
+    // Issue #555: the frontend's DEX function-filter chips pass a
+    // comma-separated list of exact function names, e.g.
+    // ?fn=swap,swap_exact_tokens_for_tokens.
+    it("should filter events by a comma-separated list of function names", async () => {
+      const res = await getEvents("/api/events?fn=mint,transfer&limit=50");
+      expect(res.status).toBe(200);
+      expect(res.body.data.length).toBe(50);
+      expect(res.body.data.every((ev) => ev.function === "mint" || ev.function === "transfer")).toBe(true);
+    });
+
+    it("should return no events for a function name that matches nothing", async () => {
+      const res = await getEvents("/api/events?fn=nonexistent_fn");
+      expect(res.status).toBe(200);
+      expect(res.body.data.length).toBe(0);
     });
 
     it("should return 422 for invalid limit values", async () => {
@@ -251,6 +370,42 @@ describe("REST API Integration Tests", () => {
         status: 404,
         detail: "Event sequence 9999 not found",
       });
+    });
+
+    // Issue #554: slippage_bps is persisted and returned for DEX swap events.
+    it("should include slippage_bps for a swap event that has it", async () => {
+      await db.query(
+        `INSERT INTO events (contract_id, function, ledger, tx_hash, description, raw_topics, raw_data, slippage_bps)
+         VALUES ('C1', 'swap', 1099, 'tx_hash_slippage', 'Address GA… swapped 100 USDC → 99 XLM on StellarSwap (slippage: 1.00%)', '[]', '{}', 100)`,
+      );
+
+      const res = await request(app).get("/api/events?fn=swap&limit=200");
+      expect(res.status).toBe(200);
+      const withSlippage = res.body.data.find((ev) => ev.tx_hash === "tx_hash_slippage");
+      expect(withSlippage).toBeDefined();
+      expect(withSlippage.slippage_bps).toBe(100);
+    });
+  });
+
+  // Issue #556: the frontend renders a protocol-type badge (DEX/Lending/NFT/
+  // Token/Other) on contract cards, so the list endpoint must return it.
+  describe("GET /api/contracts (list)", () => {
+    beforeAll(async () => {
+      await db.upsertContractMeta({
+        id: "C_DEX_TEST",
+        name: "Test DEX",
+        description: "protocol_type badge fixture",
+        functions: [{ name: "swap", args: [] }],
+        registered_by: "test-admin",
+      });
+    });
+
+    it("includes protocol_type for each contract", async () => {
+      const res = await request(app).get("/api/contracts?limit=100");
+      expect(res.status).toBe(200);
+      const dex = res.body.contracts.find((c) => c.id === "C_DEX_TEST");
+      expect(dex).toBeDefined();
+      expect(dex.protocol_type).toBe("dex");
     });
   });
 

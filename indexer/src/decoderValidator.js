@@ -11,6 +11,9 @@ const validate = ajv.compile(schema);
 const INVALID_HTML_OR_CONTROL = /[\u0000-\u001F\u007F-\u009F]/g;
 const HTML_TAGS = /<[^>]*>/g;
 
+/** Maximum byte length for a contract name — mirrors the on-chain constant. */
+const MAX_NAME_LEN = 64;
+
 export function sanitizeDecodedText(value) {
   if (value == null) return "";
   let sanitized = String(value);
@@ -19,6 +22,30 @@ export function sanitizeDecodedText(value) {
   if (sanitized.length > 2048) sanitized = sanitized.slice(0, 2048);
   if (sanitized.trim().length === 0) sanitized = "<invalid decoded text>";
   return sanitized;
+}
+
+/**
+ * Sanitize a contract name field.
+ * Trims to MAX_NAME_LEN characters and records a `schema_violation` metric
+ * when truncation is needed so that any contract that bypassed on-chain
+ * validation does not corrupt the off-chain DB.
+ *
+ * @param {string|null|undefined} value - Raw name value
+ * @param {object} [logger] - Logger instance (falls back to console)
+ * @returns {string} Sanitized name, at most MAX_NAME_LEN characters
+ */
+export function sanitizeName(value, logger = console) {
+  if (value == null) return "";
+  const name = String(value);
+  if (name.length > MAX_NAME_LEN) {
+    decoderSchemaViolationsTotal.inc({ field: "name" });
+    logger.warn(
+      `[DecoderValidator] Contract name truncated from ${name.length} to ${MAX_NAME_LEN} chars`,
+      JSON.stringify({ component: "decoderValidator", event: "schema_violation", field: "name" })
+    );
+    return name.slice(0, MAX_NAME_LEN);
+  }
+  return name;
 }
 
 export function validateDecodedEvent(decoded) {
@@ -55,6 +82,12 @@ export function validateAndSanitizeDecodedEvent(decoded, logger = console) {
   // Always sanitize the description field to prevent corruption
   if (decoded.description) {
     decoded.description = sanitizeDecodedText(decoded.description);
+  }
+
+  // Sanitize name field — truncates to MAX_NAME_LEN and logs a schema_violation
+  // metric if truncation occurs (defensive against any bypass of on-chain limits).
+  if (decoded.name != null) {
+    decoded.name = sanitizeName(decoded.name, logger);
   }
 
   const validation = validateDecodedEvent(decoded);

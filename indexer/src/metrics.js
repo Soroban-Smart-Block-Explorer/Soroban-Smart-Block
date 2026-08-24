@@ -62,6 +62,30 @@ export const decoderSchemaViolationsTotal = new Counter({
   registers: [registry],
 });
 
+/** Cache hits/misses by cache layer type (e.g. cache="wallet"). */
+export const cacheHitTotal = new Counter({
+  name: "cache_hit_total",
+  help: "Total cache hits by cache type",
+  labelNames: ["cache"],
+  registers: [registry],
+});
+
+export const cacheMissTotal = new Counter({
+  name: "cache_miss_total",
+  help: "Total cache misses by cache type",
+  labelNames: ["cache"],
+  registers: [registry],
+});
+
+/** Histogram of HTTP request durations in seconds with labels. */
+export const apiRequestDuration = new Histogram({
+  name: "api_request_duration_seconds",
+  help: "HTTP request duration in seconds",
+  labelNames: ["method", "route", "status"],
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.3, 1, 2, 5],
+  registers: [registry],
+});
+
 /**
  * Update DB pool gauges from a pg.Pool instance.
  * Call this periodically (e.g. every 15 s).

@@ -9,8 +9,7 @@
   "properties": {
     "contract_id": {
       "type": "string",
-      "description": "Contract identifier.",
-      "minLength": 1
+      "description": "Contract identifier. Empty string for classic (non-Soroban) events."
     },
     "function": {
       "type": "string",
@@ -93,6 +92,16 @@
     "abi_version": {
       "type": "integer",
       "minimum": 0
+    },
+    "slippage_bps": {
+      "type": "integer",
+      "description": "DEX swap slippage in basis points: |amount_out - min_amount_out| / min_amount_out * 10000.",
+      "minimum": 0
+    },
+    "type": {
+      "type": "string",
+      "description": "Event category — \"classic\" for Horizon payment/path-payment operations, omitted for Soroban contract events.",
+      "enum": ["classic"]
     }
   }
 }

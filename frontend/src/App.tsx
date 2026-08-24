@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 
 const Home = lazy(() => import("./pages/Home"));
 const RegistryPage = lazy(() => import("./pages/RegistryPage"));
+const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
 const ContractPage = lazy(() => import("./pages/ContractPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
 const EventPage = lazy(() => import("./pages/EventPage"));
@@ -19,6 +20,8 @@ const SetupPage = lazy(() => import("./pages/SetupPage"));
 const BatchMultiCall = lazy(() => import("./pages/BatchMultiCall"));
 const SubInvocationPage = lazy(() => import("./pages/SubInvocationPage"));
 const RateLimitDashboard = lazy(() => import("./pages/RateLimitDashboard"));
+const NftGallery = lazy(() => import("./pages/NftGallery"));
+const RegisterContractPage = lazy(() => import("./pages/RegisterContractPage"));
 
 function Fallback() {
   return <p style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>Loading…</p>;
@@ -33,8 +36,13 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/contracts" element={<RegistryPage />} />
+            <Route path="/contracts/register" element={<RegisterContractPage />} />
+            {/* Issue #524: registration success page */}
+            <Route path="/contracts/register/success" element={<RegistrationSuccessPage />} />
             <Route path="/contract/:id" element={<ContractPage />} />
             <Route path="/contract/:id/workspace" element={<DeveloperWorkspace />} />
+            {/* Issue #521: ABI diff view */}
+            <Route path="/contract/:id/abi-diff" element={<AbiDiffPage />} />
             <Route path="/wallet/:address" element={<WalletPage />} />
             <Route path="/event/:seq" element={<EventPage />} />
             <Route path="/search" element={<SearchPage />} />
@@ -47,6 +55,7 @@ export default function App() {
             <Route path="/batch" element={<BatchMultiCall />} />
             <Route path="/sub-invocations" element={<SubInvocationPage />} />
             <Route path="/admin/rate-limits" element={<RateLimitDashboard />} />
+            <Route path="/nft/:contractId" element={<NftGallery />} />
           </Routes>
         </Suspense>
       </main>

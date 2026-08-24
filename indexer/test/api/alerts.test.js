@@ -1,13 +1,17 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
-import {
+const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
+process.env.DATABASE_URL = DB_URL;
+
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
+const {
   ALERT_CONDITIONS,
   fireAlert,
   getActiveAlerts,
   resolveAlert,
-} from "../../src/alertManager.js";
+} = await import("../../src/alertManager.js");
 
 describe("alert observability API (issue #493)", () => {
   let server;

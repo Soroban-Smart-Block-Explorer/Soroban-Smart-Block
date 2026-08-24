@@ -1,7 +1,14 @@
+import { useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
-import type { DecodedEvent } from "../api";
+import { useQueries } from "@tanstack/react-query";
+import { api } from "../api";
+import type { ContractMeta, DecodedEvent } from "../api";
+import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
+import AssetLogo from "./AssetLogo";
+import CopyableAddress from "./CopyableAddress";
 import { getGasAlert } from "./GasLimitAlert";
+import ProtocolBadge from "./ProtocolBadge";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
 
 /** Stellar strkey address pattern: G.../C.../M... (56+ chars, base32 alphabet) */
@@ -9,7 +16,7 @@ const ADDRESS_RE = /\b([GCM][A-Z2-7]{55,})\b/g;
 
 /**
  * Render a description string with any Stellar addresses (G..., C..., M...)
- * replaced by clickable <Link> elements.
+ * replaced by clickable <Link> elements with copy-to-clipboard functionality.
  * M... muxed addresses link to the base G... wallet page via addressRoute().
  */
 function LinkedDescription({ text }: { text: string }) {
@@ -25,14 +32,12 @@ function LinkedDescription({ text }: { text: string }) {
     if (route) {
       parts.push(
         <Link key={match.index} to={route} title={addr}>
-          {truncateAddress(addr)}
+          <CopyableAddress fullValue={addr} displayValue={truncateAddress(addr)} />
         </Link>,
       );
     } else {
       parts.push(
-        <span key={match.index} title={addr}>
-          {truncateAddress(addr)}
-        </span>,
+        <CopyableAddress key={match.index} fullValue={addr} displayValue={truncateAddress(addr)} />,
       );
     }
     last = match.index + match[0].length;
@@ -61,11 +66,31 @@ function parseTransfer(description: string): { amount: number; symbol: string } 
   return isNaN(amount) ? null : { amount, symbol: m[2].toUpperCase() };
 }
 
+/** Extract the destination asset code/issuer from a classic payment's raw_data JSON, if present. */
+function parseClassicAsset(ev: DecodedEvent): { code: string; issuer: string | null } | null {
+  if (ev.type !== "classic" || !ev.raw_data) return null;
+  try {
+    const op = JSON.parse(ev.raw_data);
+    if (!op.asset_code) return null;
+    return { code: op.asset_code, issuer: op.asset_issuer ?? null };
+  } catch {
+    return null;
+  }
+}
+
 interface Props {
   events: DecodedEvent[];
 }
 
-function FunctionBadge({ fn }: { fn: string }) {
+function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
+  if (isClassic) {
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span className="badge classic">Classic</span>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>{fn}</span>
+      </span>
+    );
+  }
   if (fn === "wrap_native") {
     return (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -171,7 +196,123 @@ function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<Decode
   );
 }
 
+/** Contract name (linked) + protocol badge — shown for events from known contracts (issue #556). */
+function ContractCell({ contractId, meta }: { contractId: string; meta?: ContractMeta }) {
+  if (!contractId) return <span style={{ color: "var(--muted)" }}>—</span>;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+      <Link to={`/contract/${contractId}`}>
+        <CopyableAddress fullValue={contractId} displayValue={meta?.name || truncateAddress(contractId)} />
+      </Link>
+      <ProtocolBadge type={meta?.protocol_type} />
+    </span>
+  );
+}
+
+/** Render a single event row (extracted so it can be reused in both modes). */
+function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: ContractMeta }) {
+  return (
+    <>
+      <td style={td}>
+        <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
+      </td>
+      <td style={td}>{ev.ledger.toLocaleString()}</td>
+      <td style={td}>
+        <ContractCell contractId={ev.contract_id} meta={contractMeta} />
+      </td>
+      <td style={td}>
+        <FunctionBadge fn={ev.function} />
+      </td>
+      <td
+        style={{
+          ...td,
+          maxWidth: 480,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {ev.is_clawback && (
+          <span className="badge clawback" style={{ marginRight: 6 }} title="Mandatory authority intervention">
+            ⚠ COMPLIANCE: CLAWBACK
+          </span>
+        )}
+        {getGasAlert(ev) && (
+          <span
+            style={{
+              display: "inline-block",
+              marginRight: 6,
+              padding: "1px 6px",
+              background: "rgba(245,158,11,0.15)",
+              border: "1px solid #f59e0b",
+              borderRadius: 4,
+              fontSize: 11,
+              color: "#f59e0b",
+              verticalAlign: "middle",
+            }}
+            title="High gas usage — >80% of network limit"
+          >
+            ⚠ High Gas
+          </span>
+        )}
+        {ev.ttl_extension && <TTLExtensionBadge ext={ev.ttl_extension} />}
+        {ev.factory_deployment && <FactoryDeploymentBadge deployment={ev.factory_deployment} />}
+        {ev.sac_side_effect && <SacSideEffectBadge kind={ev.sac_side_effect} />}
+        <LinkedDescription text={ev.description} />
+        {ev.function === "transfer" &&
+          (() => {
+            const t = parseTransfer(ev.description);
+            return t ? <FiatValue amount={t.amount} symbol={t.symbol} /> : null;
+          })()}
+        {ev.function === "swap" &&
+          (() => {
+            const path = ev.swap_path ?? parseSwapPath(ev.description);
+            return path ? (
+              <span
+                style={{
+                  marginLeft: 6,
+                  color: "var(--accent)",
+                  fontSize: 12,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {path.join(" → ")}
+              </span>
+            ) : null;
+          })()}
+      </td>
+    </>
+  );
+}
+
 export default function EventTable({ events }: Props) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef);
+
+  // Batch-fetch contract metadata for the badge shown next to each contract
+  // name (issue #556) — one request per unique contract on the page, cached
+  // by contract ID so repeat visits/pages don't refetch.
+  const contractIds = useMemo(
+    () => Array.from(new Set(events.map((e) => e.contract_id).filter(Boolean))),
+    [events],
+  );
+  const contractQueries = useQueries({
+    queries: contractIds.map((id) => ({
+      queryKey: ["contract", id],
+      queryFn: () => api.contract(id),
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+    })),
+  });
+  const contractMetaById = useMemo(() => {
+    const map = new Map<string, ContractMeta>();
+    contractIds.forEach((id, i) => {
+      const data = contractQueries[i]?.data;
+      if (data) map.set(id, data);
+    });
+    return map;
+  }, [contractIds, contractQueries]);
+
   if (!events.length)
     return (
       <p data-testid="empty-state" style={{ color: "var(--muted)" }}>
@@ -191,82 +332,44 @@ export default function EventTable({ events }: Props) {
           >
             <th style={th}>Seq</th>
             <th style={th}>Ledger</th>
+            <th style={th}>Contract</th>
             <th style={th}>Function</th>
             <th style={th}>Description</th>
           </tr>
         </thead>
-        <tbody>
-          {events.map((ev) => (
-            <tr key={ev.seq} style={{ borderBottom: "1px solid var(--border)" }}>
-              <td style={td}>
-                <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
-              </td>
-              <td style={td}>{ev.ledger.toLocaleString()}</td>
-              <td style={td}>
-                <FunctionBadge fn={ev.function} />
-              </td>
-              <td
+      </table>
+
+      {/* Virtualized scroll area — rows are position:absolute inside here */}
+      <div
+        ref={scrollContainerRef}
+        data-testid="virtual-scroll-container"
+        style={{
+          overflowY: "auto",
+          maxHeight: 600,
+          position: "relative",
+        }}
+      >
+        {/* Spacer div creates the full scrollable height */}
+        <div style={{ height: totalHeight, position: "relative" }}>
+          {visibleItems.map(({ item, style }) => (
+            <div key={item.seq} style={style}>
+              <table
                 style={{
-                  ...td,
-                  maxWidth: 480,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  tableLayout: "fixed",
                 }}
               >
-                {ev.is_clawback && (
-                  <span className="badge clawback" style={{ marginRight: 6 }} title="Mandatory authority intervention">
-                    ⚠ COMPLIANCE: CLAWBACK
-                  </span>
-                )}
-                {getGasAlert(ev) && (
-                  <span
-                    style={{
-                      display: "inline-block",
-                      marginRight: 6,
-                      padding: "1px 6px",
-                      background: "rgba(245,158,11,0.15)",
-                      border: "1px solid #f59e0b",
-                      borderRadius: 4,
-                      fontSize: 11,
-                      color: "#f59e0b",
-                      verticalAlign: "middle",
-                    }}
-                    title="High gas usage — >80% of network limit"
-                  >
-                    ⚠ High Gas
-                  </span>
-                )}
-                {ev.ttl_extension && <TTLExtensionBadge ext={ev.ttl_extension} />}
-                {ev.factory_deployment && <FactoryDeploymentBadge deployment={ev.factory_deployment} />}
-                {ev.sac_side_effect && <SacSideEffectBadge kind={ev.sac_side_effect} />}
-                <LinkedDescription text={ev.description} />
-                {ev.function === "transfer" &&
-                  (() => {
-                    const t = parseTransfer(ev.description);
-                    return t ? <FiatValue amount={t.amount} symbol={t.symbol} /> : null;
-                  })()}
-                {ev.function === "swap" &&
-                  (() => {
-                    const path = ev.swap_path ?? parseSwapPath(ev.description);
-                    return path ? (
-                      <span
-                        style={{
-                          marginLeft: 6,
-                          color: "var(--accent)",
-                          fontSize: 12,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {path.join(" → ")}
-                      </span>
-                    ) : null;
-                  })()}
-              </td>
-            </tr>
+                <tbody>
+                  <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                    <EventRow ev={item} contractMeta={contractMetaById.get(item.contract_id)} />
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+      </div>
     </div>
   );
 }

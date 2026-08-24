@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import ErrorBoundary from "../src/components/ErrorBoundary";
@@ -44,7 +44,7 @@ class MockWebSocket {
 (globalThis as unknown as Record<string, unknown>).WebSocket =
   MockWebSocket as unknown as typeof WebSocket;
 
-// Mock the api module so we control what api.events returns.
+// Mock the api module so we control what api.events / api.contract return.
 vi.mock("../src/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/api")>();
   return {
@@ -52,6 +52,7 @@ vi.mock("../src/api", async (importOriginal) => {
     api: {
       ...original.api,
       events: vi.fn().mockResolvedValue({ data: [], next_cursor: null }),
+      contract: vi.fn().mockRejectedValue(new Error("not found")),
     },
   };
 });
@@ -71,12 +72,12 @@ function makeQueryClient() {
   });
 }
 
-function renderHome() {
+function renderHome(initialEntries: string[] = ["/"]) {
   const queryClient = makeQueryClient();
   return render(
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter>
+        <MemoryRouter initialEntries={initialEntries}>
           <Home />
         </MemoryRouter>
       </QueryClientProvider>
@@ -307,5 +308,94 @@ describe("Home — events data (Issue #452)", () => {
     expect(screen.getByText("Function:")).toBeDefined();
     expect(screen.getByText(/← Prev/)).toBeDefined();
     expect(screen.getByText(/Next →/)).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #555 — DEX-specific function chips when filtering by a DEX contract
+// ---------------------------------------------------------------------------
+
+describe("Home — DEX function filter chips (Issue #555)", () => {
+  const DEX_CONTRACT_ID = "CSWAPABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABC";
+  const TOKEN_CONTRACT_ID = "CTOKENABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABC";
+
+  beforeEach(() => {
+    // Earlier describe blocks leave lingering mockResolvedValue overrides on
+    // these vi.fn()s (restoreAllMocks only affects vi.spyOn wrappers) — reset
+    // both to a known baseline before each test in this block.
+    vi.mocked(api.events).mockResolvedValue({ data: [], next_cursor: null });
+    vi.mocked(api.contract).mockRejectedValue(new Error("not found"));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("shows the DEX function chips when ?contract= is tagged protocol_type=dex", async () => {
+    vi.mocked(api.contract).mockResolvedValue({
+      id: DEX_CONTRACT_ID,
+      version: 1,
+      name: "StellarSwap",
+      description: "AMM DEX router",
+      functions: [],
+      protocol_type: "dex",
+    } as Awaited<ReturnType<typeof api.contract>>);
+
+    renderHome([`/?contract=${DEX_CONTRACT_ID}`]);
+
+    expect(await screen.findByText("Swap")).toBeDefined();
+    expect(screen.getByText("Add Liquidity")).toBeDefined();
+    expect(screen.getByText("Remove Liquidity")).toBeDefined();
+    expect(screen.getByText("All")).toBeDefined();
+  });
+
+  it("passes the swap function group to GET /api/events when the Swap chip is clicked", async () => {
+    vi.mocked(api.contract).mockResolvedValue({
+      id: DEX_CONTRACT_ID,
+      version: 1,
+      name: "StellarSwap",
+      description: "AMM DEX router",
+      functions: [],
+      protocol_type: "dex",
+    } as Awaited<ReturnType<typeof api.contract>>);
+
+    renderHome([`/?contract=${DEX_CONTRACT_ID}`]);
+
+    const swapChip = await screen.findByText("Swap");
+    swapChip.click();
+
+    await waitFor(() => {
+      expect(api.events).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contract: DEX_CONTRACT_ID,
+          fn: "swap,swap_exact_tokens_for_tokens",
+        }),
+      );
+    });
+  });
+
+  it("does not show the DEX chips for a non-DEX contract", async () => {
+    vi.mocked(api.contract).mockResolvedValue({
+      id: TOKEN_CONTRACT_ID,
+      version: 1,
+      name: "USDC Token",
+      description: "SEP-41 token",
+      functions: [],
+      protocol_type: "token",
+    } as Awaited<ReturnType<typeof api.contract>>);
+
+    renderHome([`/?contract=${TOKEN_CONTRACT_ID}`]);
+
+    // Wait for the contract query to settle, then assert the chips never appear.
+    await screen.findByText("Function:");
+    expect(screen.queryByText("Add Liquidity")).toBeNull();
+    expect(screen.queryByText("Remove Liquidity")).toBeNull();
+  });
+
+  it("does not show the DEX chips when no contract filter is active", async () => {
+    renderHome();
+
+    await screen.findByText(/no events yet/i);
+    expect(screen.queryByText("Add Liquidity")).toBeNull();
   });
 });

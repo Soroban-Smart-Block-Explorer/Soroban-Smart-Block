@@ -1,8 +1,58 @@
-openapi: "3.1.0"
+openapi: "3.0.3"
 info:
   title: Soroban Smart Block Explorer API
   version: "0.1.0"
-  description: Human-readable Soroban contract event explorer for the Stellar blockchain.
+  description: |
+    Human-readable Soroban contract event explorer for the Stellar blockchain.
+
+    ## Rate Limiting
+
+    Every response includes the following headers regardless of status code:
+
+    | Header | Description |
+    |---|---|
+    | `X-RateLimit-Limit` | Maximum requests allowed in the current window for the active tier and endpoint group |
+    | `X-RateLimit-Remaining` | Tokens remaining in the current window |
+    | `X-RateLimit-Reset` | Unix timestamp (seconds) when the current window resets |
+    | `X-RateLimit-Tier` | Active tier name (`unauthenticated`, `free`, `pro`, `enterprise`) |
+
+    Additionally, **429 responses** include:
+
+    | Header | Description |
+    |---|---|
+    | `Retry-After` | Seconds to wait before retrying |
+
+    ### Rate limit tiers
+
+    Requests are identified by the `x-api-key` header (authenticated) or by
+    a hashed client IP (unauthenticated). The following sustained requests-per-minute
+    (rpm) limits apply per endpoint group:
+
+    | Endpoint group | unauthenticated | free | pro | enterprise |
+    |---|---|---|---|---|
+    | `/api/events*` | 60 rpm | 1 000 rpm | 10 000 rpm | configurable |
+    | `/api/search*`, `/api/wallet*` | 30 rpm | 500 rpm | 5 000 rpm | configurable |
+    | `/api/contracts*`, `/api/spec*`, `/api/verify*` | 10 rpm | 100 rpm | 1 000 rpm | configurable |
+    | `/api/simulate*`, `/api/sandbox/simulate*` | 5 rpm | 50 rpm | 500 rpm | configurable |
+    | WebSocket (`/ws*`, `/api/ws*`) | 3 rpm | 30 rpm | 300 rpm | configurable |
+    | Everything else | 60 rpm | 1 000 rpm | 10 000 rpm | configurable |
+
+    Burst allowances (extra tokens above the sustained rate):
+    `unauthenticated` = 10 · `free` = 50 · `pro` = 200 · `enterprise` = 500
+
+    ## CSRF Protection
+
+    All state-changing requests (POST / PATCH / DELETE) from browser clients require a
+    valid CSRF token following the **double-submit cookie** pattern:
+
+    1. Call `GET /api/csrf-token` to receive the token in the response body and
+       as an `HttpOnly` cookie.
+    2. Include the token value in the `X-CSRF-Token` request header on every
+       POST / PATCH / DELETE.
+
+    **Exemptions:** requests that include a valid `x-api-key` header (machine-to-machine)
+    and WebSocket upgrade requests are exempt from CSRF verification.
+
 
 servers:
   - url: http://localhost:3001
@@ -117,6 +167,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReadinessStatus"
 
+  /api/csrf-token:
+    get:
+      summary: Issue a CSRF token (Issue #613)
+      security: []
+      description: |
+        Generates a cryptographically random CSRF token, sets it as an `HttpOnly`
+        `csrf-token` cookie, and returns the same value in the response body.
+
+        The frontend must:
+        1. Call this endpoint once on app initialisation.
+        2. Store the `csrfToken` value from the body.
+        3. Include it as the `X-CSRF-Token` header on every POST / PATCH / DELETE request.
+
+        The cookie and header are compared server-side with a constant-time comparison.
+        The cookie is re-used when it is already present and valid, so multiple calls
+        are safe (they return the same token).
+      responses:
+        "200":
+          description: CSRF token issued and set as HttpOnly cookie
+          headers:
+            Set-Cookie:
+              description: |
+                `csrf-token=<hex64>; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`
+                (SameSite is Lax in non-production environments)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [csrfToken]
+                properties:
+                  csrfToken:
+                    type: string
+                    description: 64-character hex CSRF token to attach as X-CSRF-Token header
+                    example: "a3f9e2b1c8d74e5f6a7b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f"
+
   /api/events:
     get:
       summary: List contract events (keyset pagination)
@@ -138,8 +225,11 @@ paths:
           required: false
           schema:
             type: string
-            example: "transfer"
-          description: Filter by function name
+            example: "swap,swap_exact_tokens_for_tokens"
+          description: >-
+            Filter by function name — a single exact name, or a comma-separated
+            list of exact names (e.g. the DEX function-filter chips send
+            "swap,swap_exact_tokens_for_tokens" for the Swap chip).
         - name: type
           in: query
           required: false
@@ -167,6 +257,15 @@ paths:
       responses:
         "200":
           description: Paginated events with next_cursor
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
           content:
             application/json:
               schema:
@@ -184,7 +283,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
-          description: Too many requests
+          description: Too many requests — back off for Retry-After seconds
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
           content:
             application/json:
               schema:
@@ -347,6 +457,176 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/stats:
+    get:
+      summary: Get contract statistics
+      description: >-
+        Returns aggregate statistics for a contract: total events, unique
+        callers, first/last seen ledger, and a 30-day events-per-day series.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: Contract statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractStats"
+        "404":
+          description: Contract not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/abi-history:
+    get:
+      summary: ABI version history for a contract (Issue #517)
+      description: |
+        Returns every ABI snapshot recorded for the contract, ordered by abi_version
+        ascending. A new entry is added each time an update_contract event is
+        detected. The initial registration is stored as version 0.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: ABI version history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, history]
+                properties:
+                  contract_id:
+                    type: string
+                  history:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AbiHistoryEntry"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/abi/import-github:
+    post:
+      summary: Bulk ABI import from a GitHub repository (Issue #520)
+      description: |
+        Scans a GitHub repository directory for JSON files matching the
+        contractRegistry.schema.json format and bulk-upserts them into the
+        contract registry. Idempotent — re-importing the same file only updates
+        changed fields. Rate-limited to one call per 10 minutes per repo.
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repo]
+              properties:
+                repo:
+                  type: string
+                  description: GitHub repository in owner/repo format
+                  example: "myorg/my-abis"
+                path:
+                  type: string
+                  description: Directory path within the repo containing .json ABI files
+                  default: "contracts/"
+                  example: "contracts/"
+                ref:
+                  type: string
+                  description: Git ref (branch, tag, or commit SHA) to read from
+                  default: "main"
+                  example: "main"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported, skipped, errors, total_files]
+                properties:
+                  imported:
+                    type: integer
+                    description: Number of contracts successfully upserted
+                  skipped:
+                    type: integer
+                    description: Number of files skipped due to schema validation errors
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file:
+                          type: string
+                        error:
+                          type: string
+                  total_files:
+                    type: integer
+                    description: Total .json files found in the directory
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid admin auth token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited — retry after the specified number of seconds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  retry_after:
+                    type: integer
+        "502":
+          description: GitHub API error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/admin/alerts/{condition}/resolve:
     post:
       summary: Resolve an active alert condition
@@ -375,9 +655,50 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /api/contracts:
+    get:
+      summary: List registered contracts
+      description: Returns a paginated list of registered contracts. Supports filtering by protocol type.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: type
+          in: query
+          description: Filter by protocol type (Issue #518)
+          schema:
+            type: string
+            enum: [token, dex, lending, nft, bridge, other]
+      responses:
+        "200":
+          description: Paginated contract list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractsListResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     post:
       summary: Register contract ABI metadata
-      description: Registers metadata for a new contract ID. Requires API key authentication.
+      description: |
+        Registers metadata for a new contract ID. Requires API key authentication.
+
+        **Browser clients** must also include the `X-CSRF-Token` header obtained
+        from `GET /api/csrf-token`. Machine-to-machine callers that supply a
+        valid `x-api-key` header are exempt from CSRF verification.
       security:
         - ApiKeyAuth: []
         - BearerAuth: []
@@ -404,6 +725,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: CSRF token missing or mismatch (browser clients without x-api-key)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missing:
+                  value: { "error": "CSRF token missing" }
+                mismatch:
+                  value: { "error": "CSRF token mismatch" }
         "409":
           description: Contract already exists
           content:
@@ -418,6 +750,9 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Too many requests
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/Retry-After"
           content:
             application/json:
               schema:
@@ -441,6 +776,17 @@ paths:
             type: string
             example: "GBADY234567890123456789012345678901234567890123456789012"
           description: Wallet address
+        - name: fn
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "transfer,mint"
+          description: >-
+            Comma-separated event-type categories to filter by
+            (transfer/swap/mint/burn/stake match by prefix, e.g. "swap" also
+            matches "swap_exact_tokens_for_tokens"; "other" matches any
+            function outside those categories). Omit to return all events.
       responses:
         "200":
           description: Events matching the wallet address (empty array if none)
@@ -448,12 +794,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [events]
+                required: [events, horizon_account]
                 properties:
                   events:
                     type: array
                     items:
                       $ref: "#/components/schemas/DecodedEvent"
+                  horizon_account:
+                    $ref: "#/components/schemas/HorizonAccount"
         "400":
           description: Invalid wallet address format
           content:
@@ -468,6 +816,130 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/assets:
+    get:
+      summary: List all assets seen in indexed events
+      description: >-
+        Paginated list of classic asset metadata backed by the `assets` table,
+        populated as events are decoded. Cursor-based (keyset) pagination via
+        `next_cursor` (#550).
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Opaque cursor — pass the previous page's `next_cursor` value
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 25
+            maximum: 100
+          description: Page size (max 100)
+      responses:
+        "200":
+          description: Paginated asset list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Asset"
+                  next_cursor:
+                    type: integer
+                    nullable: true
+        "422":
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/assets/{issuer}/{code}:
+    get:
+      summary: Get metadata for a single classic asset
+      description: >-
+        Returns the resolved metadata for a classic asset identified by
+        issuer + code, backed by the `assets` table (#550).
+      parameters:
+        - name: issuer
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "USDC"
+      responses:
+        "200":
+          description: Asset metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "404":
+          description: Asset has not been indexed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/{address}/balances:
+    get:
+      summary: Get classic XLM and asset balances for a wallet address
+      description: >-
+        Fetches the account's balances from Horizon and normalises them.
+        Cached for 30 seconds per address to avoid hammering Horizon.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "GBADY234567890123456789012345678901234567890123456789012"
+          description: Wallet address
+      responses:
+        "200":
+          description: Balances for the account (XLM plus any classic/SEP-41 assets)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [balances]
+                properties:
+                  balances:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WalletBalance"
+        "400":
+          description: Invalid wallet address format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Account not found on the network
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Horizon is unreachable or returned an unexpected error
           content:
             application/json:
               schema:
@@ -514,6 +986,2765 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/events/{seq}/zk-costs:
+    get:
+      summary: ZK host-function costs for a single event
+      description: Returns the ZK host function call list and cost delta recorded for the event.
+      parameters:
+        - name: seq
+          in: path
+          required: true
+          schema:
+            type: integer
+            example: 15
+      responses:
+        "200":
+          description: ZK cost breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  calls:
+                    type: array
+                    items:
+                      type: object
+                  delta:
+                    type: object
+                    nullable: true
+              examples:
+                empty:
+                  summary: No ZK calls recorded
+                  value: { calls: [], delta: null }
+        "404":
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/transactions/status:
+    get:
+      summary: SSE stream for multiple transaction statuses
+      description: >-
+        Opens a server-sent event stream that pushes status updates for one or
+        more transaction hashes supplied as a comma-separated `txHashes` query
+        parameter. Each event carries `{ tx_hash, status, ledger, error }`.
+        The stream ends automatically once all tracked transactions reach a
+        terminal state (`success` or `failed`).
+      parameters:
+        - name: txHashes
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "abc123,def456"
+          description: Comma-separated list of transaction hashes to track
+      responses:
+        "200":
+          description: SSE stream of transaction status events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: "data: {\"tx_hash\":\"abc123\",\"status\":\"success\",\"ledger\":1050320,\"error\":null}\n\n"
+        "400":
+          description: txHashes parameter is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/transactions/{hash}/status/stream:
+    get:
+      summary: SSE stream for a single transaction status
+      description: >-
+        Opens a server-sent event stream for a single transaction. Pushes the
+        current status immediately and then again whenever the status changes.
+        Closes automatically when the transaction reaches a terminal state.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+      responses:
+        "200":
+          description: SSE stream of status events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: "data: {\"tx_hash\":\"a3f1…\",\"status\":\"pending\",\"ledger\":null,\"error\":null}\n\n"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/transactions/{hash}/status:
+    get:
+      summary: Get transaction status (polling)
+      description: >-
+        Returns the current status of a transaction from the in-process cache
+        or by querying Soroban RPC directly. Use the SSE endpoint for
+        push-based updates.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+      responses:
+        "200":
+          description: Transaction status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionStatus"
+              examples:
+                success:
+                  summary: Successful transaction
+                  value:
+                    tx_hash: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+                    status: "success"
+                    ledger: 1050320
+                    error: null
+                pending:
+                  summary: Pending transaction
+                  value:
+                    tx_hash: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+                    status: "pending"
+                    ledger: null
+                    error: null
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/events:
+    get:
+      summary: List events for a specific contract
+      description: Returns paginated decoded events emitted by the given contract.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated events for the contract
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, pagination]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DecodedEvent"
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+              examples:
+                success:
+                  summary: First page of events
+                  value:
+                    events: []
+                    pagination: { page: 1, limit: 25, total: 0 }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/stats:
+    get:
+      summary: Contract event statistics
+      description: >-
+        Returns aggregate counts (total events, unique callers, first/last seen
+        ledger) and a 30-day daily activity sparkline for the contract stats
+        widget.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Contract statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractStats"
+              examples:
+                success:
+                  summary: Active contract stats
+                  value:
+                    total_events: 1204
+                    unique_callers: 87
+                    first_seen_ledger: 1000001
+                    last_seen_ledger: 1050320
+                    events_per_day: []
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/build-metadata:
+    get:
+      summary: WASM build metadata for a contract
+      description: Returns compiler version, SDK version, and repository link extracted from the WASM binary.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Build metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WasmBuildMetadata"
+              examples:
+                success:
+                  summary: Build metadata
+                  value:
+                    wasm_hash: "abc123"
+                    compiler: "rustc 1.78.0"
+                    sdk_version: "21.0.0"
+                    repo_url: null
+                    size_bytes: 204800
+        "404":
+          description: No build metadata found for this contract
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/wasm:
+    get:
+      summary: WASM metadata panel for a contract
+      description: Returns WASM hash, compiler, SDK version, and binary size for the contract detail panel.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: WASM metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WasmBuildMetadata"
+        "404":
+          description: WASM not indexed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/abi:
+    get:
+      summary: Download standardised ABI JSON for a contract
+      description: >-
+        Returns a JSON file attachment combining on-chain spec with registered
+        metadata. The `Content-Disposition` header is set to trigger a browser
+        download as `<contractId>.abi.json`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: ABI JSON file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractAbi"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/spec-full:
+    get:
+      summary: Full on-chain spec for a contract (functions + custom types)
+      description: >-
+        Fetches the full contract WASM spec including custom structs, enums,
+        unions, and error_enums in addition to function signatures.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Full on-chain spec
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractSpecFull"
+        "404":
+          description: Contract not found or has no WASM spec
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/upgrades:
+    get:
+      summary: WASM upgrade lineage for a contract
+      description: Returns the ordered list of WASM upgrades detected for the contract, with old/new hash and transaction hash.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Upgrade history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UpgradeRecord"
+              examples:
+                empty:
+                  summary: No upgrades recorded
+                  value: []
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/migration-status:
+    get:
+      summary: SEP-49 migration tracker status for a contract
+      description: Returns the current migration phase and any pending actions for the contract.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Migration status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/circuit-breaker:
+    get:
+      summary: Circuit breaker pause status for a contract
+      description: Detects and returns whether the contract is currently paused and related circuit-breaker state.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Circuit breaker status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_paused:
+                    type: boolean
+                    example: false
+                  has_circuit_breaker:
+                    type: boolean
+                    example: true
+              examples:
+                active:
+                  summary: Contract is running normally
+                  value: { is_paused: false, has_circuit_breaker: true }
+                paused:
+                  summary: Contract is paused
+                  value: { is_paused: true, has_circuit_breaker: true }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/call-graph:
+    get:
+      summary: Sub-invocation call graph for a contract
+      description: Returns the top callee contracts by call frequency as a graph of nodes and weighted edges.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 50
+      responses:
+        "200":
+          description: Call graph
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallGraph"
+              examples:
+                example:
+                  summary: Contract with two callees
+                  value:
+                    nodes:
+                      - { id: "CC4VM2DTTR4QO4J4E5K2YUXM", label: "CC4VM2DTTR4QO4J4E5K2YUXM", type: "contract" }
+                      - { id: "CDEX7MZXYZ", label: "CDEX7MZXYZ", type: "contract" }
+                    edges:
+                      - { source: "CC4VM2DTTR4QO4J4E5K2YUXM", target: "CDEX7MZXYZ", label: "42 calls", call_count: 42 }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/rwa-metadata:
+    get:
+      summary: RWA-specific metadata for a contract
+      description: Returns whether the contract is a Real-World Asset token and its RWA type classification.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: RWA metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [is_rwa, rwa_type]
+                properties:
+                  is_rwa:
+                    type: boolean
+                    example: false
+                  rwa_type:
+                    type: string
+                    nullable: true
+                    example: null
+        "404":
+          description: Contract not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/storage-tiers:
+    get:
+      summary: Storage write counts by durability tier
+      description: Returns counts of state writes broken down by Soroban storage durability tier (temporary, persistent, instance).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Storage tier counts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StorageTierCounts"
+              examples:
+                success:
+                  summary: Storage tier breakdown
+                  value: { temporary: 30, persistent: 50, instance: 3 }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/ttl:
+    get:
+      summary: Live TTL status for a contract
+      description: >-
+        Queries Soroban RPC `getLedgerEntries` for the contract instance and
+        code ledger keys and returns the expiration ledger alongside the
+        current ledger height.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: TTL status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractTtl"
+              examples:
+                success:
+                  summary: TTL response
+                  value:
+                    contract_id: "CC4VM2DTTR4QO4J4E5K2YUXM"
+                    current_ledger: 1050320
+                    instance: { live_until_ledger: 1100000 }
+                    code: { live_until_ledger: 1200000 }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/state-diffs:
+    get:
+      summary: Storage state-diff timeline for a contract
+      description: Returns a time-ordered list of ledger state changes for a contract, optionally filtered by storage key.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to a specific storage key
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 200
+            maximum: 500
+      responses:
+        "200":
+          description: State diff records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+              examples:
+                empty:
+                  summary: No state diffs recorded
+                  value: []
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/source-verifications:
+    get:
+      summary: List multi-signature source verifications for a contract
+      description: Returns all WASM source verification records for the contract, optionally filtered by WASM hash.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: wasm_hash
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Source verification records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SourceVerification"
+              examples:
+                empty:
+                  summary: No verifications yet
+                  value: []
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Add a multi-signature source verification for a contract
+      description: Submits a new WASM source verification record signed by a verifier.
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wasm_hash, signer, signature, compiler_hash]
+              properties:
+                wasm_hash:
+                  type: string
+                  example: "abc123def456"
+                signer:
+                  type: string
+                  example: "GABC..."
+                signature:
+                  type: string
+                  example: "base64-signature"
+                compiler_hash:
+                  type: string
+                  example: "sha256-of-compiler-binary"
+      responses:
+        "201":
+          description: Verification record stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        "400":
+          description: Missing required field
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{id}/holders:
+    get:
+      summary: Token holder list for a SEP-41 contract
+      description: Returns a sorted list of addresses and their token balances for the given contract.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Holder list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, decimals, total_holders, holders]
+                properties:
+                  contract_id:
+                    type: string
+                  decimals:
+                    type: integer
+                    example: 7
+                  total_holders:
+                    type: integer
+                    example: 42
+                  holders:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TokenHolder"
+              examples:
+                success:
+                  summary: Token holder list
+                  value:
+                    contract_id: "CC4VM2DTTR4QO4J4E5K2YUXM"
+                    decimals: 7
+                    total_holders: 2
+                    holders:
+                      - { address: "GABC...", balance_raw: "10000000000", balance: "1000.0000000" }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{id}/volume:
+    get:
+      summary: 24-hour rolling transfer volume for a token
+      description: Returns the total transfer volume over the last 24 hours for the given SEP-41 contract.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: 24h volume
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, window]
+                properties:
+                  contract_id:
+                    type: string
+                  window:
+                    type: string
+                    example: "24h"
+                  volume_raw:
+                    type: string
+                    nullable: true
+                  volume:
+                    type: string
+                    nullable: true
+              examples:
+                success:
+                  summary: 24h volume
+                  value:
+                    contract_id: "CC4VM2DTTR4QO4J4E5K2YUXM"
+                    window: "24h"
+                    volume_raw: "500000000000"
+                    volume: "50000.0000000"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{contractId}/nfts:
+    get:
+      summary: List minted NFTs for a contract
+      description: Returns a paginated list of all minted NFT token IDs with owner, metadata, and last transfer ledger.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: owner
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to tokens owned by this address
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Paginated NFT list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NftListResponse"
+              examples:
+                empty:
+                  summary: No NFTs minted yet
+                  value:
+                    contract_id: "CC4VM2DTTR4QO4J4E5K2YUXM"
+                    tokens: []
+                    pagination: { page: 1, limit: 50, total: 0, total_pages: 0, has_next: false }
+        "422":
+          description: Invalid page or limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{contractId}/nfts/{tokenId}/history:
+    get:
+      summary: Transfer history for a single NFT token
+      description: Returns the full mint and transfer event history for one NFT token ID.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: tokenId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "42"
+      responses:
+        "200":
+          description: NFT event history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, token_id, events]
+                properties:
+                  contract_id:
+                    type: string
+                  token_id:
+                    type: string
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DecodedEvent"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/auth-tree:
+    post:
+      summary: Parse multi-sig ContractAuth authorization trees
+      description: >-
+        Accepts an array of base64-encoded `SorobanAuthorizationEntry` XDR strings
+        and returns an ordered tree of signers and their invocation scopes.
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [auth]
+              properties:
+                auth:
+                  type: array
+                  items:
+                    type: string
+                  description: Base64-encoded SorobanAuthorizationEntry XDR values
+                  example: ["AAAAAA=="]
+      responses:
+        "200":
+          description: Parsed auth tree
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    signer:
+                      type: string
+                    invocations:
+                      type: array
+                      items:
+                        type: object
+        "400":
+          description: Invalid input or XDR parse error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/burn-alerts:
+    get:
+      summary: Suspicious burn sequence alerts
+      description: Returns alerts flagged by the burn detector for rapid token supply contraction.
+      parameters:
+        - name: contract
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter alerts to a specific contract ID
+      responses:
+        "200":
+          description: Burn alert list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+              examples:
+                empty:
+                  summary: No burn alerts active
+                  value: []
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/keys:
+    post:
+      summary: Request a new self-service API key (requires email verification)
+      description: >-
+        Creates an inactive API key and sends a verification email. The key is
+        not usable until the email link is clicked. Does not require existing
+        authentication.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email]
+              properties:
+                name:
+                  type: string
+                  example: "my-app"
+                email:
+                  type: string
+                  format: email
+                  example: "developer@example.com"
+      responses:
+        "201":
+          description: Key created, verification email sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  keyId:
+                    type: integer
+                  keyPrefix:
+                    type: string
+                  email:
+                    type: string
+                  verified:
+                    type: boolean
+                    example: false
+              examples:
+                success:
+                  summary: Key pending verification
+                  value:
+                    message: "API key created successfully. Please check your email to verify and activate your key."
+                    keyId: 7
+                    keyPrefix: "AbCdEfGh"
+                    email: "developer@example.com"
+                    verified: false
+        "400":
+          description: Invalid name or email
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A key for this email is already pending verification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Email service not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/keys/verify:
+    get:
+      summary: Verify email and activate an API key
+      description: >-
+        Validates the one-time token from the verification email, activates the
+        API key, and returns the full raw key. The key is only shown once.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: One-time verification token from the email link
+      responses:
+        "200":
+          description: Key verified and activated; raw key shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  key:
+                    type: string
+                    description: Full raw API key — save this, it will not be shown again
+                  keyId:
+                    type: integer
+                  name:
+                    type: string
+                  email:
+                    type: string
+                  tier:
+                    type: string
+              examples:
+                success:
+                  summary: Key activated
+                  value:
+                    message: "API key verified and activated successfully. Save this key securely - it will not be shown again."
+                    key: "AbCdEfGhIjKlMnOpQrStUvWx..."
+                    keyId: 7
+                    name: "my-app"
+                    email: "developer@example.com"
+                    tier: "free"
+        "400":
+          description: Token missing, already verified, or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Invalid verification token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sandbox:
+    post:
+      summary: Create or update a sandbox session
+      description: Persists a sandbox session (files + metadata) identified by `sandboxId`. Uses upsert semantics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sandboxId, templateId]
+              properties:
+                sandboxId:
+                  type: string
+                  example: "sandbox-abc123"
+                templateId:
+                  type: string
+                  example: "soroban-hello-world"
+                files:
+                  type: object
+                  additionalProperties:
+                    type: string
+                metadata:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "201":
+          description: Sandbox created or updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        "400":
+          description: Missing sandboxId or templateId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sandbox/{id}:
+    get:
+      summary: Retrieve a sandbox session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      responses:
+        "200":
+          description: Sandbox record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxRecord"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      summary: Delete a sandbox session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      responses:
+        "200":
+          description: Sandbox deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sandboxes:
+    get:
+      summary: List sandbox sessions
+      description: Returns a paginated list of all sandbox sessions ordered by most recently updated.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Paginated sandbox list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sandboxes, total]
+                properties:
+                  sandboxes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SandboxSummary"
+                  total:
+                    type: integer
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sandbox/simulate:
+    post:
+      summary: Simulate a raw XDR transaction envelope in the sandbox
+      description: Accepts a base64-encoded `TransactionEnvelope` XDR and simulates it directly against Soroban RPC.
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [xdrEnvelope]
+              properties:
+                xdrEnvelope:
+                  type: string
+                  description: Base64-encoded TransactionEnvelope XDR
+                  example: "AAAAAgAAAAA..."
+      responses:
+        "200":
+          description: Simulation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulateResult"
+              examples:
+                success:
+                  summary: Successful simulation
+                  value:
+                    success: true
+                    returnValue: "AAAAAA=="
+                    cost: { cpuInsns: "12450", memBytes: "4096" }
+                    minResourceFee: "1200"
+                    latestLedger: 1050320
+        "400":
+          description: Missing xdrEnvelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/spec/{id}:
+    get:
+      summary: On-chain spec for a contract (functions only, legacy)
+      description: Fetches function signatures from the contract WASM binary. Use `/api/contracts/{id}/spec-full` for types too.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Function spec array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FunctionSpec"
+        "404":
+          description: Contract not found or has no spec
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/spec/{id}/full:
+    get:
+      summary: Full on-chain spec via legacy path
+      description: Returns functions and custom types parsed from the contract WASM. Equivalent to `/api/contracts/{id}/spec-full`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+      responses:
+        "200":
+          description: Full spec with functions and types
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractSpecFull"
+        "404":
+          description: Contract not found or has no WASM spec
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/simulate:
+    post:
+      summary: Simulate a contract call via RPC
+      description: Builds a transaction envelope for the given contract function call and simulates it against Soroban RPC. Returns the return value and resource cost estimate.
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contractId, fn]
+              properties:
+                contractId:
+                  type: string
+                  example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+                fn:
+                  type: string
+                  example: "balance"
+                args:
+                  type: array
+                  items: {}
+                  example: ["GABC..."]
+      responses:
+        "200":
+          description: Simulation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimulateResult"
+              examples:
+                success:
+                  summary: Successful simulation
+                  value:
+                    success: true
+                    returnValue: "AAAAAA=="
+                    cost: { cpuInsns: "12450", memBytes: "4096" }
+                error:
+                  summary: Simulation error
+                  value:
+                    success: false
+                    error: "HostError: Value(InvalidInput)"
+        "400":
+          description: Missing contractId or fn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/verify:
+    post:
+      summary: Verify ABI without registering
+      description: Checks whether the supplied function list matches the on-chain contract spec without persisting anything.
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contractId, functions]
+              properties:
+                contractId:
+                  type: string
+                  example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+                functions:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FunctionSpec"
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                  missingFunctions:
+                    type: array
+                    items:
+                      type: string
+                  argMismatch:
+                    type: array
+                    items:
+                      type: object
+              examples:
+                valid:
+                  summary: ABI matches on-chain spec
+                  value: { valid: true, missingFunctions: [], argMismatch: [] }
+                invalid:
+                  summary: ABI has mismatches
+                  value: { valid: false, missingFunctions: ["mint"], argMismatch: [] }
+        "400":
+          description: Missing contractId or functions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/contracts/{id}/transactions:
+    get:
+      summary: Contract transaction history (v1)
+      description: Returns paginated transactions for a contract, with optional function name and ledger range filters.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: function_name
+          in: query
+          schema:
+            type: string
+        - name: start_ledger
+          in: query
+          schema:
+            type: integer
+        - name: end_ledger
+          in: query
+          schema:
+            type: integer
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated transaction list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/batch:
+    post:
+      summary: Dispatch multiple API sub-requests in one call
+      description: >-
+        Accepts an array of sub-requests and returns results in the same order.
+        A failing sub-request is captured as its own error entry and never aborts siblings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/BatchSubRequest"
+                - type: object
+                  required: [requests]
+                  properties:
+                    requests:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/BatchSubRequest"
+            examples:
+              array_form:
+                summary: Array body
+                value:
+                  - path: "/api/events?limit=2"
+                  - path: "/api/stats"
+      responses:
+        "200":
+          description: Array of sub-request results in submission order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BatchSubResult"
+              examples:
+                success:
+                  summary: Two successful sub-requests
+                  value:
+                    - status: 200
+                      body: { data: [], next_cursor: null }
+                    - status: 200
+                      body: { events: 84231, contracts: 312 }
+        "400":
+          description: requests must be an array
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/batch/simulate:
+    post:
+      summary: Simulate a batch of contract calls
+      description: Simulates each call in the batch and returns per-call results with resource costs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [calls]
+              properties:
+                calls:
+                  type: array
+                  items:
+                    type: object
+                sourceAccount:
+                  type: string
+                networkPassphrase:
+                  type: string
+      responses:
+        "200":
+          description: Per-call simulation results
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: calls must be an array
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/batch/estimate-gas:
+    post:
+      summary: Estimate gas for a batch of contract calls
+      description: Returns per-call gas estimates and a combined total across CPU instructions, memory, and fee.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [calls]
+              properties:
+                calls:
+                  type: array
+                  items:
+                    type: object
+                sourceAccount:
+                  type: string
+      responses:
+        "200":
+          description: Gas estimates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  estimates:
+                    type: array
+                    items:
+                      type: object
+                  totalGas:
+                    type: object
+                    properties:
+                      cpuInsns:
+                        type: integer
+                      memBytes:
+                        type: integer
+                      fee:
+                        type: integer
+        "400":
+          description: calls must be an array
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/batch/optimize:
+    post:
+      summary: Reorder batch calls for minimum gas
+      description: Returns the optimal call order and estimated gas savings versus the original order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [calls]
+              properties:
+                calls:
+                  type: array
+                  items:
+                    type: object
+                sourceAccount:
+                  type: string
+      responses:
+        "200":
+          description: Optimized order with gas breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  optimizedOrder:
+                    type: array
+                    items:
+                      type: string
+                  gasBreakdown:
+                    type: array
+                    items:
+                      type: object
+                  estimatedSavings:
+                    type: object
+        "400":
+          description: calls must be an array
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/batch/validate:
+    post:
+      summary: Validate a batch of calls for conflicts
+      description: Checks for conflicting state writes or other issues without simulating on-chain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [calls]
+              properties:
+                calls:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: calls must be an array
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/integrity:
+    get:
+      summary: Run data integrity checks
+      description: Checks for sequence gaps, ledger monotonicity violations, and hash count mismatches.
+      security:
+        - AdminBearerAuth: []
+      responses:
+        "200":
+          description: Integrity check result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  failed:
+                    type: array
+                    items:
+                      type: object
+              examples:
+                ok:
+                  summary: All checks passed
+                  value: { ok: true }
+                failed:
+                  summary: Sequence gap detected
+                  value:
+                    ok: false
+                    failed:
+                      - check: "seq_gap"
+                        details: { gap_count: 3 }
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/api-keys:
+    get:
+      summary: List all API keys (paginated)
+      description: Returns all keys without exposing key_hash values.
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+      responses:
+        "200":
+          description: Paginated key list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Create a new API key (admin)
+      description: Creates an active API key and returns the raw key once.
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                tier:
+                  type: string
+                  enum: [free, pro, enterprise]
+                  default: free
+      responses:
+        "201":
+          description: Key created; raw key shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Missing or invalid fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/api-keys/{id}:
+    patch:
+      summary: Update API key metadata
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                tier:
+                  type: string
+                  enum: [free, pro, enterprise]
+                revoked:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated key record
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Invalid fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Key not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      summary: Soft-delete an API key
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Key deleted (no body)
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Key not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/api-keys/{id}/rotate:
+    post:
+      summary: Rotate an API key
+      description: Generates a new raw key for the given record, invalidating the previous one.
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: New raw key (shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Key not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/api-keys/{id}/usage:
+    get:
+      summary: Usage history for an API key
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Usage records
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/audit-log:
+    get:
+      summary: Filtered, paginated audit log
+      description: Returns API request audit log entries with optional filters on key, IP, endpoint, status code, and time range.
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: api_key_id
+          in: query
+          schema:
+            type: string
+        - name: ip
+          in: query
+          schema:
+            type: string
+        - name: endpoint
+          in: query
+          schema:
+            type: string
+        - name: status_code
+          in: query
+          schema:
+            type: integer
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, limit, offset]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditLogEntry"
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/audit-log/export:
+    get:
+      summary: Export audit log as CSV or JSON
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+            default: json
+        - name: api_key_id
+          in: query
+          schema:
+            type: string
+        - name: ip
+          in: query
+          schema:
+            type: string
+        - name: endpoint
+          in: query
+          schema:
+            type: string
+        - name: status_code
+          in: query
+          schema:
+            type: integer
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 1000
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: File download (CSV or JSON)
+          content:
+            text/csv:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditLogEntry"
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/analytics/rate-limit-hits:
+    get:
+      summary: Rate-limit hit count by minute
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: minutes
+          in: query
+          schema:
+            type: integer
+            default: 60
+            maximum: 1440
+      responses:
+        "200":
+          description: Per-minute 429 hit counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    minute:
+                      type: string
+                      format: date-time
+                    hits:
+                      type: integer
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/analytics/top-users:
+    get:
+      summary: Top API users by request count
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: window
+          in: query
+          schema:
+            type: string
+            enum: [1h, 24h, 7d]
+            default: 24h
+      responses:
+        "200":
+          description: Top 20 users by request count
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    api_key_id:
+                      type: string
+                    key_name:
+                      type: string
+                    total_requests:
+                      type: integer
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/analytics/violation-heatmap:
+    get:
+      summary: Rate-limit violation heatmap (hour × day of week)
+      description: Returns 429 counts grouped by hour-of-day and day-of-week over the last 30 days.
+      security:
+        - AdminBearerAuth: []
+      responses:
+        "200":
+          description: Violation heatmap data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    hour:
+                      type: integer
+                    day_of_week:
+                      type: integer
+                    violations:
+                      type: integer
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/admin/analytics/upgrade-recommendations:
+    get:
+      summary: API key tier upgrade recommendations
+      description: Returns keys whose average daily request count exceeds 80% of their tier limit over the last 7 days.
+      security:
+        - AdminBearerAuth: []
+      responses:
+        "200":
+          description: Upgrade candidates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    name:
+                      type: string
+                    tier:
+                      type: string
+                    avg_daily_requests:
+                      type: number
+                    daily_tier_limit:
+                      type: number
+                      nullable: true
+        "401":
+          description: Missing or invalid admin token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/billing:
+    post:
+      summary: Stripe webhook receiver
+      description: >-
+        Receives Stripe webhook events. Mounted before express.json() for raw
+        body access; validates the Stripe-Signature header. Not intended for
+        direct client use.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Webhook processed
+        "400":
+          description: Invalid Stripe signature or payload
+        "500":
+          description: Internal server error
+
+  /api/setup/doctor:
+    get:
+      summary: Run system diagnostic checks (non-production only)
+      description: Executes the full doctor checklist. Returns 403 when NODE_ENV=production.
+      responses:
+        "200":
+          description: Diagnostic report
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "403":
+          description: Not available in production
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/test-db:
+    post:
+      summary: Test a database connection string (non-production only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [databaseUrl]
+              properties:
+                databaseUrl:
+                  type: string
+                  example: "postgres://user:pass@localhost:5432/db"
+      responses:
+        "200":
+          description: Connection test result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  error:
+                    type: string
+                    nullable: true
+        "400":
+          description: Missing databaseUrl
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Not available in production
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/save-config:
+    post:
+      summary: Persist env vars to .env file (non-production only)
+      description: Writes SOROBAN_RPC_URL, DATABASE_URL, and POLL_MS to the root .env file.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sorobanRpcUrl:
+                  type: string
+                databaseUrl:
+                  type: string
+                pollMs:
+                  type: integer
+      responses:
+        "200":
+          description: Config saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "403":
+          description: Not available in production
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/db-init:
+    post:
+      summary: Initialise or upgrade the database schema (non-production only)
+      description: Calls db.init() to apply all pending migrations. Disabled in production.
+      responses:
+        "200":
+          description: Schema initialised
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "403":
+          description: Not available in production
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/gaps:
+    get:
+      summary: Ledger gap detection status
+      description: Returns pending indexer ledger gaps and the count of gaps closed in the last 24 hours.
+      responses:
+        "200":
+          description: Gap detection stats
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/rpc-metrics:
+    get:
+      summary: RPC node performance metrics
+      description: Returns latency history, uptime, and error rate per configured Soroban RPC node.
+      responses:
+        "200":
+          description: RPC metrics per node
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/rpc-nodes:
+    get:
+      summary: Live health status of all RPC nodes
+      description: Returns current health status from the multi-node RPC client.
+      responses:
+        "200":
+          description: RPC node status list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/export/events:
+    get:
+      summary: Export events as CSV or JSON
+      description: Downloads up to 10,000 decoded events matching the filter criteria as a file attachment.
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+        - name: contract
+          in: query
+          schema:
+            type: string
+        - name: fn
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [soroban, classic]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10000
+            maximum: 10000
+      responses:
+        "200":
+          description: File download (CSV or JSON)
+          content:
+            text/csv:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DecodedEvent"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/export/contracts:
+    get:
+      summary: Export all registered contracts as CSV or JSON
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+      responses:
+        "200":
+          description: File download (CSV or JSON)
+          content:
+            text/csv:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContractMeta"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/cache/stats:
+    get:
+      summary: Cache analytics
+      description: Returns hit/miss rates, latency percentiles, invalidation counts, and top cached keys.
+      responses:
+        "200":
+          description: Cache analytics object
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/stats:
+    get:
+      summary: Global aggregate counts
+      description: Returns the total number of indexed events and registered contracts.
+      responses:
+        "200":
+          description: Global stats
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, contracts]
+                properties:
+                  events:
+                    type: integer
+                    example: 84231
+                  contracts:
+                    type: integer
+                    example: 312
+              examples:
+                success:
+                  summary: Global counts
+                  value: { events: 84231, contracts: 312 }
         "500":
           description: Internal server error
           content:
@@ -789,6 +4020,70 @@ components:
           type: string
           example: "Detailed error message"
 
+    WalletBalance:
+      type: object
+      required: [asset_code, asset_issuer, balance, is_native]
+      properties:
+        asset_code:
+          type: string
+          example: "USDC"
+        asset_issuer:
+          type: string
+          nullable: true
+          description: Null for the native XLM asset
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        balance:
+          type: string
+          example: "42.5000000"
+        is_native:
+          type: boolean
+          example: false
+
+    HorizonAccount:
+      type: object
+      nullable: true
+      description: >-
+        Null when the account is unfunded (Horizon 404) or Horizon could not
+        be reached — see #551.
+      required: [sequence, subentry_count, home_domain]
+      properties:
+        sequence:
+          type: string
+          example: "123456789012345"
+        subentry_count:
+          type: integer
+          example: 3
+        home_domain:
+          type: string
+          nullable: true
+          example: "example.com"
+
+    Asset:
+      type: object
+      required: [code, issuer, name, decimals, logo_url, home_domain]
+      properties:
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+        name:
+          type: string
+          nullable: true
+          example: "USDC"
+        decimals:
+          type: integer
+          example: 7
+        logo_url:
+          type: string
+          nullable: true
+          example: "https://centre.io/logo.png"
+        home_domain:
+          type: string
+          nullable: true
+          example: "centre.io"
+
     Rfc7807Error:
       type: object
       required: [type, title, status, detail]
@@ -862,6 +4157,19 @@ components:
         is_clawback:
           type: boolean
           example: false
+        type:
+          type: string
+          enum: [soroban, classic]
+          example: "soroban"
+          description: Event category — "classic" for Horizon payment/path-payment operations, "soroban" otherwise.
+        slippage_bps:
+          type: integer
+          nullable: true
+          example: 100
+          description: >-
+            DEX swap slippage in basis points (1% = 100 bps), computed as
+            |amount_out - min_amount_out| / min_amount_out. Present only for
+            swap events where min_amount_out is known.
 
     CursorPaginatedEvents:
       type: object
@@ -995,10 +4303,66 @@ components:
           type: string
           nullable: true
           example: null
+        protocol_type:
+          type: string
+          enum: [token, dex, lending, nft, bridge, other]
+          default: other
+          description: Auto-tagged protocol type (Issue #518)
+        is_verified:
+          type: boolean
+          default: false
+          description: Whether the ABI has been verified against the on-chain registry (Issue #519)
+        verified_ledger:
+          type: integer
+          nullable: true
+          description: Ledger at which verification was last confirmed
         dependency_advisory:
           type: object
           nullable: true
           example: null
+
+    AbiHistoryEntry:
+      type: object
+      required: [abi_version, functions, registered_by, min_ledger, created_at]
+      description: Single ABI version snapshot (Issue #517)
+      properties:
+        abi_version:
+          type: integer
+          description: Monotonically increasing ABI version number
+          example: 0
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionSpec"
+        registered_by:
+          type: string
+          description: Address or identifier of the registrant
+        min_ledger:
+          type: integer
+          description: Ledger at which this ABI version became active
+        created_at:
+          type: string
+          format: date-time
+
+    ContractsListResponse:
+      type: object
+      required: [contracts, pagination]
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractMeta"
+        pagination:
+          type: object
+          properties:
+            page:
+              type: integer
+            limit:
+              type: integer
+            total:
+              type: integer
+            total_pages:
+              type: integer
 
     ContractRegistration:
       type: object
@@ -1017,16 +4381,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FunctionSpec"
+        protocol_type:
+          type: string
+          enum: [token, dex, lending, nft, bridge, other]
+          description: Optional explicit protocol type; auto-tagged from functions if omitted
 
     FunctionSpec:
       type: object
-      required: [name, description, args]
+      required: [name, args]
       properties:
         name:
           type: string
           example: "transfer"
         description:
           type: string
+          nullable: true
           example: "Transfers tokens between wallets"
         args:
           type: array
@@ -1040,3 +4409,110 @@ components:
               type:
                 type: string
                 example: "address"
+
+    ContractStats:
+      type: object
+      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day]
+      properties:
+        total_events:
+          type: integer
+          example: 1204
+        unique_callers:
+          type: integer
+          example: 87
+        first_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1000001
+        last_seen_ledger:
+          type: integer
+          nullable: true
+          example: 1050320
+        events_per_day:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyEventCount"
+
+    DailyEventCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-07-25"
+        count:
+          type: integer
+          example: 42
+
+    StorageTierCounts:
+      type: object
+      required: [temporary, persistent, instance]
+      properties:
+        temporary:
+          type: integer
+          example: 30
+        persistent:
+          type: integer
+          example: 50
+        instance:
+          type: integer
+          example: 3
+
+    AssetMetadata:
+      type: object
+      required: [name, code, issuer, decimals, domain]
+      properties:
+        name:
+          type: string
+          example: "USDC"
+        code:
+          type: string
+          example: "USDC"
+        issuer:
+          type: string
+          example: "GA22K667OGPC3R32NRJTNQG4KWT2OFGHNNGZ2JQMSIGLT7AFHVIOMJ43"
+        decimals:
+          type: integer
+          example: 7
+        domain:
+          type: string
+          nullable: true
+          example: "centre.io"
+
+  headers:
+    X-RateLimit-Limit:
+      description: >-
+        Maximum requests allowed in the current window for the active tier
+        and endpoint group (sustained rpm).
+      schema:
+        type: integer
+        example: 60
+    X-RateLimit-Remaining:
+      description: >-
+        Tokens remaining in the current window. Always ≥ 0.
+      schema:
+        type: integer
+        example: 42
+    X-RateLimit-Reset:
+      description: >-
+        Unix timestamp (seconds since epoch) when the current rate-limit window
+        resets and the bucket is replenished.
+      schema:
+        type: integer
+        format: int64
+        example: 1722211200
+    X-RateLimit-Tier:
+      description: >-
+        Active rate-limit tier for this request.
+        One of: `unauthenticated`, `free`, `pro`, `enterprise`.
+      schema:
+        type: string
+        enum: [unauthenticated, free, pro, enterprise]
+        example: "free"
+    Retry-After:
+      description: >-
+        Number of seconds to wait before retrying. Only present on 429 responses.
+      schema:
+        type: integer
+        example: 5

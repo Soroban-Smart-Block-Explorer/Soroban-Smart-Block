@@ -7,13 +7,15 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
-import { db } from "./db.js";
+import { db as defaultDb, pool } from "./db.js";
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
+import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
 import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus } from "./rpcMultiNode.js";
+import { cacheHitTotal, cacheMissTotal, apiRequestDuration } from "./metrics.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
 import { geoIpRateLimiter } from "./rateLimit/geoIpLimiter.js";
@@ -25,6 +27,7 @@ import { rateLimitHeaderWriter } from "./rateLimit/headers.js";
 import { auditLoggerMiddleware } from "./audit/auditLogger.js";
 import registerAdminRoutes from "./routes/admin.js";
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
+import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
 import {
   cacheInvalidate,
   cacheGet,
@@ -42,25 +45,65 @@ import { registry } from "./metrics.js";
 import pg from "pg";
 import { getBurnAlerts } from "./burnDetector.js";
 import { formatAmount } from "./formatAmount.js";
+import { sendVerificationEmail, isConfigured } from "./emailService.js";
 import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
+import { resolveAsset } from "./horizonClient.js";
+import { createRequire } from "module";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+
+// ── AJV schema validator for POST /api/contracts ──────────────────────────────
+const _require = createRequire(import.meta.url);
+const _contractRegistrySchema = _require("./contractRegistry.schema.json");
+const _ajv = new Ajv({ allErrors: true, strict: false });
+addFormats(_ajv);
+// The POST body uses 'id' instead of 'contractId' — patch the schema for validation
+const _postContractSchema = {
+  ..._contractRegistrySchema,
+  required: _contractRegistrySchema.required.map((k) => (k === "contractId" ? "id" : k)),
+  properties: {
+    ..._contractRegistrySchema.properties,
+    id: _contractRegistrySchema.properties.contractId,
+  },
+};
+const _validateContractPost = _ajv.compile(_postContractSchema);
 
 function requestIdMiddleware(req, _res, next) {
   req.id = req.headers["x-request-id"] || randomUUID();
+  // Echo the request id in responses so clients and tests can observe it.
+  _res.setHeader && _res.setHeader("X-Request-Id", req.id);
+  // Preserve incoming traceparent header if present
+  const tp = req.headers["traceparent"];
+  if (tp) _res.setHeader && _res.setHeader("traceparent", tp);
   next();
 }
 
-function createHttpLogger(_logDestination) {
+function createHttpLogger(logDestination) {
   return (req, res, next) => {
     res.on("finish", () => {
-      console.log(`[api] ${req.method} ${req.url} ${res.statusCode}`);
+      const line = `[api] ${req.method} ${req.url} ${res.statusCode} ${req.id || ''}\n`;
+      try {
+        if (logDestination && typeof logDestination.write === "function") {
+          logDestination.write(line);
+        } else {
+          console.log(line.trim());
+        }
+      } catch (e) {
+        console.log(line.trim());
+      }
     });
     next();
   };
 }
 
-function metricsMiddleware(_req, _res, next) {
+function metricsMiddleware(req, res, next) {
+  const endTimer = apiRequestDuration.startTimer();
+  res.on("finish", () => {
+    const route = req.route && req.route.path ? req.route.path : req.path || req.url;
+    endTimer({ method: req.method, route: String(route), status: String(res.statusCode) });
+  });
   next();
 }
 
@@ -103,6 +146,7 @@ function makeCache(cacheType, getKey) {
 
     const cached = await cacheGet(key, cacheType);
     if (cached !== null) {
+      cacheHitTotal.inc({ cache: cacheType });
       const etag = generateETag(cached);
       if (req.headers["if-none-match"] === etag) {
         recordCachedLatency(Date.now() - start);
@@ -116,6 +160,7 @@ function makeCache(cacheType, getKey) {
       recordAccess(key);
       return res.json(cached);
     }
+    cacheMissTotal.inc({ cache: cacheType });
 
     // Miss: intercept res.json to cache the successful response
     const originalJson = res.json.bind(res);
@@ -154,8 +199,24 @@ const writeLimiter = rateLimit({
 });
 
 export function createApi({ logDestination, dbOverride } = {}) {
+  // Allow callers (tests) to inject a fake DB implementation via `dbOverride`.
+  const db = dbOverride || defaultDb;
+  const runningUnderTest = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
   const app = express();
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          connectSrc: ["'self'", "ws:"],
+        },
+      },
+    }),
+  );
+  app.use((req, res, next) => {
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=()");
+    next();
+  });
   const isWildcard = process.env.CORS_ORIGINS === '*';
   const allowedOrigins = isWildcard
     ? []
@@ -166,7 +227,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   const corsOptionsDelegate = (req, callback) => {
     const corsOptions = {
       methods: ['GET', 'POST', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-API-Key', 'X-CSRF-Token'],
       maxAge: 86400,
     };
 
@@ -194,6 +255,18 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.use(createHttpLogger(logDestination));
   app.use(metricsMiddleware);
 
+  // ── CSRF token endpoint ────────────────────────────────────────────────────
+  // Must be registered BEFORE verifyCsrf so it is exempt from CSRF checking
+  // (it is what issues the token in the first place).
+  app.get("/api/csrf-token", csrfTokenHandler);
+
+  // ── CSRF verification — applied globally to all state-changing methods ─────
+  // Exemptions (handled inside verifyCsrf):
+  //   • x-api-key header present (machine-to-machine)
+  //   • WebSocket upgrade requests
+  //   • GET / HEAD / OPTIONS (safe methods)
+  app.use(verifyCsrf);
+
   // ── Auth & Rate Limiting Middleware Stack ─────────────────────────────────
   // Order matters: audit logger sets _startTime first, then auth resolves tier,
   // then geo/concurrent/bucket limiters enforce quotas, then headers are set.
@@ -211,24 +284,34 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // app.use(generalLimiter);
 
   // ── Admin routes (auth-gated) ─────────────────────────────────────────────
+  app.use("/api/admin", (req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
   registerAdminRoutes(app);
 
   // ── API Documentation ────────────────────────────────────────────────────────
   const openApiPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../docs/api/openapi.yaml");
   if (fs.existsSync(openApiPath)) {
-    const yaml = fs.readFileSync(openApiPath, "utf8");
-    import("yaml")
-      .then(({ parse }) => {
-        const spec = parse(yaml);
-        app.use(
-          "/api/docs",
-          swaggerUi.serve,
-          swaggerUi.setup(spec, {
-            customCss: ".swagger-ui .topbar { display: none }",
-          }),
-        );
-      })
-      .catch(() => {});
+    // Avoid dynamic imports during test runs which may resolve after Jest
+    // tears down the environment and cause 'import after teardown' errors.
+    // Detect test runs started by Jest (NODE_ENV may not always be set).
+    const runningUnderTest = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
+    if (!runningUnderTest) {
+      const yaml = fs.readFileSync(openApiPath, "utf8");
+      import("yaml")
+        .then(({ parse }) => {
+          const spec = parse(yaml);
+          app.use(
+            "/api/docs",
+            swaggerUi.serve,
+            swaggerUi.setup(spec, {
+              customCss: ".swagger-ui .topbar { display: none }",
+            }),
+          );
+        })
+        .catch(() => {});
+    }
   }
 
   app.get("/api/openapi.yaml", (_req, res) => {
@@ -540,25 +623,91 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
-  // GET /api/contracts?page=&limit=  — paginated list of registered contracts
+  // GET /api/contracts?page=&limit=&type=  — paginated list of registered contracts
   app.get(
     "/api/contracts",
     makeCache("contracts_list", (req) => {
       const page = Number(req.query.page) || 1;
       const limit = Number(req.query.limit) || 25;
-      return `contracts:list:${page}:${limit}`;
+      const q = req.query.q || "";
+      const type = req.query.type || "all";
+      return `contracts:list:${page}:${limit}:${q}:${type}`;
     }),
     async (req, res) => {
       try {
         const page = Number(req.query.page) || 1;
         const limit = Math.min(Number(req.query.limit) || 25, 100);
-        const result = await db.listContracts({ page, limit });
-        res.json(result);
+        const q = (req.query.q || "").trim();
+        const type = (req.query.type || "all").toLowerCase();
+
+        // Build dynamic query supporting optional search (q) and type filter
+        const params = [];
+        const conditions = [];
+
+        if (q) {
+          params.push(`%${q}%`);
+          const idx = params.length;
+          conditions.push(`(name ILIKE $${idx} OR description ILIKE $${idx})`);
+        }
+
+        if (type && type !== "all") {
+          if (type === "verified") {
+            // A contract is "verified" when it has at least one source verification
+            conditions.push(
+              `id IN (SELECT DISTINCT contract_id FROM source_verifications)`,
+            );
+          } else {
+            // Match protocol_type column (may not exist on all installs — guard with COALESCE)
+            params.push(type);
+            conditions.push(`LOWER(COALESCE(protocol_type, '')) = $${params.length}`);
+          }
+        }
+
+        const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+        const offset = (page - 1) * limit;
+        params.push(limit, offset);
+
+        const [{ rows }, { rows: countRows }] = await Promise.all([
+          db.query(
+            `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused, is_rwa, rwa_type,
+                    protocol_type, created_at
+             FROM contracts ${where}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params,
+          ),
+          db.query(
+            `SELECT COUNT(*)::INT AS total FROM contracts ${where}`,
+            params.slice(0, params.length - 2),
+          ),
+        ]);
+
+        const total = countRows[0].total;
+        res.json({
+          contracts: rows,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: Math.ceil(total / limit),
+          },
+        });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
     },
   );
+
+  // GET /api/contracts/:id/abi-history — ABI version history for a contract
+  // Returns all ABI snapshots ordered by version ascending: [{ abi_version, functions, min_ledger, created_at }, ...]
+  app.get("/api/contracts/:id/abi-history", async (req, res) => {
+    try {
+      const history = await db.getContractAbiHistory(req.params.id);
+      res.json({ contract_id: req.params.id, history });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   // GET /api/contracts/:id/events?page=&limit=  — events for a specific contract
   app.get("/api/contracts/:id/events", async (req, res) => {
@@ -607,11 +756,24 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
+
+
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
     try {
       const meta = await db.getWasmBuildMetadata(req.params.id);
       if (!meta) return res.status(404).json({ error: "No build metadata found for this contract" });
+      res.json(meta);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/contracts/:id/wasm — WASM build metadata panel (hash, compiler, SDK, size)
+  app.get("/api/contracts/:id/wasm", async (req, res) => {
+    try {
+      const meta = await db.getWasmBuildMetadata(req.params.id);
+      if (!meta) return res.status(404).json({ error: "WASM not indexed" });
       res.json(meta);
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -661,11 +823,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/contracts  — register ABI metadata
   app.post("/api/contracts", writeLimiter, requireApiKey, async (req, res) => {
     try {
-      const { id, functions } = req.body;
-
-      if (!id || !functions) {
-        return res.status(400).json({ error: "Missing id or functions" });
+      // ── Issue #522: AJV schema validation ────────────────────────────────
+      const valid = _validateContractPost(req.body);
+      if (!valid) {
+        const errors = (_validateContractPost.errors ?? []).map((e) => ({
+          path: e.instancePath || `/${e.params?.missingProperty ?? ""}`,
+          message: e.message ?? "invalid",
+        }));
+        return res.status(400).json({ errors });
       }
+
+      const { id, functions } = req.body;
 
       const existing = await db.getContractMeta(id);
       if (existing) {
@@ -691,8 +859,67 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
 
       await db.upsertContractMeta(req.body);
+      // ── Issue #523: store the registrant's API key ID for ownership checks
+      const keyId = req.rateContext?.keyId ?? null;
+      if (keyId) {
+        await db.query(
+          "UPDATE contracts SET registered_by_key_id = $1 WHERE id = $2",
+          [keyId, id],
+        ).catch(() => {});
+      }
       await cacheInvalidate(`contracts:single:${id}`);
       res.status(201).json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // PATCH /api/contracts/:id  — update ABI metadata (issue #523: ownership check)
+  app.patch("/api/contracts/:id", writeLimiter, async (req, res) => {
+    try {
+      // Must be authenticated
+      const keyId = req.rateContext?.keyId ?? null;
+      if (!keyId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      const contractId = req.params.id;
+      const existing = await db.getContractMeta(contractId);
+      if (!existing) {
+        return res.status(404).json({ error: "Contract not found" });
+      }
+
+      // ── Ownership / admin check ──────────────────────────────────────────
+      // Fetch the stored registered_by_key_id
+      const { rows } = await db.query(
+        "SELECT registered_by_key_id FROM contracts WHERE id = $1",
+        [contractId],
+      );
+      const registeredByKeyId = rows[0]?.registered_by_key_id ?? null;
+
+      // Check if caller is admin (tier = 'enterprise' or static admin key)
+      const isAdmin =
+        req.rateContext?.tier === "enterprise" ||
+        req.rateContext?.clientId === "static-admin-key";
+
+      if (!isAdmin && registeredByKeyId !== null && String(registeredByKeyId) !== String(keyId)) {
+        return res.status(403).json({ error: "Forbidden: you are not the owner of this contract" });
+      }
+
+      // ── Schema validation on the patch payload ───────────────────────────
+      const updateBody = { ...existing, ...req.body, id: contractId };
+      const valid = _validateContractPost(updateBody);
+      if (!valid) {
+        const errors = (_validateContractPost.errors ?? []).map((e) => ({
+          path: e.instancePath || `/${e.params?.missingProperty ?? ""}`,
+          message: e.message ?? "invalid",
+        }));
+        return res.status(400).json({ errors });
+      }
+
+      await db.upsertContractMeta(updateBody);
+      await cacheInvalidate(`contracts:single:${contractId}`);
+      res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -879,16 +1106,108 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
 
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
-  // Returns 200 with { events: [...] } (empty array for an unknown address) and
-  // 400 when the address is not a well-formed Stellar public key (G... base32).
-  app.get("/api/wallet/:address", async (req, res) => {
+  // Returns 200 with { events: [...], horizon_account } (empty array for an
+  // unknown address) and 400 when the address is not a well-formed Stellar
+  // public key (G... base32). horizon_account is { sequence, subentry_count,
+  // home_domain }, fetched from Horizon concurrently with the DB query (#551).
+  // Horizon 404 (unfunded account) or any Horizon failure yields
+  // horizon_account: null rather than a 500 — the wallet response never
+  // depends on Horizon being reachable.
+  // Cached for 60s (issue #534) — cache busted by index.js via
+  // cacheInvalidate("wallet:events:*") on new events.
+  app.get(
+    "/api/wallet/:address",
+    makeCache("wallet", (req) => `wallet:events:${req.params.address}`),
+    async (req, res) => {
+    try {
+      const address = req.params.address;
+      if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
+        return res.status(400).json({ error: `${address} is not a valid Stellar address` });
+      }
+      // #527: accept optional from/to date filters (YYYY-MM-DD)
+      const from = req.query.from || undefined;
+      const to = req.query.to || undefined;
+      const [eventsResult, horizonResult] = await Promise.allSettled([
+        db.getWalletEvents(address, { from, to }),
+        fetchAccountMeta(address),
+      ]);
+      // A DB failure is a real error (500); a Horizon failure just degrades
+      // horizon_account to null — the two have different reliability contracts.
+      if (eventsResult.status === "rejected") throw eventsResult.reason;
+      const horizon_account = horizonResult.status === "fulfilled" ? horizonResult.value : null;
+      res.json({ events: eventsResult.value, horizon_account });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/wallet/:address/balances — classic XLM + SEP-41/classic asset
+  // balances sourced from Horizon (issue #530). Cached for 30s per address.
+  app.get("/api/wallet/:address/balances", async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
         return res.status(400).json({ error: "Invalid wallet address format" });
       }
-      const events = await db.getWalletEvents(address);
-      res.json({ events });
+      const balances = await fetchWalletBalances(address);
+      res.json({ balances });
+    } catch (e) {
+      if (e instanceof AccountNotFoundError) {
+        return res.status(404).json({ error: "Account not found on network" });
+      }
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  // ── Token metadata registry (#550) ──────────────────────────────────────
+  // Backed by the `assets` table, populated as classic asset transfers are
+  // decoded (see decoder.js's classicAssetLabel).
+
+  function serializeAsset(row) {
+    return {
+      code: row.code,
+      issuer: row.issuer,
+      name: row.name,
+      decimals: row.decimals,
+      logo_url: row.logo_url,
+      home_domain: row.domain,
+    };
+  }
+
+  // GET /api/assets?after=&limit=  — paginated list of all assets seen in
+  // indexed events, cursor-based (keyset) navigation via `next_cursor`.
+  app.get("/api/assets", async (req, res) => {
+    try {
+      if (req.query.limit !== undefined) {
+        const parsedLimit = Number(req.query.limit);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      if (req.query.after !== undefined) {
+        const parsedAfter = Number(req.query.after);
+        if (!Number.isInteger(parsedAfter) || parsedAfter < 0) {
+          return res.status(422).json({ error: "Invalid after" });
+        }
+      }
+
+      const limit = req.query.limit ? Number(req.query.limit) : 25;
+      const after = req.query.after ? Number(req.query.after) : 0;
+
+      const { data, next_cursor } = await db.listAssets({ after_id: after, limit });
+      res.json({ data: data.map(serializeAsset), next_cursor });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/assets/:issuer/:code — single asset metadata.
+  app.get("/api/assets/:issuer/:code", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      const asset = await db.getAsset(code, issuer);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      res.json(serializeAsset(asset));
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -944,6 +1263,91 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── NFT endpoints ────────────────────────────────────────────────
+
+  // GET /api/tokens/:contractId/nfts
+  // Cursor-based (keyset) pagination:
+  //   ?owner=<address>  — filter to tokens owned by this address
+  //   &limit=<n>        — results per page, max 200 (default 50)
+  //   &after=<token_id> — opaque cursor from previous page's `next_cursor`
+  //                       (omit for the first page)
+  //
+  // Page-based pagination (legacy):
+  //   &page=<n>         — 1-indexed page number (default 1)
+  //
+  // Per issue #650, returns { token_id, owner_address, minted_ledger,
+  // minted_by, last_transfer_ledger } per item with cursor-based navigation.
+  app.get("/api/tokens/:contractId/nfts", async (req, res) => {
+    try {
+      const { contractId } = req.params;
+      const owner = req.query.owner || undefined;
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+
+      // Validate limit
+      if (isNaN(limit) || limit < 1 || limit > 200) {
+        return res.status(422).json({ error: "Invalid limit" });
+      }
+
+      // Validate after (must be a valid numeric string if provided)
+      if (req.query.after !== undefined && (isNaN(Number(req.query.after)) || String(req.query.after).trim() === "")) {
+        return res.status(422).json({ error: "Invalid after" });
+      }
+
+      // Cursor-based pagination (issue #650) — default unless page param is explicitly provided
+      if (req.query.page === undefined) {
+        const after = req.query.after || undefined;
+
+        const { tokens, next_cursor } = await db.getNftTokensCursor(contractId, {
+          owner,
+          after,
+          limit,
+        });
+
+        res.json({
+          contract_id: contractId,
+          tokens,
+          next_cursor,
+        });
+      } else {
+        // Legacy page-based pagination (backward compatible)
+        const page = req.query.page ? Number(req.query.page) : 1;
+
+        if (isNaN(page) || page < 1) {
+          return res.status(422).json({ error: "Invalid page" });
+        }
+
+        const { tokens, total } = await db.getNftTokens(contractId, { owner, page, limit });
+
+        const totalPages = Math.ceil(total / limit);
+        res.json({
+          contract_id: contractId,
+          tokens,
+          pagination: {
+            page,
+            limit,
+            total,
+            total_pages: totalPages,
+            has_next: page < totalPages,
+          },
+        });
+      }
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:contractId/nfts/:tokenId/history
+  //   Returns the full mint + transfer event history for a single NFT token.
+  app.get("/api/tokens/:contractId/nfts/:tokenId/history", async (req, res) => {
+    try {
+      const { contractId, tokenId } = req.params;
+      const events = await db.getNftTokenHistory(contractId, tokenId);
+      res.json({ contract_id: contractId, token_id: tokenId, events });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── cursor-based pagination endpoint ────────────────────────────
   // GET /api/v1/events?contract=&fn=&type=&after=&limit=
   // `after` is the opaque seq cursor returned as `next_cursor` in the previous page.
@@ -991,7 +1395,15 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.get("/api/contracts/:id/upgrades", async (req, res) => {
     try {
       const rows = await db.getUpgradeHistory(req.params.id);
-      res.json(rows);
+      res.json(
+        rows.map((r) => ({
+          ledger: Number(r.ledger),
+          old_hash: r.upgrade_info?.oldHash ?? null,
+          new_hash: r.upgrade_info?.newHash ?? null,
+          tx_hash: r.tx_hash,
+          timestamp: r.created_at,
+        })),
+      );
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1013,6 +1425,32 @@ export function createApi({ logDestination, dbOverride } = {}) {
     try {
       const status = await db.getCircuitBreakerStatus(req.params.id);
       res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Sub-invocation call graph ─────────────────────────────────────
+  // GET /api/contracts/:id/call-graph — top callee contracts by call frequency
+  app.get("/api/contracts/:id/call-graph", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 10, 50);
+      const edges = await db.getContractCallGraph(req.params.id, limit);
+      const nodes = edges.length
+        ? [
+            { id: req.params.id, label: req.params.id, type: "contract" },
+            ...edges.map((e) => ({ id: e.callee, label: e.callee, type: "contract" })),
+          ]
+        : [];
+      res.json({
+        nodes,
+        edges: edges.map((e) => ({
+          source: req.params.id,
+          target: e.callee,
+          label: `${e.call_count} call${e.call_count === 1 ? "" : "s"}`,
+          call_count: e.call_count,
+        })),
+      });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -1056,6 +1494,152 @@ export function createApi({ logDestination, dbOverride } = {}) {
       const alerts = getBurnAlerts(req.query.contract || undefined);
       res.json(alerts);
     } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Self-Service API Key Creation with Email Verification ─────────────────────
+  
+  // POST /api/keys (unauthenticated) - Create an inactive API key and send verification email
+  app.post("/api/keys", async (req, res) => {
+    try {
+      const { name, email } = req.body;
+
+      // Validate required fields
+      if (!name || typeof name !== 'string' || name.trim() === '') {
+        return res.status(400).json({ error: 'name is required and must be a non-empty string' });
+      }
+      if (!email || typeof email !== 'string' || !email.includes('@')) {
+        return res.status(400).json({ error: 'email is required and must be a valid email address' });
+      }
+
+      // Check if email service is configured
+      if (!isConfigured()) {
+        return res.status(503).json({ error: 'Email service not configured. Contact administrator.' });
+      }
+
+      // Import crypto and bcrypt for key generation
+      const crypto = (await import('crypto')).default;
+      const bcrypt = (await import('bcryptjs')).default;
+
+      // Generate verification token
+      const verificationToken = crypto.randomBytes(32).toString('hex');
+      const verificationExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+      // Generate API key
+      const rawKey = crypto.randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      const keyPrefix = rawKey.slice(0, 8);
+      const keyHash = await bcrypt.hash(rawKey, 12);
+
+      // Insert inactive key with verification data
+      const { rows } = await pool.query(
+        `INSERT INTO api_keys
+           (name, email, key_hash, key_prefix, tier, verified, verification_token, verification_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, name, email, key_prefix, tier, verified, created_at`,
+        [name.trim(), email.trim().toLowerCase(), keyHash, keyPrefix, 'free', false, verificationToken, verificationExpiresAt]
+      );
+
+      // Build verification URL
+      const baseUrl = process.env.API_BASE_URL || `http://localhost:${PORT}`;
+      const verificationUrl = `${baseUrl}/api/keys/verify?token=${verificationToken}`;
+
+      // Send verification email
+      await sendVerificationEmail({
+        email: email.trim(),
+        keyName: name.trim(),
+        verificationUrl
+      });
+
+      // Return success message (do NOT return the key or verification token)
+      res.status(201).json({
+        message: 'API key created successfully. Please check your email to verify and activate your key.',
+        keyId: rows[0].id,
+        keyPrefix: rows[0].key_prefix,
+        email: rows[0].email,
+        verified: rows[0].verified
+      });
+    } catch (e) {
+      console.error('[POST /api/keys] Error:', e);
+      if (e.message.includes('duplicate key') || e.message.includes('unique constraint')) {
+        return res.status(409).json({ error: 'An API key for this email already exists and is pending verification.' });
+      }
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/keys/verify?token= - Verify email and activate the key, return the full key once
+  app.get("/api/keys/verify", async (req, res) => {
+    try {
+      const { token } = req.query;
+
+      if (!token || typeof token !== 'string') {
+        return res.status(400).json({ error: 'token is required' });
+      }
+
+      // Look up the key by verification token
+      const { rows } = await pool.query(
+        `SELECT id, name, email, key_hash, key_prefix, tier, verified, verification_expires_at
+         FROM api_keys
+         WHERE verification_token = $1`,
+        [token]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Invalid verification token' });
+      }
+
+      const keyRecord = rows[0];
+
+      // Check if already verified
+      if (keyRecord.verified) {
+        return res.status(400).json({ error: 'This API key has already been verified' });
+      }
+
+      // Check if token has expired
+      if (new Date(keyRecord.verification_expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Verification token has expired. Please request a new API key.' });
+      }
+
+      // Activate the key by setting verified = true and clearing the verification token
+      await pool.query(
+        `UPDATE api_keys
+         SET verified = TRUE,
+             verification_token = NULL,
+             verification_expires_at = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [keyRecord.id]
+      );
+
+      // Since this is the only time we return the full key, we need to reconstruct it
+      // We can't retrieve the original raw key from the hash, so we need to generate a new one
+      // and update the record. This is a security trade-off for the one-time display requirement.
+      const crypto = (await import('crypto')).default;
+      const bcrypt = (await import('bcryptjs')).default;
+      
+      const newRawKey = crypto.randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      const newKeyPrefix = newRawKey.slice(0, 8);
+      const newKeyHash = await bcrypt.hash(newRawKey, 12);
+
+      await pool.query(
+        `UPDATE api_keys
+         SET key_hash = $1, key_prefix = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [newKeyHash, newKeyPrefix, keyRecord.id]
+      );
+
+      // Return the full key (this is the only time it will be shown)
+      res.json({
+        message: 'API key verified and activated successfully. Save this key securely - it will not be shown again.',
+        key: newRawKey,
+        keyId: keyRecord.id,
+        name: keyRecord.name,
+        email: keyRecord.email,
+        tier: keyRecord.tier
+      });
+    } catch (e) {
+      console.error('[GET /api/keys/verify] Error:', e);
       res.status(500).json({ error: e.message });
     }
   });
@@ -1125,6 +1709,25 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── ABI Version History ───────────────────────────────────────────────────
+  // GET /api/contracts/:id/abi-history
+  // Returns all rows from contract_versions for this contract, ordered by abi_version ASC.
+  app.get("/api/contracts/:id/abi-history", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, contract_id, abi_version, min_ledger, name, description,
+                functions, registered_by, created_at
+         FROM contract_versions
+         WHERE contract_id = $1
+         ORDER BY abi_version ASC`,
+        [req.params.id],
+      );
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── Storage State-Diff Timeline ────────────────────────────────
 
   // GET /api/contracts/:id/state-diffs?key=&limit=
@@ -1139,6 +1742,39 @@ export function createApi({ logDestination, dbOverride } = {}) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Contract Stats ────────────────────────────────────────────
+
+  // GET /api/contracts/:id/stats — event/caller counts + 30-day activity sparkline
+  app.get(
+    "/api/contracts/:id/stats",
+    makeCache("stats", (req) => `contracts:stats:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const [stats, eventsPerDay] = await Promise.all([
+          db.getContractStats(req.params.id),
+          db.getContractEventsByDay(req.params.id, 30),
+        ]);
+        res.json({ ...stats, events_per_day: eventsPerDay });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
+  // GET /api/contracts/:id/storage-tiers — write counts by storage durability tier
+  app.get(
+    "/api/contracts/:id/storage-tiers",
+    makeCache("stats", (req) => `contracts:storage-tiers:${req.params.id}`),
+    async (req, res) => {
+      try {
+        const tiers = await db.getContractStorageTiers(req.params.id);
+        res.json(tiers);
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
 
   // ── Live TTL status for contract instance, code, and persistent storage ──
   // GET /api/contracts/:id/ttl
@@ -1271,9 +1907,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/setup/db-init — create/upgrade the schema only.
   //
   // INTENTIONALLY MINIMAL (issue #417): this handler must call db.init() and
-  // nothing else. It does NOT seed sample data. The old seed-lib.js helper
+  // nothing else. It does NOT seed sample data. The old seed_lib helper
   // (which generated fake Stellar addresses) was removed during cleanup and must
-  // never be re-introduced here — no static import, no `await import("./seed-lib.js")`.
+  // never be re-introduced here — no static import, no `await import("./seed_lib.js")`.
   // The schema-init test in test/api/setup-db-init.test.js guards this invariant.
   app.post("/api/setup/db-init", blockInProduction, async (req, res) => {
     try {
@@ -1300,16 +1936,13 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   const EVENT_COLUMNS = [
     "seq",
-    "contract_id",
-    "function",
     "ledger",
-    "tx_hash",
+    "contract_id",
+    "contract_name",
+    "function",
     "description",
-    "cpu_instructions",
-    "mem_bytes",
-    "fee_charged",
-    "is_clawback",
-    "is_high_bloat_risk",
+    "tx_hash",
+    "created_at",
   ];
 
   const CONTRACT_COLUMNS = [
@@ -1324,23 +1957,32 @@ export function createApi({ logDestination, dbOverride } = {}) {
     "created_at",
   ];
 
-  // GET /api/export/events?format=csv|json&contract=&fn=&type=&limit=
+  // GET /api/export/events?format=csv|json&contract=&fn=&type=&wallet=&limit=
+  // #528: accepts wallet param to export a single wallet's event history.
   app.get("/api/export/events", async (req, res) => {
     try {
       const format = req.query.format === "json" ? "json" : "csv";
       const limit = Math.min(Number(req.query.limit) || 10000, 10000);
+      const wallet = req.query.wallet || undefined;
       const rows = await db.getEventsForExport({
         contract: req.query.contract,
         fn: req.query.fn,
         type: req.query.type,
+        wallet,
         limit,
       });
       if (format === "json") {
-        res.setHeader("Content-Disposition", 'attachment; filename="events.json"');
+        const filename = wallet
+          ? `wallet-${wallet}-events.json`
+          : "events.json";
+        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
         res.setHeader("Content-Type", "application/json");
         return res.json(rows);
       }
-      res.setHeader("Content-Disposition", 'attachment; filename="events.csv"');
+      const filename = wallet
+        ? `wallet-${wallet}-events.csv`
+        : "events.csv";
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.setHeader("Content-Type", "text/csv");
       return res.send(rowsToCsv(rows, EVENT_COLUMNS));
     } catch (e) {
@@ -1398,7 +2040,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   );
 
   // ── GraphQL endpoint ───────────────────────────────────────────
-  attachGraphQL(app);
+  if (!runningUnderTest) attachGraphQL(app);
 
   // ── Batch Multi-Call Endpoints ───────────────────────────────────────
 
@@ -1540,9 +2182,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Start HTTP + WebSocket server ───────────────────────────────────────────
   const server = http.createServer(app);
-  attachWebSocketServer(server);
+  if (!runningUnderTest) attachWebSocketServer(server);
 
   server.on("close", () => console.log("[api] server closed"));
+
+  // During test runs we avoid calling `listen()` to prevent port conflicts
+  // and background handles that outlive the Jest environment. Tests will
+  // use the returned `app` or server object directly via supertest.
+  if (process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID) {
+    return app;
+  }
+
   server.listen(PORT, () => console.log(`API listening on :${PORT}`));
   return server;
 }

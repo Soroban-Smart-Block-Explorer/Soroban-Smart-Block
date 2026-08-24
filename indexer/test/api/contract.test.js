@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import fs from "fs";
 import path from "path";
 import yaml from "yaml";
@@ -11,8 +12,8 @@ process.env.DATABASE_URL = DB_URL;
 process.env.API_KEY = "test-api-key";
 process.env.VERIFY_ABI = "false";
 
-import { db } from "../../src/db.js";
-import { startApi } from "../../src/api.js";
+const { db } = await import("../../src/db.js");
+const { startApi } = await import("../../src/api.js");
 
 // Load specification
 const specPath = path.resolve(process.cwd(), "../docs/api/openapi.yaml");
@@ -177,6 +178,12 @@ describe("OpenAPI Contract Validation Tests", () => {
     const res = await request(app).get("/api/contracts/C9999");
     expect(res.status).toBe(404);
     expect(() => validateResponse("/api/contracts/{id}", "GET", 404, res.body)).not.toThrow();
+  });
+
+  it("should validate GET /api/contracts/{id}/stats - 200 Response", async () => {
+    const res = await request(app).get("/api/contracts/C1/stats");
+    expect(res.status).toBe(200);
+    expect(() => validateResponse("/api/contracts/{id}/stats", "GET", 200, res.body)).not.toThrow();
   });
 
   it("should validate POST /api/contracts - 201 Response", async () => {

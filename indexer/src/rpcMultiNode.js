@@ -94,21 +94,25 @@ async function callWithFailover(method, ...args) {
   throw new Error("[rpc-multi] all RPC nodes failed");
 }
 
-// Periodically re-check unhealthy nodes so they can recover
-setInterval(async () => {
-  for (const node of nodes) {
-    if (!node.healthy) {
-      try {
-        const res = await withTimeout(node.server.getLatestLedger(), CALL_TIMEOUT_MS);
-        node.latestLedger = res.sequence;
-        node.healthy = true;
-        console.log(`[rpc-multi] node ${node.url} recovered`);
-      } catch {
-        // still down
+// Periodically re-check unhealthy nodes so they can recover. Only started by
+// the indexer daemon (src/index.js) — importing this module for its exports
+// (e.g. in tests) must not have the side effect of scheduling network calls.
+export function startNodeRecoveryPoll() {
+  setInterval(async () => {
+    for (const node of nodes) {
+      if (!node.healthy) {
+        try {
+          const res = await withTimeout(node.server.getLatestLedger(), CALL_TIMEOUT_MS);
+          node.latestLedger = res.sequence;
+          node.healthy = true;
+          console.log(`[rpc-multi] node ${node.url} recovered`);
+        } catch {
+          // still down
+        }
       }
     }
-  }
-}, 10_000);
+  }, config.RPC_RECOVERY_INTERVAL_MS);
+}
 
 export const multiNodeRpc = new Proxy(
   {},

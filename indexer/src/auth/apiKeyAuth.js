@@ -15,10 +15,10 @@
  *   authenticated request.
  */
 
-import crypto from 'crypto';
-import bcrypt from 'bcryptjs';
-import { LRUCache } from 'lru-cache';
-import { pool } from '../db.js';
+import crypto from "crypto";
+import bcrypt from "bcryptjs";
+import { LRUCache } from "lru-cache";
+import { pool } from "../db.js";
 
 // ── In-memory LRU cache ───────────────────────────────────────────────────────
 // Caches resolved key records keyed by the raw API key string.
@@ -31,6 +31,13 @@ const keyCache = new LRUCache({
   ttl: KEY_CACHE_TTL_MS,
 });
 
+const DAILY_LIMIT_BY_TIER = {
+  unauthenticated: 60,
+  free: 1000,
+  pro: 10000,
+  enterprise: 100000,
+};
+
 // ── CIDR helpers ──────────────────────────────────────────────────────────────
 
 /**
@@ -39,9 +46,7 @@ const keyCache = new LRUCache({
  * @returns {number}
  */
 function ipv4ToInt(ip) {
-  return ip
-    .split('.')
-    .reduce((acc, octet) => (acc << 8) | parseInt(octet, 10), 0) >>> 0;
+  return ip.split(".").reduce((acc, octet) => (acc << 8) | parseInt(octet, 10), 0) >>> 0;
 }
 
 /**
@@ -52,7 +57,7 @@ function ipv4ToInt(ip) {
  */
 function ipMatchesCidr(ip, cidr) {
   // Handle plain IP (no prefix length) as /32.
-  const [range, prefixStr] = cidr.includes('/') ? cidr.split('/') : [cidr, '32'];
+  const [range, prefixStr] = cidr.includes("/") ? cidr.split("/") : [cidr, "32"];
   const prefix = parseInt(prefixStr, 10);
   const mask = prefix === 0 ? 0 : ~((1 << (32 - prefix)) - 1) >>> 0;
   try {
@@ -85,7 +90,7 @@ function ipInCidrList(ip, cidrList) {
 function endpointAllowed(endpoint, patterns) {
   if (!Array.isArray(patterns) || patterns.length === 0) return true;
   return patterns.some((pattern) => {
-    if (pattern.endsWith('*')) {
+    if (pattern.endsWith("*")) {
       return endpoint.startsWith(pattern.slice(0, -1));
     }
     return endpoint === pattern;
@@ -100,12 +105,12 @@ function endpointAllowed(endpoint, patterns) {
  * @returns {string}
  */
 function getClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
+  const forwarded = req.headers["x-forwarded-for"];
   if (forwarded) {
     // x-forwarded-for can be a comma-separated list; take the first (client) IP.
-    return String(forwarded).split(',')[0].trim();
+    return String(forwarded).split(",")[0].trim();
   }
-  return req.socket?.remoteAddress ?? '0.0.0.0';
+  return req.socket?.remoteAddress ?? "0.0.0.0";
 }
 
 /**
@@ -115,7 +120,7 @@ function getClientIp(req) {
  * @returns {string}  hex string prefixed with "ip:"
  */
 function hashIp(ip) {
-  return 'ip:' + crypto.createHash('sha256').update(ip).digest('hex').slice(0, 16);
+  return "ip:" + crypto.createHash("sha256").update(ip).digest("hex").slice(0, 16);
 }
 
 // ── Database lookup ───────────────────────────────────────────────────────────
@@ -134,9 +139,10 @@ async function lookupKeyInDb(rawKey) {
   const prefix = rawKey.slice(0, 8);
 
   const { rows } = await pool.query(
-    `SELECT id, name, key_hash, tier, rate_limit,
+    `SELECT id, name, key_hash, tier, rate_limit, daily_limit,
             allowed_ips, allowed_endpoints, expires_at,
-            revoked, last_used_at, usage_count
+            revoked, verified, last_used_at, usage_count,
+            rotated_at, rotation_grace_until
      FROM   api_keys
      WHERE  key_prefix = $1`,
     [prefix],
@@ -155,24 +161,45 @@ async function lookupKeyInDb(rawKey) {
 }
 
 /**
- * Asynchronously update `last_used_at` and increment `usage_count` for the
- * given key id. Fire-and-forget — errors are swallowed to avoid affecting the
- * request lifecycle.
+ * Increment the per-day API key request counter and enforce the tier daily limit
+ * synchronously for the current request.
  *
- * @param {string} keyId  UUID
+ * @param {object} keyRecord
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {Promise<boolean>} true if the request should continue, false if 429
  */
-function updateUsageAsync(keyId) {
-  pool
-    .query(
-      `UPDATE api_keys
-       SET    last_used_at = NOW(),
-              usage_count  = usage_count + 1
-       WHERE  id = $1`,
-      [keyId],
-    )
-    .catch((err) => {
-      console.error('[apiKeyAuth] Failed to update usage stats for key', keyId, err.message);
-    });
+async function incrementDailyUsage(keyRecord, req, res) {
+  const todayUtc = `((NOW() AT TIME ZONE 'UTC')::DATE)`;
+  const { rows } = await pool.query(
+    `INSERT INTO api_key_usage (api_key_id, date, request_count)
+     VALUES ($1, ${todayUtc}, 1)
+     ON CONFLICT (api_key_id, date)
+     DO UPDATE SET request_count = api_key_usage.request_count + 1
+     RETURNING request_count`,
+    [keyRecord.id],
+  );
+
+  const count = Number(rows[0]?.request_count ?? 0);
+  const dailyLimit = Number(keyRecord.daily_limit);
+  const effectiveDailyLimit =
+    Number.isFinite(dailyLimit) && dailyLimit >= 0
+      ? dailyLimit
+      : (DAILY_LIMIT_BY_TIER[keyRecord.tier] ?? DAILY_LIMIT_BY_TIER.free);
+
+  if (count > effectiveDailyLimit) {
+    return res.status(429).json({ error: "Daily API key usage limit exceeded" });
+  }
+
+  await pool.query(
+    `UPDATE api_keys
+     SET last_used_at = NOW(),
+         usage_count  = usage_count + 1
+     WHERE id = $1`,
+    [keyRecord.id],
+  );
+
+  return true;
 }
 
 // ── Middleware factory ────────────────────────────────────────────────────────
@@ -195,13 +222,13 @@ function updateUsageAsync(keyId) {
  */
 async function apiKeyAuthenticator(req, res, next) {
   try {
-    const rawKey = req.headers['x-api-key'];
+    const rawKey = req.headers["x-api-key"];
 
     // ── Unauthenticated path ────────────────────────────────────────────────
     if (!rawKey) {
       req.rateContext = {
         clientId: hashIp(getClientIp(req)),
-        tier: 'unauthenticated',
+        tier: "unauthenticated",
         rateLimit: null,
         keyId: null,
         keyName: null,
@@ -211,6 +238,21 @@ async function apiKeyAuthenticator(req, res, next) {
 
     // ── Authenticated path ──────────────────────────────────────────────────
 
+    // Legacy static admin key (ADMIN_SECRET-style shared secret via API_KEY):
+    // predates the per-key DB-backed system above and is still relied on by
+    // route-level `requireApiKey` checks in api.js.
+    const staticAdminKey = process.env.API_KEY;
+    if (staticAdminKey && rawKey === staticAdminKey) {
+      req.rateContext = {
+        clientId: "static-admin-key",
+        tier: "enterprise",
+        rateLimit: null,
+        keyId: null,
+        keyName: "static-admin-key",
+      };
+      return next();
+    }
+
     // 1. Try LRU cache first.
     let keyRecord = keyCache.get(rawKey);
 
@@ -219,41 +261,54 @@ async function apiKeyAuthenticator(req, res, next) {
       const dbRecord = await lookupKeyInDb(rawKey);
 
       if (!dbRecord) {
-        return res.status(401).json({ error: 'Invalid API key' });
+        return res.status(401).json({ error: "Invalid API key" });
       }
 
       keyRecord = dbRecord;
 
       // Normalise JSONB fields that may come back as strings in some drivers.
       keyRecord.allowed_ips =
-        typeof keyRecord.allowed_ips === 'string'
-          ? JSON.parse(keyRecord.allowed_ips)
-          : keyRecord.allowed_ips;
+        typeof keyRecord.allowed_ips === "string" ? JSON.parse(keyRecord.allowed_ips) : keyRecord.allowed_ips;
       keyRecord.allowed_endpoints =
-        typeof keyRecord.allowed_endpoints === 'string'
+        typeof keyRecord.allowed_endpoints === "string"
           ? JSON.parse(keyRecord.allowed_endpoints)
           : keyRecord.allowed_endpoints;
+
+      // Normalise rotation timestamps
+      keyRecord.rotated_at = keyRecord.rotated_at ?? null;
+      keyRecord.rotation_grace_until = keyRecord.rotation_grace_until ?? null;
 
       keyCache.set(rawKey, keyRecord);
     }
 
     // 3. Validate the cached record.
 
-    // Revoked check.
+    // Revoked check with rotation grace allowance.
+    // Accept the key if it is not revoked OR the rotation_grace_until is
+    // in the future (old key still within grace period).
     if (keyRecord.revoked) {
-      return res.status(401).json({ error: 'API key revoked' });
+      const grace = keyRecord.rotation_grace_until ? new Date(keyRecord.rotation_grace_until) : null;
+      if (!grace || grace <= new Date()) {
+        return res.status(401).json({ error: "API key revoked" });
+      }
+      // else: within grace period — allow authentication to proceed
+    }
+
+    // Verification check - unverified keys cannot authenticate
+    if (keyRecord.verified === false) {
+      return res.status(401).json({ error: "API key not verified. Please check your email to verify your key." });
     }
 
     // Expiry check.
     if (keyRecord.expires_at && new Date(keyRecord.expires_at) < new Date()) {
-      return res.status(401).json({ error: 'API key expired' });
+      return res.status(401).json({ error: "API key expired" });
     }
 
     // IP CIDR whitelist check.
     if (keyRecord.allowed_ips && keyRecord.allowed_ips.length > 0) {
       const clientIp = getClientIp(req);
       if (!ipInCidrList(clientIp, keyRecord.allowed_ips)) {
-        return res.status(403).json({ error: 'IP not permitted' });
+        return res.status(403).json({ error: "IP not permitted" });
       }
     }
 
@@ -261,7 +316,7 @@ async function apiKeyAuthenticator(req, res, next) {
     if (keyRecord.allowed_endpoints && keyRecord.allowed_endpoints.length > 0) {
       const endpoint = req.path;
       if (!endpointAllowed(endpoint, keyRecord.allowed_endpoints)) {
-        return res.status(403).json({ error: 'Endpoint not permitted' });
+        return res.status(403).json({ error: "Endpoint not permitted" });
       }
     }
 
@@ -274,13 +329,16 @@ async function apiKeyAuthenticator(req, res, next) {
       keyName: keyRecord.name,
     };
 
-    // 5. Update usage stats asynchronously (fire-and-forget).
-    updateUsageAsync(keyRecord.id);
+    // 5. Enforce the per-day API key limit synchronously, then continue.
+    const canProceed = await incrementDailyUsage(keyRecord, req, res);
+    if (canProceed !== true) {
+      return canProceed;
+    }
 
     return next();
   } catch (err) {
-    console.error('[apiKeyAuth] Unexpected error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error("[apiKeyAuth] Unexpected error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 }
 

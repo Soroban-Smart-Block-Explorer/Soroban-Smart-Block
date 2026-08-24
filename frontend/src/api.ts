@@ -1,4 +1,5 @@
 import { BatchCall } from "./types/batch";
+import { getCsrfToken, refreshCsrfToken } from "./hooks/useCsrf";
 
 const BASE = "/api";
 
@@ -75,6 +76,7 @@ export interface DecodedEvent {
   ledger: number;
   description: string;
   raw_topics: string[];
+  raw_data?: string;
   tx_hash?: string;
   // Soroban resource gas costs
   cpu_instructions?: number;
@@ -88,6 +90,8 @@ export interface DecodedEvent {
   storage_tiers?: StorageTiers;
   // clawback compliance flag
   is_clawback?: boolean;
+  // "classic" for Horizon payment/path-payment operations, "soroban" otherwise
+  type?: "soroban" | "classic";
   // AMM swap path hops ["10 USDC", "9.1 EURC", "5.2 XLM"]
   swap_path?: string[];
   // Protocol 26: TTL extension host function data
@@ -121,6 +125,8 @@ export interface DecodedEvent {
   sac_side_effect?: "account_created" | "trustline_opened";
   // Factory deployment trace
   factory_deployment?: FactoryDeploymentTree;
+  // DEX swap slippage in basis points (1% = 100 bps); present only when computable
+  slippage_bps?: number | null;
 }
 
 export interface SourceFile {
@@ -152,11 +158,26 @@ export interface ContractMeta {
   version: number;
   name: string;
   description: string;
-  functions: { name: string; description: string }[];
+  functions: { name: string; description: string; args?: { name: string; type: string }[] }[];
+  registered_by?: string;
+  is_rwa?: boolean;
+  rwa_type?: string | null;
+  min_ledger?: number;
+  created_at?: string;
   source?: string;
   source_file?: string;
   source_files?: SourceFile[];
   dependency_advisory?: DependencyAdvisory | null;
+  /** Protocol type — auto-tagged from ABI functions or set explicitly. */
+  protocol_type?: "token" | "dex" | "lending" | "nft" | "bridge" | "other";
+}
+
+export interface ContractStats {
+  total_events: number;
+  unique_callers: number;
+  first_seen_ledger: number | null;
+  last_seen_ledger: number | null;
+  events_per_day: { date: string; count: number }[];
 }
 
 export interface ContractListItem {
@@ -168,7 +189,27 @@ export interface ContractListItem {
   is_paused: boolean;
   is_rwa: boolean;
   rwa_type: string | null;
+  /** Protocol type — auto-tagged from ABI functions or set explicitly. */
+  protocol_type: "token" | "dex" | "lending" | "nft" | "bridge" | "other";
+  /** Whether the DB ABI has been verified against the on-chain ContractMeta. */
+  is_verified: boolean;
+  /** Ledger at which verification was last confirmed (null if never verified). */
+  verified_ledger: number | null;
   created_at: string;
+}
+
+/** One ABI version snapshot returned by GET /api/contracts/:id/abi-history */
+export interface AbiHistoryEntry {
+  abi_version: number;
+  functions: { name: string; description?: string; params?: { name: string; kind?: string }[] }[];
+  registered_by: string;
+  min_ledger: number;
+  created_at: string;
+}
+
+export interface AbiHistoryResponse {
+  contract_id: string;
+  history: AbiHistoryEntry[];
 }
 
 export interface ContractsListResponse {
@@ -179,6 +220,14 @@ export interface ContractsListResponse {
     total: number;
     total_pages: number;
   };
+}
+
+// Classic/SEP-41 asset balance entry from the wallet balances endpoint (issue #530).
+export interface WalletBalance {
+  asset_code: string;
+  asset_issuer: string | null;
+  balance: string;
+  is_native: boolean;
 }
 
 export type SearchKind = "contract" | "event" | "wallet";
@@ -212,6 +261,20 @@ export interface SearchResponse {
   events: DecodedEvent[];
   wallets: SearchWallet[];
   suggestions: SearchSuggestion[];
+}
+
+export interface HorizonBalance {
+  asset_type: string;
+  asset_code?: string;
+  asset_issuer?: string;
+  balance: string;
+}
+
+export interface HorizonAccount {
+  id: string;
+  account_id: string;
+  sequence: string;
+  balances: HorizonBalance[];
 }
 
 export interface BurnAlert {
@@ -263,6 +326,58 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+/**
+ * Wrapper for state-changing fetch calls (POST / PATCH / DELETE).
+ *
+ * Automatically attaches the X-CSRF-Token header from the cached token.
+ * On a 403 CSRF mismatch, refreshes the token once and retries the request
+ * before propagating the error.
+ */
+async function mutationFetch(
+  url: string,
+  options: RequestInit & { headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const buildHeaders = (token: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...options.headers,
+    ...(token ? { "X-CSRF-Token": token } : {}),
+  });
+
+  const res = await fetch(url, {
+    credentials: "include",
+    ...options,
+    headers: buildHeaders(getCsrfToken()),
+  });
+
+  // On CSRF mismatch refresh the token and retry exactly once.
+  if (res.status === 403) {
+    let body: { error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    if (
+      body.error === "CSRF token missing" ||
+      body.error === "CSRF token mismatch"
+    ) {
+      await refreshCsrfToken();
+      return fetch(url, {
+        credentials: "include",
+        ...options,
+        headers: buildHeaders(getCsrfToken()),
+      });
+    }
+  }
+
+  return res;
+}
+
+// Resolved classic asset metadata (GET /api/assets/:issuer/:code)
+export interface AssetInfo {
+  code: string;
+  issuer: string;
+  name: string | null;
+  domain: string | null;
+  logo_url: string | null;
+}
+
 export interface SimResult {
   success: boolean;
   returnValue?: string;
@@ -298,6 +413,19 @@ export interface StateDiff {
   created_at: string;
 }
 
+// Issue #516: ABI version history entry (one row per contract_versions table row)
+export interface AbiVersionEntry {
+  id: number;
+  contract_id: string;
+  abi_version: number;
+  min_ledger: number;
+  name: string;
+  description: string | null;
+  functions: { name: string; description?: string; params?: { name: string; kind: string }[] }[] | null;
+  registered_by: string | null;
+  created_at: string;
+}
+
 // sub-invocation record
 export interface SubInvocation {
   id: number;
@@ -325,10 +453,60 @@ export interface ContractTTL {
   code: { live_until_ledger: number | null };
 }
 
+// Daily event count entry (contract stats sparkline / bar chart)
+export interface DailyEventCount {
+  date: string; // YYYY-MM-DD
+  count: number;
+}
+
+// Contract event/caller statistics — GET /api/contracts/:id/stats
+export interface ContractStats {
+  total_events: number;
+  unique_callers: number;
+  first_seen_ledger: number | null;
+  last_seen_ledger: number | null;
+  events_per_day: DailyEventCount[];
+}
+
+// Storage-tier write counts — GET /api/contracts/:id/storage-tiers
+export interface StorageTierCounts {
+  temporary: number;
+  persistent: number;
+  instance: number;
+}
+
 export interface CircuitBreakerStatus {
   has_circuit_breaker: boolean;
   is_paused: boolean;
   pause_status_ledger: number | null;
+  pause_trigger_tx_hash: string | null;
+  pause_trigger_event_seq: number | null;
+  status: "CLOSED" | "OPEN" | "HALF-OPEN";
+  trigger_threshold: number | null;
+  auto_reset_at: string | null;
+}
+
+export interface WasmBuildMetadata {
+  wasm_hash: string;
+  contract_id: string | null;
+  size_bytes: number | null;
+  sdk_version: string | null;
+  compiler: string | null;
+  optimizer: string | null;
+  repository: string | null;
+  commit: string | null;
+  producers: Record<string, string> | null;
+  ledger: number | null;
+  tx_hash: string | null;
+  created_at: string;
+}
+
+export interface UpgradeHistoryEntry {
+  ledger: number;
+  old_hash: string | null;
+  new_hash: string | null;
+  tx_hash: string | null;
+  timestamp: string;
 }
 
 export interface RwaMetadata {
@@ -366,6 +544,54 @@ export interface GraphEdge {
 export interface AddressGraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+// NFT token metadata from on-chain storage (schema is contract-defined)
+export interface NftMetadata {
+  name?: string;
+  description?: string;
+  image?: string;
+  attributes?: { trait_type: string; value: string | number }[];
+  [key: string]: unknown;
+}
+
+// Single NFT token entry returned from GET /api/tokens/:contractId/nfts
+export interface NftToken {
+  token_id: string;
+  owner: string;
+  metadata: NftMetadata | null;
+  last_transfer_ledger: number | null;
+}
+
+// Paginated response from GET /api/tokens/:contractId/nfts
+export interface NftTokensResponse {
+  contract_id: string;
+  tokens: NftToken[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+    has_next: boolean;
+  };
+}
+
+// Single event entry in NFT token history
+export interface NftHistoryEvent {
+  seq: number;
+  function: string;
+  ledger: number;
+  tx_hash: string | null;
+  description: string;
+  raw_topics: string[] | null;
+  created_at: string;
+}
+
+// Response from GET /api/tokens/:contractId/nfts/:tokenId/history
+export interface NftTokenHistoryResponse {
+  contract_id: string;
+  token_id: string;
+  events: NftHistoryEvent[];
 }
 
 // Sub-invocation filter options for the advanced search endpoint
@@ -432,6 +658,7 @@ export const api = {
     return get<EventsPage>(`/events?${q}`);
   },
   event: (seq: number) => get<DecodedEvent>(`/events/${seq}`),
+  asset: (issuer: string, code: string) => get<AssetInfo>(`/assets/${issuer}/${code}`),
   search: (q: string, limit = 10) => {
     const params = new URLSearchParams();
     params.set("q", q);
@@ -440,16 +667,66 @@ export const api = {
   },
   zkCosts: (seq: number) => get<{ calls: ZkHostCall[]; delta: ZkCostDelta | null }>(`/events/${seq}/zk-costs`),
   contract: (id: string) => get<ContractMeta>(`/contracts/${id}`),
-  listContracts: (page = 1, limit = 25) => {
+  listContracts: (page = 1, limit = 25, type?: string) => {
     const q = new URLSearchParams();
     q.set("page", String(page));
     q.set("limit", String(limit));
+    if (type) q.set("type", type);
     return get<ContractsListResponse>(`/contracts?${q}`);
   },
+  /** ABI version history — GET /api/contracts/:id/abi-history */
+  abiHistory: (id: string) => get<AbiVersionEntry[]>(`/contracts/${id}/abi-history`),
   burnAlerts: (contract: string) => get<BurnAlert[]>(`/burn-alerts?contract=${contract}`),
   migrationStatus: (id: string) => get<MigrationStatus>(`/contracts/${id}/migration-status`),
-  wallet: (address: string) => get<DecodedEvent[]>(`/wallet/${address}`),
+  wallet: (address: string) =>
+    get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(`/wallet/${address}`),
+
+  /** #527 / #525: wallet event history with optional date-range filter.
+   *  from / to are YYYY-MM-DD strings; omit to fetch all events. */
+  walletHistory: (
+    address: string,
+    params: { from?: string; to?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    const qs = q.toString();
+    return get<{ events: DecodedEvent[]; horizon_account: HorizonAccount | null }>(
+      `/wallet/${address}${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  /** #528: Download wallet event history as CSV.
+   *  Triggers a browser file download directly. */
+  exportWalletCsv: (address: string, params: { fn?: string } = {}) => {
+    const q = new URLSearchParams({ format: "csv", wallet: address });
+    if (params.fn) q.set("fn", params.fn);
+    const url = `/api/export/events?${q}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `wallet-${address}-events.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
   roles: (id: string) => get<PrivilegedRole[]>(`/contracts/${id}/roles`),
+
+  // NFT collection tokens with optional owner filter and pagination
+  nfts: (
+    contractId: string,
+    params: { owner?: string; page?: number; limit?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.owner) q.set("owner", params.owner);
+    if (params.page) q.set("page", String(params.page));
+    if (params.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return get<NftTokensResponse>(`/tokens/${contractId}/nfts${qs ? `?${qs}` : ""}`);
+  },
+
+  // Full transfer + mint history for a single NFT token
+  nftHistory: (contractId: string, tokenId: string) =>
+    get<NftTokenHistoryResponse>(`/tokens/${contractId}/nfts/${encodeURIComponent(tokenId)}/history`),
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),
 
@@ -464,6 +741,15 @@ export const api = {
 
   // Circuit breaker status
   circuitBreakerStatus: (id: string) => get<CircuitBreakerStatus>(`/contracts/${id}/circuit-breaker`),
+
+  // WASM build metadata panel (hash, compiler/rustc, SDK version, size)
+  wasmMetadata: (id: string) => get<WasmBuildMetadata>(`/contracts/${id}/wasm`),
+
+  // Contract upgrade history timeline
+  upgradeHistory: (id: string) => get<UpgradeHistoryEntry[]>(`/contracts/${id}/upgrades`),
+
+  // Sub-invocation call graph — top callee contracts by call frequency
+  contractCallGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/call-graph`),
 
   // RWA token metadata
   rwaMetadata: (id: string) => get<RwaMetadata>(`/contracts/${id}/rwa-metadata`),
@@ -496,9 +782,8 @@ export const api = {
       compiler_hash: string;
     },
   ) =>
-    fetch(`${BASE}/contracts/${id}/source-verifications`, {
+    mutationFetch(`${BASE}/contracts/${id}/source-verifications`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then((r) => {
       if (!r.ok) throw new Error(`API ${r.status}`);
@@ -507,6 +792,12 @@ export const api = {
 
   // live TTL status (instance + code expiration ledgers)
   contractTTL: (id: string) => get<ContractTTL>(`/contracts/${id}/ttl`),
+
+  // event/caller stats + 30-day activity series
+  contractStats: (id: string) => get<ContractStats>(`/contracts/${id}/stats`),
+
+  // storage-tier write breakdown
+  contractStorageTiers: (id: string) => get<StorageTierCounts>(`/contracts/${id}/storage-tiers`),
 
   // state-diff timeline
   stateDiffs: (id: string, key?: string) => {
@@ -535,27 +826,23 @@ export const api = {
 
   // Batch Multi-Call endpoints
   batchSimulate: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/simulate`, {
+    mutationFetch(`${BASE}/batch/simulate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchEstimateGas: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/estimate-gas`, {
+    mutationFetch(`${BASE}/batch/estimate-gas`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchOptimize: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/optimize`, {
+    mutationFetch(`${BASE}/batch/optimize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
   batchValidate: (calls: BatchCall[], sourceAccount?: string) =>
-    fetch(`${BASE}/batch/validate`, {
+    mutationFetch(`${BASE}/batch/validate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ calls, sourceAccount }),
     }).then((r) => r.json()),
 
@@ -667,4 +954,31 @@ export const api = {
     if (filter?.function) q.set("function", filter.function);
     return `${BASE}/sub-invocations/stream?${q}`;
   },
+
+  // Issue #514: search + filter contracts list
+  listContractsSearch: (params: { q?: string; type?: string; page?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params.q) q.set("q", params.q);
+    if (params.type && params.type !== "all") q.set("type", params.type);
+    q.set("page", String(params.page ?? 1));
+    q.set("limit", String(params.limit ?? 25));
+    return get<ContractsListResponse>(`/contracts?${q}`);
+  },
+
+  // Issue #513: register a new contract ABI
+  registerContract: (body: {
+    id: string;
+    name: string;
+    description: string;
+    functions: { name: string; description: string; params: { name: string; kind: string }[] }[];
+    registered_by: string;
+  }) =>
+    mutationFetch(`${BASE}/contracts`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      const data = await r.json();
+      if (!r.ok) throw Object.assign(new Error(data.error ?? `API ${r.status}`), { status: r.status, data });
+      return data as { ok: boolean };
+    }),
 };

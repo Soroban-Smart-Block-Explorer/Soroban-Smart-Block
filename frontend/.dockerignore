@@ -1,6 +1,56 @@
+# Issue #344 — keep production image minimal and free of dev/test artefacts.
+# See issue spec: node_modules, tests/, .env, *.md MUST be excluded.
+
+# Dependencies
 node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tests
+tests
+test
+*.test.ts
+*.test.tsx
+__tests__
+coverage
+.nyc_output
+
+# Build artefacts — ignore BOTH the just-emitted dist so a stale host copy is
+# never copied in, and the Vite/Vitest caches.
+dist
+dist-ssr
+.vite
+.cache
+
+# Git and CI metadata
 .git
 .gitignore
-dist
+.gitattributes
+.github
+.gitlab-ci.yml
+
+# Environment files — must NEVER be baked into the image.
 .env
 .env.*
+!.env.example
+
+# Markdown / docs / scratch
+*.md
+docs
+LICENSE
+README.md
+CHANGELOG.md
+
+# Scratch / agent artefacts
+.kiro
+update_issues
+*.tsbuildinfo
+
+# Editor / OS noise
+.DS_Store
+.vscode
+.idea
+*.swp
+*.swo
+Thumbs.db

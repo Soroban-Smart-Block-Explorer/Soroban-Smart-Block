@@ -6,12 +6,14 @@ import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
 import { decode } from "./decoder.js";
 import { startAbiSync } from "./githubAbiSync.js";
+import { seedBuiltinAbis } from "./abiSeeder.js";
+import { startContractVerifier } from "./contractVerifier.js";
 import { withRetry } from "./rpcRetry.js";
 import { isHighBloatRisk } from "./bloatDetector.js";
 import { detectUpgrade } from "./upgradeDetector.js";
 import { classifyStorageWrites } from "./storageTierClassifier.js";
 import { startBurnDetector } from "./burnDetector.js";
-import { multiNodeRpc } from "./rpcMultiNode.js";
+import { multiNodeRpc, startNodeRecoveryPoll } from "./rpcMultiNode.js";
 import { startMetricsCollector } from "./rpcMetrics.js";
 import { startPruner } from "./pruner.js";
 import { extractStateDiffs } from "./stateDiffIndexer.js";
@@ -30,12 +32,13 @@ import { warmCache } from "./cacheWarming.js";
 import { cacheInvalidate } from "./cacheLayer.js";
 import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics } from "./metrics.js";
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
-import { startAuditPartitionCron } from "./audit/auditLogger.js";
+import { startAuditPartitionCron, startAuditFlush } from "./audit/auditLogger.js";
 import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
 import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
 import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
+import { runIntegrityChecks } from "./routes/admin.js";
 
 const RPC_URL = config.SOROBAN_RPC_URL;
 const START_LEDGER = config.START_LEDGER;
@@ -196,6 +199,8 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   decoded.fee_bump = feeBump;
   decoded.archival_info = archivalInfo;
   await db.upsertEventValidated(decoded);
+  // Bust wallet event caches (#534) — any new event may reference a wallet address.
+  cacheInvalidate("wallet:events:*").catch(() => {});
 
   // Persist per-key state diffs for the timeline.
   const diffs = extractStateDiffs(rawSorobanEvent, decoded);
@@ -228,13 +233,15 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
 
 /**
  * Fetch and process ALL events for a given startLedger, handling pagination
- * boundaries when a ledger contains more than PAGE_LIMIT events
+ * boundaries when a ledger contains more than PAGE_LIMIT events.
  *
- * Returns the latestLedger reported by the RPC node.
+ * Returns the latest ledger sequence plus the corresponding chain hash that
+ * the RPC reported for that poll span.
  */
 async function indexLedger(ledger) {
   let pageCursor = undefined; // RPC pagination cursor (opaque string)
   let latestLedger = ledger;
+  let latestLedgerHash = null;
 
   do {
     const req = {
@@ -246,6 +253,7 @@ async function indexLedger(ledger) {
 
     const res = await withRetry(() => rpc.getEvents(req));
     latestLedger = res.latestLedger ?? latestLedger;
+    latestLedgerHash = res.latestLedgerHash ?? latestLedgerHash;
 
     // Flag footprint contention across transactions in this page's events
     scanFootprintContention(res.events);
@@ -281,7 +289,7 @@ async function indexLedger(ledger) {
     cacheInvalidate("events:list:*").catch(() => {});
   }
 
-  return latestLedger;
+  return { latestLedger, latestLedgerHash };
 }
 
 let shutdown = false;
@@ -289,13 +297,28 @@ let ledgersSinceReorgCheck = 0;
 
 async function run() {
   await db.init();
+  if (config.SEED_BUILTIN_ABIS) {
+    await seedBuiltinAbis().catch((err) => logger.warn({ err: err.message }, "built-in ABI seeding failed"));
+  }
+  void runIntegrityChecks()
+    .then((result) => {
+      if (result.ok) {
+        logger.info("startup integrity check passed");
+      } else {
+        logger.warn({ failed: result.failed }, "startup integrity check failed");
+      }
+    })
+    .catch((err) => logger.warn({ err: err.message }, "startup integrity check failed to run"));
   const server = startApi();
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
   warmCache().catch((e) => logger.warn({ err: e.message }, "cache warm failed"));
+  seedBuiltinAbis().catch((e) => logger.warn({ err: e.message }, "builtin ABI seed failed"));
   startAbiSync();
+  startContractVerifier(); // periodically verify DB ABI hashes against on-chain registry
   startBurnDetector();
   startMetricsCollector(); // RPC latency probes
+  startNodeRecoveryPoll(); // re-check unhealthy multi-node RPC failover nodes
   startPruner(); // daily temporary-storage cleanup
   startGasGuzzlersWorker(); // daily gas consumption leaderboard
   startReDecodeWorker(); // low-priority ABI refresh for superseded events
@@ -304,6 +327,7 @@ async function run() {
   startUsageFlushCron();       // flush Redis usage counters → DB every minute
   startRetentionCleanupCron(); // nightly usage data retention cleanup
   startAuditPartitionCron();   // monthly audit log partition management
+  startAuditFlush();           // drain queued audit log entries every 500ms
 
   // Bootstrap vault indexer: initial ratio snapshot for all registered vaults
   refreshAllVaults().catch(() => {});
@@ -368,12 +392,24 @@ async function run() {
       console.log(`[daemon] polling from ledger ${_cursor}`);
       const polledFrom = _cursor;
       const latest = await indexLedger(polledFrom);
+      const latestLedger = latest.latestLedger ?? polledFrom;
+      const latestLedgerHash = latest.latestLedgerHash;
       alertManager.recordPoll();
       gapRecordLedger(polledFrom);
       const lagSeconds = Math.floor((Date.now() - (polledFrom * 5000)) / 1000); // approximate lag
       updateIndexerStatus(polledFrom, lagSeconds);
 
-      ledgersSinceReorgCheck += Math.max(1, latest - polledFrom + 1);
+      const immediateForkLedger = await checkForReorg(latestLedger, latestLedgerHash).catch((err) => {
+        logger.error({ err: err.message, ledger: latestLedger }, "reorg fast-path check failed");
+        return null;
+      });
+      if (immediateForkLedger !== null) {
+        _cursor = immediateForkLedger;
+        logger.warn({ ledger: immediateForkLedger }, "chain reorganization detected; cursor rewound");
+        continue;
+      }
+
+      ledgersSinceReorgCheck += Math.max(1, latestLedger - polledFrom + 1);
       if (ledgersSinceReorgCheck >= REORG_CHECK_INTERVAL) {
         // Keep reorg handling in this single-flight loop so no timer can race
         // indexLedger() while it owns and persists the daemon cursor.
@@ -390,8 +426,9 @@ async function run() {
         }
       }
 
-      _cursor = latest + 1;
+      _cursor = latestLedger + 1;
       await db.saveCursor(_cursor);
+      await db.saveLastIndexedLedger(latestLedger);
     } catch (err) {
       logger.error({ err: err.message, ledger: _cursor }, "indexer error");
       rpcErrors.inc({ type: err.code ?? "unknown" });
