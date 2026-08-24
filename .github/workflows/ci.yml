@@ -140,6 +140,27 @@ jobs:
         run: node src/migrate.js
         working-directory: indexer
 
+  # ── CLI Packages ──────────────────────────────────────────────────────────
+  # @soroban-explorer/client (API wrapper) + soroban-explorer (CLI tool).
+  # Both are zero-dependency — no npm install required, just node --test.
+  cli-packages:
+    name: CLI Packages (client + cli)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Test @soroban-explorer/client
+        run: node --test src/*.test.js
+        working-directory: packages/client
+
+      - name: Test soroban-explorer CLI
+        run: node --test src/*.test.js
+        working-directory: packages/cli
+
   # ── Services ──────────────────────────────────────────────────────────────
   services:
     name: Services (indexer + frontend)

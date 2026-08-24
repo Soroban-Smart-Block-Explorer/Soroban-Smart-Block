@@ -1,0 +1,30 @@
+{
+  "name": "@soroban-explorer/client",
+  "version": "0.1.0",
+  "description": "Lightweight JavaScript client for the Soroban Smart Block Explorer API",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "test": "node --test src/*.test.js",
+    "lint": "eslint src/"
+  },
+  "keywords": [
+    "soroban",
+    "stellar",
+    "block-explorer",
+    "smart-contracts",
+    "api-client"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {}
+}
