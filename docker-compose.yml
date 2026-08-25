@@ -69,13 +69,20 @@ services:
       indexer:
         condition: service_healthy
 
+  # NOTE: not yet fully wired for automated first-run seeding — this image
+  # has no Rust/wasm32 toolchain or `soroban`/`stellar` CLI, so
+  # contracts/deploy.sh can only run here if the wasm was already built on
+  # the host and `deploy.sh`'s hardcoded REGISTRY_ID placeholder has been
+  # replaced with a real deployed registry contract ID. Left as a documented
+  # manual step (see docs/testnet-deployment.md) rather than a working
+  # docker-compose service for now.
   seed:
-    image: node:18-alpine
+    image: node:20-alpine
     container_name: soroban-seed
     volumes:
       - .:/app
     working_dir: /app
-    command: sh -c "apk add make && make migrate && make deploy-contract && make register-abi"
+    command: sh -c "echo 'Seeding is a manual step — see docs/testnet-deployment.md' && exit 0"
     depends_on:
       postgres:
         condition: service_healthy

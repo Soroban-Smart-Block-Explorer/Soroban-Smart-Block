@@ -275,6 +275,19 @@ const configSchema = z.object({
   MAX_GRAPHQL_COMPLEXITY: positiveInt(1000).refine((val) => val >= 100 && val <= 100000, {
     message: "MAX_GRAPHQL_COMPLEXITY must be between 100 and 100000",
   }),
+}).superRefine((val, ctx) => {
+  // requireApiKey() in api.js fails OPEN (allows the request through) when
+  // API_KEY is unset, so an unset API_KEY in production silently disables
+  // auth on every write route (/api/contracts, /api/verify, /api/simulate,
+  // /api/sandbox/simulate, /api/auth-tree, source-verifications). Fail fast
+  // at startup instead of failing open at request time.
+  if (process.env.NODE_ENV === "production" && !val.API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["API_KEY"],
+      message: "API_KEY is required when NODE_ENV=production (write routes fail open without it)",
+    });
+  }
 });
 
 // ── Validate and Export Configuration ─────────────────────────────────────────

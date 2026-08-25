@@ -424,7 +424,7 @@ export const db = {
     params.push(clampLimit(limit, 10, 50));
 
     const { rows } = await pool.query(
-      `SELECT * FROM events
+      `SELECT * FROM events e
        WHERE (${fts} OR (${likeTerms}))
        ORDER BY ledger DESC, seq DESC
        LIMIT $${params.length}`,
@@ -437,8 +437,17 @@ export const db = {
     const terms = normalizeSearchTerms(q);
     if (!terms.length) return [];
 
-    const params = terms.map((term) => pushParam(params, `%${escapeLike(term)}%`));
-    params.push(clampLimit(limit, 10, 50));
+    // A single array-typed param bound once via ANY($n), not one param per
+    // term — `params.length` computed inside the query template (as this
+    // used to do) reflects the *final* array length at template-evaluation
+    // time, not each placeholder's actual position, and referencing
+    // `params` from within its own initializer threw a TDZ ReferenceError.
+    const params = [];
+    const likePatterns = pushParam(
+      params,
+      terms.map((term) => `%${escapeLike(term)}%`),
+    );
+    const limitPlaceholder = pushParam(params, clampLimit(limit, 10, 50));
 
     const { rows } = await pool.query(
       `WITH address_hits AS (
@@ -452,15 +461,15 @@ export const db = {
              'g'
            ) AS m
          ) a
-         WHERE a.address ILIKE ANY($${params.length})
+         WHERE a.address ILIKE ANY(${likePatterns})
          UNION
          SELECT NULL::BIGINT AS seq, NULL::BIGINT AS ledger, contract_id, address
          FROM privileged_roles
-         WHERE address ILIKE ANY($${params.length}) AND revoked = FALSE
+         WHERE address ILIKE ANY(${likePatterns}) AND revoked = FALSE
          UNION
          SELECT NULL::BIGINT AS seq, NULL::BIGINT AS ledger, contract_id, address
          FROM token_holders
-         WHERE address ILIKE ANY($${params.length})
+         WHERE address ILIKE ANY(${likePatterns})
        )
        SELECT address,
               COUNT(seq) AS event_count,
@@ -470,7 +479,7 @@ export const db = {
        FROM address_hits
        GROUP BY address
        ORDER BY event_count DESC, last_seen_ledger DESC NULLS LAST, address ASC
-       LIMIT $${params.length}`,
+       LIMIT ${limitPlaceholder}`,
       params,
     );
 

@@ -15,6 +15,15 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const apiSource = fs.readFileSync(path.resolve(__dirname, "../../src/api.js"), "utf8");
 
+// Strip comments before scanning for banned references. api.js documents
+// this exact invariant in a comment above the handler (mentioning
+// "seed-lib.js" and a `import("./seed-lib.js")` example of what NOT to do),
+// so scanning raw source would make this test fail on its own guard comment.
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+const apiSourceNoComments = stripComments(apiSource);
+
 // Extract the db-init handler body: from the route registration up to its
 // closing `});`.
 function extractDbInitHandler(source) {
@@ -27,13 +36,13 @@ function extractDbInitHandler(source) {
 
 describe("POST /api/setup/db-init (issue #417)", () => {
   it("does not reference seed-lib anywhere in api.js", () => {
-    expect(apiSource).not.toMatch(/seed-lib/);
-    expect(apiSource).not.toMatch(/seedLib/);
+    expect(apiSourceNoComments).not.toMatch(/seed-lib/);
+    expect(apiSourceNoComments).not.toMatch(/seedLib/);
   });
 
   it("has no dynamic import of seed-lib", () => {
     // Catches `await import('./seed-lib.js')` / `import("../seed-lib")` etc.
-    expect(apiSource).not.toMatch(/import\(\s*['"][^'"]*seed-lib/);
+    expect(apiSourceNoComments).not.toMatch(/import\(\s*['"][^'"]*seed-lib/);
   });
 
   it("handler calls db.init() and only db.init()", () => {

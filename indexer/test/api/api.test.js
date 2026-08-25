@@ -53,16 +53,6 @@ describe("REST API Integration Tests", () => {
     // Seed 50 events
     for (let i = 1; i <= 50; i++) {
       const contractId = i % 3 === 1 ? "C1" : i % 3 === 2 ? "C2" : "C3";
-      const contract = req.query.contract?.trim();
-
-if (
-  contract &&
-  !/^C[A-Z2-7]{55}$/.test(contract)
-) {
-  return res.status(400).json({
-    error: "Invalid contract id",
-  });
-}
       const fn = i % 2 === 0 ? "transfer" : "mint";
       const ledger = 1000 + i;
       const txHash = `tx_hash_${i}`;

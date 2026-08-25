@@ -5,10 +5,16 @@ import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import WalletBalances from "../components/WalletBalances";
-import { isMuxedAddress, muxedId, resolveMuxed, truncateAddress } from "../utils/strkey";
-import { useMetaTags } from "../hooks/useMetaTags";
+import ProtocolBadge from "../components/ProtocolBadge";
+import {
+  isMuxedAddress,
+  muxedId,
+  resolveMuxed,
+  truncateAddress,
+  isValidStellarAddress,
+} from "../utils/strkey";
 
-type GroupBy = "function" | "none";
+type GroupBy = "contract" | "none";
 
 const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
   { key: "transfer", label: "Transfer" },
@@ -194,14 +200,20 @@ export default function WalletPage() {
 
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["wallet", address],
-    queryFn: () => api.wallet(address),
+  const walletQuery = useQuery({
+    queryKey: ["walletHistory", address, fromDate, toDate],
+    queryFn: () => api.walletHistory(address, { from: fromDate, to: toDate }),
     enabled: !!address && isValidAddress,
   });
-  const events = data?.events ?? [];
-  const horizonAccount = data?.horizon_account ?? null;
+  const allEvents = walletQuery.data?.events ?? [];
+  const horizonAccount = walletQuery.data?.horizon_account ?? null;
   const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
+
+  // ── Client-side function-name filter (server only filters by date) ──────
+  const filtered = useMemo(
+    () => (fnFilter ? allEvents.filter((ev) => ev.function === fnFilter) : allEvents),
+    [allEvents, fnFilter],
+  );
 
   const availableFunctions = useMemo(
     () => Array.from(new Set(allEvents.map((ev) => ev.function))).sort(),
@@ -256,6 +268,11 @@ export default function WalletPage() {
     if (value) next.set(key, value);
     else next.delete(key);
     setSearchParams(next, { replace: true });
+  }
+
+  // ── Export CSV (#528) ────────────────────────────────────────────────────
+  function exportCsv() {
+    api.exportWalletCsv(address, { fn: fnFilter || undefined });
   }
 
   // ── Share / copy link ─────────────────────────────────────────────────────
