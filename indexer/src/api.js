@@ -24,7 +24,7 @@ import { tokenBucketMiddleware } from "./rateLimit/tokenBucket.js";
 import { graphqlComplexityLimiter } from "./rateLimit/graphqlComplexity.js";
 import { abuseDetector } from "./rateLimit/abuseDetector.js";
 import { rateLimitHeaderWriter } from "./rateLimit/headers.js";
-import { auditLoggerMiddleware } from "./audit/auditLogger.js";
+import { auditLoggerMiddleware, ensureAuditPartitions } from "./audit/auditLogger.js";
 import registerAdminRoutes from "./routes/admin.js";
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
 import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
@@ -270,6 +270,12 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── Auth & Rate Limiting Middleware Stack ─────────────────────────────────
   // Order matters: audit logger sets _startTime first, then auth resolves tier,
   // then geo/concurrent/bucket limiters enforce quotas, then headers are set.
+  // Fire-and-forget: guarantees the current month's partition exists before
+  // the 500ms flush loop's first tick, even when createApi() is invoked
+  // directly (tests) rather than via index.js's startAuditPartitionCron().
+  ensureAuditPartitions().catch((err) =>
+    console.error("[api] Startup audit partition check failed:", err.message),
+  );
   app.use(auditLoggerMiddleware);
   app.use(apiKeyAuthenticator);
   app.use(geoIpRateLimiter);

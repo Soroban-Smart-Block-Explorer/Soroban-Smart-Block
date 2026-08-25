@@ -346,6 +346,12 @@ ${calls.map(
           <button onClick={exportAsJson} disabled={calls.length === 0} style={{ fontSize: 12 }}>
             Export as JSON
           </button>
+          <button onClick={exportAsFoundry} disabled={calls.length === 0} style={{ fontSize: 12 }}>
+            Export as Foundry script
+          </button>
+          <button onClick={exportAsCli} disabled={calls.length === 0} style={{ fontSize: 12 }}>
+            Export as CLI script
+          </button>
         </div>
       </div>
     </div>

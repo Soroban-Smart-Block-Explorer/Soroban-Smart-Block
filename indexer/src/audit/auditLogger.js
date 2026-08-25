@@ -12,6 +12,15 @@
  *     500 ms, batching up to MAX_BATCH_SIZE rows per INSERT for efficiency.
  *   - startAuditPartitionCron: Monthly cron job that pre-creates the next
  *     month's partition and drops partitions older than 90 days.
+ *   - ensureAuditPartitions: Eagerly creates the current and next month's
+ *     partitions. The migration only seeds partitions through a fixed
+ *     cut-off month, and the cron above only ever creates the *next* month
+ *     relative to whenever it happens to run — neither backfills the
+ *     *current* month if the server starts after that cut-off or after a
+ *     downtime spanning a month boundary. Without a current-month partition,
+ *     every insert throws "no partition of relation ... found for row" and
+ *     _flushQueue re-queues the batch forever. Call this once at startup,
+ *     before traffic starts flowing.
  */
 
 import crypto from 'crypto';
@@ -21,6 +30,10 @@ import { pool } from '../db.js';
 // ── Configuration ─────────────────────────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 500;
 const MAX_BATCH_SIZE = 100;
+// Cap re-queue attempts so a sustained DB/partition outage can't grow the
+// in-process queue and retry loop unboundedly; entries are dropped (and
+// logged) past this point rather than retried forever.
+const MAX_FLUSH_ATTEMPTS = 20;
 
 // ── In-process queue ──────────────────────────────────────────────────────────
 /** @type {object[]} */
@@ -82,9 +95,19 @@ async function _flushQueue() {
     );
   } catch (err) {
     console.error('[auditLogger] Batch INSERT failed:', err.message);
-    // Re-queue the batch so it is retried on the next flush cycle.
-    // Prepend so ordering is roughly preserved.
-    _queue.unshift(...batch);
+    // Re-queue the batch so it is retried on the next flush cycle, up to
+    // MAX_FLUSH_ATTEMPTS. Prepend so ordering is roughly preserved.
+    const retryable = [];
+    for (const entry of batch) {
+      const attempts = (entry._flushAttempts ?? 0) + 1;
+      if (attempts > MAX_FLUSH_ATTEMPTS) {
+        console.error('[auditLogger] Dropping entry after', MAX_FLUSH_ATTEMPTS, 'failed attempts:', entry.endpoint);
+        continue;
+      }
+      entry._flushAttempts = attempts;
+      retryable.push(entry);
+    }
+    _queue.unshift(...retryable);
   }
 }
 
@@ -92,15 +115,19 @@ async function _flushQueue() {
  * Start the periodic flush loop. Only called by the indexer daemon
  * (src/index.js) — importing this module for the middleware/entry-queue
  * functions must not have the side effect of scheduling DB writes.
+ * unref() defensively, so even a direct call from a test can't keep the
+ * process alive on its own.
  *
  * @returns {NodeJS.Timeout}
  */
 function startAuditFlush() {
-  return setInterval(() => {
+  const interval = setInterval(() => {
     _flushQueue().catch((err) => {
       console.error('[auditLogger] Flush interval error:', err.message);
     });
   }, FLUSH_INTERVAL_MS);
+  interval.unref();
+  return interval;
 }
 
 // ── auditLoggerMiddleware ─────────────────────────────────────────────────────
@@ -158,6 +185,45 @@ function auditLoggerMiddleware(req, res, next) {
   return next();
 }
 
+// ── Partition management ──────────────────────────────────────────────────────
+
+/**
+ * Create the monthly partition covering `date` if it does not already exist.
+ * Idempotent (CREATE TABLE IF NOT EXISTS), safe to call redundantly.
+ * @param {Date} date — any date within the target month (UTC).
+ */
+async function _ensurePartitionFor(date) {
+  const monthStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+  const nextMonthStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1));
+
+  const partitionName = _partitionName(monthStart);
+  const fromStr = monthStart.toISOString().slice(0, 10);
+  const toStr = nextMonthStart.toISOString().slice(0, 10);
+
+  try {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS ${partitionName}
+       PARTITION OF api_audit_log
+       FOR VALUES FROM ('${fromStr}') TO ('${toStr}')`,
+    );
+    console.log(`[auditLogger] Ensured partition ${partitionName} (${fromStr} – ${toStr})`);
+  } catch (err) {
+    console.error(`[auditLogger] Failed to create partition ${partitionName}:`, err.message);
+  }
+}
+
+/**
+ * Eagerly ensures the current and next month's partitions exist. Call once
+ * at server startup, before requests start flowing — see module docstring
+ * for why the cron alone isn't sufficient.
+ */
+async function ensureAuditPartitions() {
+  const now = new Date();
+  const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  await _ensurePartitionFor(now);
+  await _ensurePartitionFor(nextMonth);
+}
+
 // ── startAuditPartitionCron ───────────────────────────────────────────────────
 
 /**
@@ -165,31 +231,21 @@ function auditLoggerMiddleware(req, res, next) {
  *   1. Creates the next month's partition if it does not already exist.
  *   2. Drops partitions older than 90 days (free tier retention window).
  *
+ * Also calls `ensureAuditPartitions()` immediately on start, so a server
+ * restart self-heals a missing current-month partition without waiting for
+ * the next cron tick.
+ *
  * @returns {cron.ScheduledTask}
  */
 function startAuditPartitionCron() {
+  ensureAuditPartitions().catch((err) =>
+    console.error('[auditLogger] Startup partition check failed:', err.message),
+  );
+
   return cron.schedule('0 1 1 * *', async () => {
     try {
       const now = new Date();
-
-      // Create partition for next month.
-      const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-      const afterNextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 2, 1));
-
-      const partitionName = _partitionName(nextMonth);
-      const fromStr = nextMonth.toISOString().slice(0, 10);
-      const toStr = afterNextMonth.toISOString().slice(0, 10);
-
-      try {
-        await pool.query(
-          `CREATE TABLE IF NOT EXISTS ${partitionName}
-           PARTITION OF api_audit_log
-           FOR VALUES FROM ('${fromStr}') TO ('${toStr}')`,
-        );
-        console.log(`[auditLogger] Created partition ${partitionName} (${fromStr} – ${toStr})`);
-      } catch (createErr) {
-        console.error(`[auditLogger] Failed to create partition ${partitionName}:`, createErr.message);
-      }
+      await ensureAuditPartitions();
 
       // Drop partitions older than 90 days.
       const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 90));
@@ -245,4 +301,10 @@ function _parsePartitionDate(name) {
   return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
 }
 
-export { createAuditLogEntry, auditLoggerMiddleware, startAuditPartitionCron, startAuditFlush };
+export {
+  createAuditLogEntry,
+  auditLoggerMiddleware,
+  startAuditPartitionCron,
+  startAuditFlush,
+  ensureAuditPartitions,
+};

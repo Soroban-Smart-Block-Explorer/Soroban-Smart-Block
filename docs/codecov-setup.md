@@ -53,7 +53,7 @@ The following file types are excluded from coverage calculations:
 Add the following secret to your GitHub repository:
 
 - `CODECOV_TOKEN`: Your CodeCov upload token
-  - Get this from: https://app.codecov.io/gh/YOUR_ORG/YOUR_REPO/settings
+  - Get this from: https://app.codecov.io/gh/Soroban-Smart-Block-Explorer/Soroban-Smart-Block/settings
   - Add it to: Repository Settings → Secrets and variables → Actions → New repository secret
 
 ## Local Coverage Testing
@@ -91,11 +91,11 @@ npm test -- --coverage
 
 ## Viewing Coverage Reports
 
-- **Online Dashboard**: https://app.codecov.io/gh/YOUR_ORG/YOUR_REPO
+- **Online Dashboard**: https://app.codecov.io/gh/Soroban-Smart-Block-Explorer/Soroban-Smart-Block
 - **PR Comments**: CodeCov automatically comments on PRs with coverage details
 - **Badge**: Add to README:
   ```markdown
-  [![codecov](https://codecov.io/gh/YOUR_ORG/YOUR_REPO/branch/main/graph/badge.svg)](https://codecov.io/gh/YOUR_ORG/YOUR_REPO)
+  [![codecov](https://codecov.io/gh/Soroban-Smart-Block-Explorer/Soroban-Smart-Block/branch/main/graph/badge.svg)](https://codecov.io/gh/Soroban-Smart-Block-Explorer/Soroban-Smart-Block)
   ```
 
 ## Troubleshooting

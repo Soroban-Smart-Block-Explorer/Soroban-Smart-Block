@@ -19,7 +19,7 @@ import ReactFlow, {
   EdgeChange,
   NodeChange,
 } from "react-flow-renderer";
-import { BatchCall, ExecutionMode, BatchTemplate } from "../types/batch";
+import { BatchCall, ExecutionMode } from "../types/batch";
 import { BATCH_TEMPLATES, fillTemplateParameters } from "../services/batchTemplates";
 
 interface BatchFlowChartProps {
@@ -78,8 +78,8 @@ export default function BatchFlowChart({
   onCallsChange,
   onSimulate,
 }: BatchFlowChartProps) {
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes] = useNodesState([]);
+  const [edges, setEdges] = useEdgesState([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("sequential");
@@ -177,7 +177,7 @@ export default function BatchFlowChart({
         onConnect={onConnect}
         fitView
       >
-        <MiniMap nodeColor={(node) => "var(--accent)"} />
+        <MiniMap nodeColor={() => "var(--accent)"} />
         <Controls />
         <Background />
       </ReactFlow>

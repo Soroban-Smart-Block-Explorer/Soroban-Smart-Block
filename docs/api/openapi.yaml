@@ -469,6 +469,7 @@ paths:
           required: true
           schema:
             type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
           description: Contract ID
       responses:
         "200":
@@ -477,6 +478,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContractStats"
+              examples:
+                success:
+                  summary: Active contract stats
+                  value:
+                    total_events: 1204
+                    unique_callers: 87
+                    first_seen_ledger: 1000001
+                    last_seen_ledger: 1050320
+                    events_per_day: []
         "404":
           description: Contract not found
           content:
@@ -1203,43 +1213,6 @@ paths:
                   value:
                     events: []
                     pagination: { page: 1, limit: 25, total: 0 }
-        "500":
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/contracts/{id}/stats:
-    get:
-      summary: Contract event statistics
-      description: >-
-        Returns aggregate counts (total events, unique callers, first/last seen
-        ledger) and a 30-day daily activity sparkline for the contract stats
-        widget.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
-      responses:
-        "200":
-          description: Contract statistics
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ContractStats"
-              examples:
-                success:
-                  summary: Active contract stats
-                  value:
-                    total_events: 1204
-                    unique_callers: 87
-                    first_seen_ledger: 1000001
-                    last_seen_ledger: 1050320
-                    events_per_day: []
         "500":
           description: Internal server error
           content:

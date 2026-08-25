@@ -68,6 +68,21 @@ pub const MAX_PARAM_KIND_LEN: u32 = 32;
 /// Maximum number of parameters per `FunctionAbi`.
 pub const MAX_PARAMS_PER_FUNCTION: u32 = 20;
 
+// ── Storage TTL ────────────────────────────────────────────────────────────────
+
+/// Approximate ledgers per day at a 5s target close time.
+const DAY_IN_LEDGERS: u32 = 17_280;
+/// Extend instance storage (admin/paused/event-seq/max-events) once its
+/// remaining TTL drops below this many ledgers.
+const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7;
+/// ...out to this many ledgers from the current one.
+const INSTANCE_TTL_EXTEND_TO: u32 = DAY_IN_LEDGERS * 30;
+/// Extend a persistent entry (contract registry, event log slot) once its
+/// remaining TTL drops below this many ledgers.
+const PERSISTENT_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 30;
+/// ...out to this many ledgers from the current one.
+const PERSISTENT_TTL_EXTEND_TO: u32 = DAY_IN_LEDGERS * 90;
+
 // ── Data types ────────────────────────────────────────────────────────────────
 
 /// ABI-like metadata for a registered contract.
@@ -180,6 +195,17 @@ pub struct ExplorerContract;
 
 #[contractimpl]
 impl ExplorerContract {
+    // ── Storage TTL ───────────────────────────────────────────────────────────
+
+    /// Refreshes the instance storage TTL (admin, paused flag, event sequence,
+    /// max-events) so it does not archive between calls. Persistent storage
+    /// TTLs are extended separately, at the specific keys written.
+    fn bump_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+    }
+
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     /// Initialises the explorer and configures the event ring buffer.
@@ -197,10 +223,12 @@ impl ExplorerContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::EventSeq, &0u64);
         env.storage().instance().set(&DataKey::MaxEvents, &cap);
+        Self::bump_instance_ttl(&env);
     }
 
     /// Transfer admin rights to a new address (current admin only).
     pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if caller != admin {
@@ -213,7 +241,14 @@ impl ExplorerContract {
 
     /// Update the ring-buffer capacity (admin only).
     /// Panics with `BelowFloor` if `new_max < MIN_MAX_EVENTS`.
+    /// Panics with `InvalidInput` if the ring buffer has already wrapped
+    /// (`event_seq >= current max_events`): `slot = seq % max_events` is
+    /// computed against whatever `max_events` is live at call time, so
+    /// changing the modulus after any eviction has occurred would desync
+    /// historical slot lookups from future ones and orphan old entries.
+    /// Resizing is only safe before the buffer has ever wrapped.
     pub fn set_max_events(env: Env, caller: Address, new_max: u32) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if caller != admin {
@@ -221,6 +256,19 @@ impl ExplorerContract {
         }
         if new_max < MIN_MAX_EVENTS {
             panic_with_error!(&env, Error::BelowFloor);
+        }
+        let seq: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventSeq)
+            .unwrap_or(0);
+        let current_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxEvents)
+            .unwrap_or(DEFAULT_MAX_EVENTS);
+        if seq >= current_max as u64 {
+            panic_with_error!(&env, Error::InvalidInput);
         }
         env.storage().instance().set(&DataKey::MaxEvents, &new_max);
     }
@@ -244,6 +292,7 @@ impl ExplorerContract {
 
     /// Freeze all state-mutating operations (admin only).
     pub fn pause(env: Env, caller: Address) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if caller != admin {
@@ -255,6 +304,7 @@ impl ExplorerContract {
 
     /// Unfreeze the contract (admin only).
     pub fn unpause(env: Env, caller: Address) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if caller != admin {
@@ -283,6 +333,7 @@ impl ExplorerContract {
         contract_id: BytesN<32>,
         meta: ContractMeta,
     ) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         if env
             .storage()
@@ -307,6 +358,11 @@ impl ExplorerContract {
         stored.abi_version = 0;
         stored.min_ledger = env.ledger().sequence();
         env.storage().persistent().set(&key, &stored);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
 
         // Version history entry for abi_version 0.
         let vkey = DataKey::ContractVersion(VersionKey {
@@ -314,6 +370,11 @@ impl ExplorerContract {
             abi_version: 0,
         });
         env.storage().persistent().set(&vkey, &stored);
+        env.storage().persistent().extend_ttl(
+            &vkey,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (symbol_short!("c_reg"), contract_id.clone()),
@@ -331,6 +392,7 @@ impl ExplorerContract {
     /// Caller must be the admin or the original registrant.
     /// `meta.abi_version` must equal `existing.abi_version + 1` (optimistic concurrency guard).
     pub fn update_contract(env: Env, caller: Address, contract_id: BytesN<32>, meta: ContractMeta) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         if env
             .storage()
@@ -367,12 +429,22 @@ impl ExplorerContract {
         let mut updated = meta;
         updated.min_ledger = min_ledger;
         env.storage().persistent().set(&key, &updated);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
 
         let vkey = DataKey::ContractVersion(VersionKey {
             contract_id: contract_id.clone(),
             abi_version: new_abi_version,
         });
         env.storage().persistent().set(&vkey, &updated);
+        env.storage().persistent().extend_ttl(
+            &vkey,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (symbol_short!("c_abiu"), contract_id.clone()),
@@ -421,6 +493,7 @@ impl ExplorerContract {
     /// Deregister a contract.
     /// Caller must be the admin or the original registrant.
     pub fn deregister_contract(env: Env, caller: Address, contract_id: BytesN<32>) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         if env
             .storage()
@@ -454,6 +527,7 @@ impl ExplorerContract {
     /// Submit a decoded event to the on-chain ring buffer.
     /// Only the admin may call this.
     pub fn submit_event(env: Env, caller: Address, input: EventInput) {
+        Self::bump_instance_ttl(&env);
         caller.require_auth();
         if input.function == Symbol::new(&env, "") {
             panic_with_error!(&env, Error::InvalidInput);
@@ -498,9 +572,13 @@ impl ExplorerContract {
             raw_topics: input.raw_topics,
             raw_data: input.raw_data,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::EventLog(slot), &event);
+        let event_key = DataKey::EventLog(slot);
+        env.storage().persistent().set(&event_key, &event);
+        env.storage().persistent().extend_ttl(
+            &event_key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
         env.storage().instance().set(&DataKey::EventSeq, &(seq + 1));
 
         env.events().publish(

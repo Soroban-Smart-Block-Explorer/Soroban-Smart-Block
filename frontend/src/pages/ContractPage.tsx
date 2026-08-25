@@ -18,6 +18,7 @@ import NetworkComparison from "../components/NetworkComparison";
 import AddressConnectionGraph from "../components/AddressConnectionGraph";
 import WasmHashZone from "../components/WasmHashZone";
 import { useLocalAbi } from "../hooks/useLocalAbi";
+import { useMetaTags } from "../hooks/useMetaTags";
 import TTLProgressBar from "../components/TTLProgressBar";
 import CircuitBreakerStatus from "../components/CircuitBreakerStatus";
 import QuorumFreezeBadge from "../components/QuorumFreezeBadge";

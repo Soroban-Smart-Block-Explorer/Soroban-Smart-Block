@@ -97,8 +97,10 @@ async function callWithFailover(method, ...args) {
 // Periodically re-check unhealthy nodes so they can recover. Only started by
 // the indexer daemon (src/index.js) — importing this module for its exports
 // (e.g. in tests) must not have the side effect of scheduling network calls.
+// unref() defensively, so even a direct call from a test can't keep the
+// process alive on its own.
 export function startNodeRecoveryPoll() {
-  setInterval(async () => {
+  const interval = setInterval(async () => {
     for (const node of nodes) {
       if (!node.healthy) {
         try {
@@ -112,6 +114,7 @@ export function startNodeRecoveryPoll() {
       }
     }
   }, config.RPC_RECOVERY_INTERVAL_MS);
+  interval.unref();
 }
 
 export const multiNodeRpc = new Proxy(

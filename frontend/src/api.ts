@@ -339,7 +339,7 @@ async function mutationFetch(
 ): Promise<Response> {
   const buildHeaders = (token: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...options.headers,
+    ...(options.headers as Record<string, string> | undefined),
     ...(token ? { "X-CSRF-Token": token } : {}),
   });
 
