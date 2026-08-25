@@ -175,6 +175,16 @@ function verifyCsrf(req, res, next) {
     return next();
   }
 
+  // Admin routes — skip. They're gated by a Bearer token (adminAuthMiddleware),
+  // never by a browser session cookie, so they aren't vulnerable to CSRF the
+  // way cookie auth is: a malicious page can't make the browser attach an
+  // Authorization header the way it auto-attaches cookies. The route itself
+  // still requires and validates the token (including the "none provided"
+  // case, which it correctly rejects with 401).
+  if (req.path.startsWith('/api/admin/')) {
+    return next();
+  }
+
   // WebSocket upgrade requests — skip.
   const upgrade = req.headers['upgrade'];
   if (upgrade && upgrade.toLowerCase() === 'websocket') {

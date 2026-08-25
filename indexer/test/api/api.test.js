@@ -49,6 +49,15 @@ describe("REST API Integration Tests", () => {
       functions: [],
       registered_by: "test-admin",
     });
+    // Full-length strkey-format ID for the POST /api/contracts 409 test,
+    // since that route validates `id` against the real strkey pattern.
+    await db.upsertContractMeta({
+      id: "CONEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      name: "Contract One (full ID)",
+      description: "Seeded for the POST /api/contracts 409 test",
+      functions: [{ name: "noop" }],
+      registered_by: "test-admin",
+    });
 
     // Seed 50 events
     for (let i = 1; i <= 50; i++) {
@@ -415,12 +424,16 @@ describe("REST API Integration Tests", () => {
   });
 
   describe("POST /api/contracts", () => {
+    // POST /api/contracts validates `id` against the Stellar contract strkey
+    // pattern (C + 55 chars of [A-Z2-7]), so these use full-length fixture
+    // IDs distinct from the short "C1"/"C2"/"C3" seed data used elsewhere in
+    // this file for GET-endpoint tests, where the format doesn't matter.
     it("should register a new contract successfully", async () => {
       const res = await request(app)
         .post("/api/contracts")
         .set("x-api-key", "test-api-key")
         .send({
-          id: "C4",
+          id: "CFOURAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           name: "Contract Four",
           description: "Fourth contract details",
           functions: [{ name: "burn", args: [] }],
@@ -434,9 +447,9 @@ describe("REST API Integration Tests", () => {
         .post("/api/contracts")
         .set("x-api-key", "test-api-key")
         .send({
-          id: "C1",
+          id: "CONEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           name: "Contract One Dupe",
-          functions: [],
+          functions: [{ name: "noop" }],
         });
       expect(res.status).toBe(409);
       expect(res.body).toEqual({ error: "Contract already exists" });
@@ -447,11 +460,12 @@ describe("REST API Integration Tests", () => {
         .post("/api/contracts")
         .set("x-api-key", "test-api-key")
         .send({
-          id: "C5",
+          id: "CFIVEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           // missing functions
         });
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: "Missing id or functions" });
+      expect(res.body).toHaveProperty("errors");
+      expect(Array.isArray(res.body.errors)).toBe(true);
     });
   });
 

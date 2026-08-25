@@ -21,7 +21,7 @@ const { startApi } = await import("../../src/api.js");
 
 describe("PATCH /api/contracts/:id — ownership verification (issue #523)", () => {
   let server;
-  const contractId = "COWNER523ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJK1";
+  const contractId = "COWNER523AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   const validFunctions = [
     {
       name: "transfer",
@@ -54,8 +54,15 @@ describe("PATCH /api/contracts/:id — ownership verification (issue #523)", () 
         functions: validFunctions,
       });
 
-    const res = await request(server)
+    // No x-api-key means this request isn't CSRF-exempt, so it needs a real
+    // CSRF token/cookie pair to get past verifyCsrf and reach the route's
+    // own auth check (otherwise it fails CSRF with 403 before that runs).
+    const agent = request.agent(server);
+    const { body: csrf } = await agent.get("/api/csrf-token");
+
+    const res = await agent
       .patch(`/api/contracts/${contractId}`)
+      .set("X-CSRF-Token", csrf.csrfToken)
       .send({ name: "Updated Name", functions: validFunctions });
 
     expect(res.status).toBe(401);
@@ -63,7 +70,7 @@ describe("PATCH /api/contracts/:id — ownership verification (issue #523)", () 
 
   it("returns 404 when patching a non-existent contract", async () => {
     const res = await request(server)
-      .patch("/api/contracts/CNONEXISTENT23ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDE")
+      .patch("/api/contracts/CNONEXISTENT23AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
       .set("x-api-key", "admin-static-key")
       .send({ name: "Does not matter", functions: validFunctions });
 

@@ -50,22 +50,58 @@ import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health
 import { getActiveAlerts } from "./alertManager.js";
 import { randomUUID } from "crypto";
 import { resolveAsset } from "./horizonClient.js";
-import { createRequire } from "module";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 
 // ── AJV schema validator for POST /api/contracts ──────────────────────────────
-const _require = createRequire(import.meta.url);
-const _contractRegistrySchema = _require("./contractRegistry.schema.json");
+// This validates the real ContractMeta shape stored via db.upsertContractMeta
+// (id, name, description, functions[].{name,description,args}, registered_by,
+// protocol_type, version, abi_version, min_ledger) — NOT the differently-shaped
+// contractRegistry.schema.json (contractId/template), which is a separate
+// schema for community-submitted custom ABI interpretations.
 const _ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(_ajv);
-// The POST body uses 'id' instead of 'contractId' — patch the schema for validation
 const _postContractSchema = {
-  ..._contractRegistrySchema,
-  required: _contractRegistrySchema.required.map((k) => (k === "contractId" ? "id" : k)),
+  type: "object",
+  required: ["id", "name", "functions"],
   properties: {
-    ..._contractRegistrySchema.properties,
-    id: _contractRegistrySchema.properties.contractId,
+    id: {
+      type: "string",
+      description: "Stellar contract address (C... strkey, 56 chars)",
+      pattern: "^C[A-Z2-7]{55}$",
+    },
+    name: { type: "string", minLength: 1, maxLength: 100 },
+    description: { type: ["string", "null"], maxLength: 500 },
+    registered_by: { type: ["string", "null"] },
+    protocol_type: {
+      type: ["string", "null"],
+      enum: ["token", "dex", "lending", "nft", "bridge", "other", null],
+    },
+    version: { type: ["integer", "null"] },
+    abi_version: { type: ["integer", "null"] },
+    min_ledger: { type: ["integer", "null"] },
+    functions: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string", minLength: 1 },
+          description: { type: "string" },
+          args: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["name", "type"],
+              properties: {
+                name: { type: "string", minLength: 1 },
+                type: { type: "string", minLength: 1 },
+              },
+            },
+          },
+        },
+      },
+    },
   },
 };
 const _validateContractPost = _ajv.compile(_postContractSchema);
@@ -883,9 +919,14 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // PATCH /api/contracts/:id  — update ABI metadata (issue #523: ownership check)
   app.patch("/api/contracts/:id", writeLimiter, async (req, res) => {
     try {
-      // Must be authenticated
+      // Must be authenticated. The static admin key (API_KEY env var) is
+      // recognized by apiKeyAuthenticator with tier "enterprise" but no DB
+      // row, so keyId is null for it too — check tier, not just keyId,
+      // otherwise the admin key would be rejected here before ever reaching
+      // the isAdmin check below.
       const keyId = req.rateContext?.keyId ?? null;
-      if (!keyId) {
+      const isUnauthenticated = !req.rateContext || req.rateContext.tier === "unauthenticated";
+      if (isUnauthenticated) {
         return res.status(401).json({ error: "Authentication required" });
       }
 

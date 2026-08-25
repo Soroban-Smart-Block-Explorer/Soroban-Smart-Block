@@ -60,9 +60,13 @@ describe("EventTable — contract badge (Issue #556)", () => {
 
     renderTable([swapEvent]);
 
-    const nameLink = await screen.findByText("StellarSwap");
-    expect(nameLink.tagName).toBe("A");
-    expect(nameLink.getAttribute("href")).toBe(`/contract/${DEX_CONTRACT_ID}`);
+    // CopyableAddress wraps the display text in its own inner <span>, so the
+    // matched node is that span, not the <Link> itself — walk up to the
+    // nearest <a> ancestor to verify the link.
+    const nameText = await screen.findByText("StellarSwap");
+    const nameLink = nameText.closest("a");
+    expect(nameLink).not.toBeNull();
+    expect(nameLink?.getAttribute("href")).toBe(`/contract/${DEX_CONTRACT_ID}`);
     expect(screen.getByTitle("Protocol type: DEX")).toBeDefined();
   });
 
