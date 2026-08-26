@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import type { StatsRange } from "./InvocationFrequencyChart";
 
-/** 30-day daily event-count sparkline — plain SVG, no chart library. */
-function Sparkline({ data }: { data: { date: string; count: number }[] }) {
+/** Daily event-count sparkline for the selected range — plain SVG, no chart library. */
+function Sparkline({ data, range }: { data: { date: string; count: number }[]; range: StatsRange }) {
   const w = 300;
   const h = 40;
   const maxCount = Math.max(...data.map((d) => d.count), 1);
@@ -19,7 +20,7 @@ function Sparkline({ data }: { data: { date: string; count: number }[] }) {
       width="100%"
       viewBox={`0 0 ${w} ${h}`}
       style={{ display: "block", overflow: "visible" }}
-      aria-label="Events per day over the last 30 days"
+      aria-label={`Events per day over the last ${range} days`}
     >
       <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       {data.map((d, i) => {
@@ -46,10 +47,16 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-export default function ContractStatsWidget({ contractId }: { contractId: string }) {
+export default function ContractStatsWidget({
+  contractId,
+  range = 30,
+}: {
+  contractId: string;
+  range?: StatsRange;
+}) {
   const { data, isLoading } = useQuery({
-    queryKey: ["contract-stats", contractId],
-    queryFn: () => api.contractStats(contractId),
+    queryKey: ["contract-stats", contractId, range],
+    queryFn: () => api.contractStats(contractId, range),
     enabled: !!contractId,
   });
 
@@ -64,8 +71,8 @@ export default function ContractStatsWidget({ contractId }: { contractId: string
         <Stat label="Last Activity" value={data.last_seen_ledger != null ? `Ledger ${data.last_seen_ledger.toLocaleString()}` : "—"} />
       </div>
       <div>
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Events / day (last 30 days)</div>
-        <Sparkline data={data.events_per_day} />
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Events / day (last {range} days)</div>
+        <Sparkline data={data.events_per_day} range={range} />
       </div>
     </div>
   );
