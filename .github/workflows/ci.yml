@@ -284,9 +284,23 @@ jobs:
         with:
           node-version: 20
 
-      - name: Smoke test — health endpoint
+      # This job doesn't start a server itself — it's meant to smoke test a
+      # real deployed testnet indexer. Without the secret configured there's
+      # nothing to test against, so skip rather than fail CI on every push.
+      - name: Check testnet URL is configured
+        id: check
         run: |
-          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          if [ -z "${{ secrets.TESTNET_INDEXER_URL }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::TESTNET_INDEXER_URL secret not configured — skipping testnet smoke tests"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test — health endpoint
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL }}"
           echo "Testing health endpoint at $TESTNET_URL/api/health"
           
           RESPONSE=$(curl -s -w "\n%{http_code}" "$TESTNET_URL/api/health")
@@ -304,8 +318,9 @@ jobs:
           echo "✓ Health endpoint returned $HTTP_CODE"
 
       - name: Smoke test — events endpoint
+        if: steps.check.outputs.skip != 'true'
         run: |
-          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL }}"
           echo "Testing events endpoint at $TESTNET_URL/api/events"
           
           RESPONSE=$(curl -s "$TESTNET_URL/api/events?limit=1")
@@ -322,8 +337,9 @@ jobs:
           echo "✓ Events endpoint returned $EVENT_COUNT events"
 
       - name: Smoke test — response time check
+        if: steps.check.outputs.skip != 'true'
         run: |
-          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL }}"
           echo "Testing response time at $TESTNET_URL/api/health"
           
           START=$(date +%s%N)
