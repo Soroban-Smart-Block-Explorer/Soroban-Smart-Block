@@ -3993,6 +3993,28 @@ components:
           type: string
           example: "Detailed error message"
 
+    TransactionStatus:
+      type: object
+      required: [tx_hash, status, ledger, error]
+      properties:
+        tx_hash:
+          type: string
+          example: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+        status:
+          type: string
+          enum: [pending, success, failed]
+          example: "success"
+        ledger:
+          type: integer
+          nullable: true
+          description: Ledger sequence the transaction was included in. Null while pending.
+          example: 1050320
+        error:
+          type: string
+          nullable: true
+          description: Failure reason extracted from diagnostic events. Null unless status is "failed".
+          example: null
+
     WalletBalance:
       type: object
       required: [asset_code, asset_issuer, balance, is_native]
@@ -4452,6 +4474,484 @@ components:
           type: string
           nullable: true
           example: "centre.io"
+
+    WasmBuildMetadata:
+      type: object
+      required: [wasm_hash, compiler, sdk_version, repo_url, size_bytes]
+      description: Compiler version, SDK version, and repository link extracted from a contract's WASM binary.
+      properties:
+        wasm_hash:
+          type: string
+          example: "abc123"
+        compiler:
+          type: string
+          nullable: true
+          example: "rustc 1.78.0"
+        sdk_version:
+          type: string
+          nullable: true
+          example: "21.0.0"
+        repo_url:
+          type: string
+          nullable: true
+          example: null
+        size_bytes:
+          type: integer
+          example: 204800
+
+    ContractAbiFunction:
+      type: object
+      required: [name, description, args]
+      properties:
+        name:
+          type: string
+          example: "transfer"
+        description:
+          type: string
+          example: ""
+        args:
+          type: array
+          items:
+            type: object
+            required: [name, type]
+            properties:
+              name:
+                type: string
+                example: "amount"
+              type:
+                type: string
+                example: "i128"
+
+    ContractAbi:
+      type: object
+      description: Standardised ABI JSON combining registered metadata with the on-chain spec, served as a download.
+      required: [contractId, name, description, functions]
+      properties:
+        contractId:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        name:
+          type: string
+          example: "Example Token"
+        description:
+          type: string
+          example: ""
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractAbiFunction"
+
+    ContractSpecFunction:
+      type: object
+      required: [kind, name, inputs, outputs]
+      properties:
+        kind:
+          type: string
+          enum: [function]
+        name:
+          type: string
+          example: "balance"
+        doc:
+          type: string
+        inputs:
+          type: array
+          items:
+            type: object
+            required: [name, type]
+            properties:
+              name:
+                type: string
+              type:
+                type: string
+                example: "Address"
+        outputs:
+          type: array
+          items:
+            type: string
+            example: "i128"
+
+    ContractSpecType:
+      type: object
+      description: >-
+        A custom type entry parsed from the contract's WASM spec — a struct,
+        union, enum, or error_enum. Shape varies by `kind`: structs carry
+        `fields`; unions, enums, and error_enums carry `cases`.
+      required: [kind, name]
+      additionalProperties: true
+      properties:
+        kind:
+          type: string
+          enum: [struct, union, enum, error_enum]
+          example: "struct"
+        name:
+          type: string
+          example: "DataKey"
+        doc:
+          type: string
+
+    ContractSpecFull:
+      type: object
+      description: Full on-chain contract spec — function signatures plus any custom structs, enums, unions, and error_enums.
+      required: [functions, types]
+      properties:
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractSpecFunction"
+        types:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractSpecType"
+
+    UpgradeRecord:
+      type: object
+      required: [ledger, old_hash, new_hash, tx_hash, timestamp]
+      properties:
+        ledger:
+          type: integer
+          example: 1050320
+        old_hash:
+          type: string
+          nullable: true
+          example: "aaa111"
+        new_hash:
+          type: string
+          nullable: true
+          example: "bbb222"
+        tx_hash:
+          type: string
+          example: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+        timestamp:
+          type: string
+          format: date-time
+
+    CallGraphNode:
+      type: object
+      required: [id, label, type]
+      properties:
+        id:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        label:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        type:
+          type: string
+          example: "contract"
+
+    CallGraphEdge:
+      type: object
+      required: [source, target, label, call_count]
+      properties:
+        source:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        target:
+          type: string
+          example: "CDEX7MZXYZ"
+        label:
+          type: string
+          example: "42 calls"
+        call_count:
+          type: integer
+          example: 42
+
+    CallGraph:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/CallGraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/CallGraphEdge"
+
+    ContractTtl:
+      type: object
+      required: [contract_id, current_ledger, instance, code]
+      properties:
+        contract_id:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        current_ledger:
+          type: integer
+          example: 1050320
+        instance:
+          type: object
+          nullable: true
+          properties:
+            live_until_ledger:
+              type: integer
+              example: 1100000
+        code:
+          type: object
+          nullable: true
+          properties:
+            live_until_ledger:
+              type: integer
+              example: 1200000
+
+    SourceVerification:
+      type: object
+      required: [id, contract_id, wasm_hash, signer, signature, compiler_hash, submitted_at]
+      properties:
+        id:
+          type: integer
+          example: 1
+        contract_id:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        wasm_hash:
+          type: string
+          example: "abc123def456"
+        signer:
+          type: string
+          example: "GABC..."
+        signature:
+          type: string
+          example: "base64-signature"
+        compiler_hash:
+          type: string
+          example: "sha256-of-compiler-binary"
+        submitted_at:
+          type: string
+          format: date-time
+
+    TokenHolder:
+      type: object
+      required: [address, balance_raw, balance]
+      properties:
+        address:
+          type: string
+          example: "GABC..."
+        balance_raw:
+          type: string
+          example: "10000000000"
+        balance:
+          type: string
+          example: "1000.0000000"
+
+    NftToken:
+      type: object
+      required: [token_id, owner]
+      properties:
+        token_id:
+          type: string
+          example: "42"
+        owner:
+          type: string
+          nullable: true
+          example: "GABC..."
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        last_transfer_ledger:
+          type: integer
+          nullable: true
+          example: 1050320
+
+    NftListResponse:
+      type: object
+      required: [contract_id, tokens, pagination]
+      properties:
+        contract_id:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/NftToken"
+        pagination:
+          type: object
+          required: [page, limit, total, total_pages, has_next]
+          properties:
+            page:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
+            total:
+              type: integer
+              example: 0
+            total_pages:
+              type: integer
+              example: 0
+            has_next:
+              type: boolean
+              example: false
+
+    SandboxRecord:
+      type: object
+      required: [sandbox_id, template_id, files, metadata, created_at, updated_at]
+      properties:
+        sandbox_id:
+          type: string
+          example: "sandbox-abc123"
+        template_id:
+          type: string
+          example: "soroban-hello-world"
+        files:
+          type: object
+          additionalProperties:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SandboxSummary:
+      type: object
+      required: [sandbox_id, template_id, metadata, created_at, updated_at]
+      properties:
+        sandbox_id:
+          type: string
+          example: "sandbox-abc123"
+        template_id:
+          type: string
+          example: "soroban-hello-world"
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SimulateResult:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          example: true
+        returnValue:
+          type: string
+          description: Base64-encoded XDR return value. Present only when `success` is true.
+          example: "AAAAAA=="
+        cost:
+          type: object
+          properties:
+            cpuInsns:
+              type: string
+              example: "12450"
+            memBytes:
+              type: string
+              example: "4096"
+        error:
+          type: string
+          description: Present only when `success` is false.
+          example: "HostError: Value(InvalidInput)"
+
+    SandboxSimulateResult:
+      allOf:
+        - $ref: "#/components/schemas/SimulateResult"
+        - type: object
+          properties:
+            minResourceFee:
+              type: string
+              nullable: true
+              example: "1200"
+            latestLedger:
+              type: integer
+              nullable: true
+              example: 1050320
+
+    BatchSubRequest:
+      type: object
+      required: [path]
+      properties:
+        method:
+          type: string
+          default: "GET"
+          example: "GET"
+        path:
+          type: string
+          example: "/api/events?limit=2"
+        body:
+          type: object
+          additionalProperties: true
+
+    BatchSubResult:
+      type: object
+      required: [status, body]
+      properties:
+        status:
+          type: integer
+          example: 200
+        body:
+          description: The JSON or text body returned by the sub-request.
+          example: { data: [], next_cursor: null }
+
+    AuditLogEntry:
+      type: object
+      required:
+        - id
+        - timestamp
+        - tier
+        - ip
+        - method
+        - endpoint
+        - status_code
+        - response_time_ms
+      properties:
+        id:
+          type: integer
+          example: 1
+        timestamp:
+          type: string
+          format: date-time
+        api_key_id:
+          type: string
+          nullable: true
+          example: null
+        key_name:
+          type: string
+          nullable: true
+          example: null
+        tier:
+          type: string
+          enum: [unauthenticated, free, pro, enterprise]
+          example: "free"
+        ip:
+          type: string
+          example: "203.0.113.7"
+        method:
+          type: string
+          example: "GET"
+        endpoint:
+          type: string
+          example: "/api/events"
+        status_code:
+          type: integer
+          example: 200
+        response_time_ms:
+          type: integer
+          example: 42
+        rate_limit_remaining:
+          type: integer
+          nullable: true
+          example: 99
+        user_agent:
+          type: string
+          nullable: true
+          example: "Mozilla/5.0"
+        request_body_hash:
+          type: string
+          nullable: true
+          description: SHA-256 hex digest of the request body, for write requests only.
+          example: null
 
   headers:
     X-RateLimit-Limit:
