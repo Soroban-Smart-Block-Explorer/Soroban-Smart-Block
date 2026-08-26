@@ -74,17 +74,30 @@ describe("WalletPage", () => {
     const seqLink = await screen.findByText("#1001");
     expect(seqLink).toBeDefined();
     expect(screen.getByText("#1002")).toBeDefined();
-    expect(screen.getByText("2,500,000")).toBeDefined();
-    expect(screen.getByText("2,500,005")).toBeDefined();
-    expect(screen.getByText("transfer")).toBeDefined();
-    expect(screen.getByText("swap")).toBeDefined();
+    // "2,500,000" is both this event's own ledger AND the wallet summary's
+    // "first seen ledger" (they're the same value here), so it legitimately
+    // renders twice — use getAllByText rather than requiring a single match.
+    expect(screen.getAllByText("2,500,000").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("2,500,005").length).toBeGreaterThanOrEqual(1);
+    // "transfer"/"swap" also appear as <option> values in the function
+    // filter dropdown, so more than one match is expected here too.
+    expect(screen.getAllByText("transfer").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("swap").length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows a friendly error for an invalid address (#525)", async () => {
     renderWalletPage("GFOO");
 
-    // #525: error message must include the bad address
-    const errorEl = await screen.findByText(/GFOO is not a valid Stellar address/i);
+    // #525: error message must include the bad address. "GFOO" and
+    // "is not a valid Stellar address" are in separate DOM nodes (the
+    // address is wrapped in its own <strong>), so match on combined
+    // textContent of the innermost containing element.
+    const hasErrorText = (el: Element | null) =>
+      Boolean(el?.textContent?.includes("GFOO") && el?.textContent?.includes("is not a valid Stellar address"));
+    const errorEl = await screen.findByText(
+      (_, element) =>
+        hasErrorText(element) && Array.from(element?.children ?? []).every((child) => !hasErrorText(child)),
+    );
     expect(errorEl).toBeDefined();
     expect(mockWalletHistory).not.toHaveBeenCalled();
   });
@@ -120,14 +133,25 @@ describe("WalletPage", () => {
         description: "Swap event",
         raw_topics: [],
       },
+      {
+        seq: 3,
+        contract_id: "CDLZFC3SYJYDZT7K67VZ75HRJDTIKI7BF6RQD7MFPK5QERZUTXX7YV7V",
+        function: "mint",
+        ledger: 1002,
+        description: "Mint event",
+        raw_topics: [],
+      },
     ];
     mockWalletHistory.mockResolvedValue({ events: mockEvents, horizon_account: null });
 
     renderWalletPage(VALID_ADDR);
 
-    // Summary: 2 total events, 2 unique contracts
-    expect(await screen.findByText("2")).toBeDefined();
+    // Summary: 3 total events, 2 unique contracts — distinct numbers so the
+    // query below can't ambiguously match both <strong> elements.
+    expect(await screen.findByText("3")).toBeDefined();
+    expect(screen.getByText("2")).toBeDefined();
     expect(screen.getByText(/total event/i)).toBeDefined();
+    expect(screen.getByText(/unique contract/i)).toBeDefined();
   });
 
   it("renders XLM balance when horizon_account is present in the response", async () => {

@@ -212,16 +212,33 @@ async function _ensurePartitionFor(date) {
   }
 }
 
+async function _doEnsureAuditPartitions() {
+  const now = new Date();
+  const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  await _ensurePartitionFor(now);
+  await _ensurePartitionFor(nextMonth);
+}
+
+// Tracks the most recent ensureAuditPartitions() call so test teardown can
+// await it — callers (api.js, startAuditPartitionCron) invoke this
+// fire-and-forget, and its console.log can otherwise fire after Jest tears
+// a test file's environment down, which silently sets process.exitCode = 1
+// for the whole run. See getPendingAuditPartitionWork().
+let _pendingPartitionWork = Promise.resolve();
+
 /**
  * Eagerly ensures the current and next month's partitions exist. Call once
  * at server startup, before requests start flowing — see module docstring
  * for why the cron alone isn't sufficient.
  */
-async function ensureAuditPartitions() {
-  const now = new Date();
-  const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  await _ensurePartitionFor(now);
-  await _ensurePartitionFor(nextMonth);
+function ensureAuditPartitions() {
+  _pendingPartitionWork = _doEnsureAuditPartitions();
+  return _pendingPartitionWork;
+}
+
+/** Exported for test teardown — see _pendingPartitionWork above. */
+function getPendingAuditPartitionWork() {
+  return _pendingPartitionWork;
 }
 
 // ── startAuditPartitionCron ───────────────────────────────────────────────────
@@ -307,4 +324,5 @@ export {
   startAuditPartitionCron,
   startAuditFlush,
   ensureAuditPartitions,
+  getPendingAuditPartitionWork,
 };

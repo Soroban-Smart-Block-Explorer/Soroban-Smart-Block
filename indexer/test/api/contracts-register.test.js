@@ -16,7 +16,7 @@ const { startApi } = await import("../../src/api.js");
 
 describe("POST /api/contracts (issue #414)", () => {
   let server;
-  const contractId = "CABITEST414ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJK";
+  const contractId = "CABITESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
   beforeAll(async () => {
     await db.init();
@@ -61,6 +61,10 @@ describe("POST /api/contracts (issue #414)", () => {
       .send({ id: "CMISSINGFUNCTIONS414" }); // no functions
 
     expect(res.status).toBe(400);
-    expect(res.body).toHaveProperty("error");
+    // Schema validation failures return { errors: [...] } (AJV-style, plural),
+    // not a single { error: "..." } string.
+    expect(res.body).toHaveProperty("errors");
+    expect(Array.isArray(res.body.errors)).toBe(true);
+    expect(res.body.errors.length).toBeGreaterThan(0);
   });
 });

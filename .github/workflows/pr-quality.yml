@@ -21,8 +21,9 @@ jobs:
 
       - name: Check branch name convention
         continue-on-error: true
+        env:
+          BRANCH: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
           if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
             echo "Branch '$BRANCH' is exempt from the naming convention check."
             exit 0

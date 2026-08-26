@@ -42,8 +42,12 @@ describe("POST /api/batch (issue #416)", () => {
   });
 
   it("returns results in submission order, with the 404 isolated to its slot", async () => {
+    // /api/batch can dispatch mutating sub-requests, so the outer POST is
+    // correctly CSRF-protected. x-api-key is CSRF-exempt (machine-to-machine)
+    // and this test is only concerned with ordering, not auth.
     const res = await request(server)
       .post("/api/batch")
+      .set("x-api-key", "test-api-key")
       .send({
         requests: [
           { method: "GET", path: "/api/events" }, // valid -> 200
@@ -61,8 +65,10 @@ describe("POST /api/batch (issue #416)", () => {
     expect(res.body[1].status).toBe(404);
     expect(res.body[2].status).toBe(200);
 
-    // Entries 1 and 3 still carry their successful payloads.
-    expect(Array.isArray(res.body[0].body)).toBe(true);
+    // Entries 1 and 3 still carry their successful payloads. GET /api/events
+    // uses keyset pagination (#490): { data: Event[], next_cursor }, not a
+    // bare array.
+    expect(Array.isArray(res.body[0].body.data)).toBe(true);
     expect(res.body[2].body.id).toBe(contractId);
   });
 });

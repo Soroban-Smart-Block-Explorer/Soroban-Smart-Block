@@ -94,6 +94,15 @@ describe("OpenAPI Contract Validation Tests", () => {
       functions: [{ name: "mint", args: [] }],
       registered_by: "test-admin",
     });
+    // Full-length strkey-format ID for the POST /api/contracts 409 test,
+    // since that route validates `id` against the real strkey pattern.
+    await db.upsertContractMeta({
+      id: "CONEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      name: "Contract One (full ID)",
+      description: "Seeded for the POST /api/contracts 409 test",
+      functions: [{ name: "noop" }],
+      registered_by: "test-admin",
+    });
 
     // Seed events
     for (let i = 1; i <= 30; i++) {
@@ -191,7 +200,7 @@ describe("OpenAPI Contract Validation Tests", () => {
       .post("/api/contracts")
       .set("x-api-key", "test-api-key")
       .send({
-        id: "C3",
+        id: "CTHREEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         name: "Contract Three",
         description: "Third contract",
         functions: [{ name: "burn", description: "burn spec", args: [] }],
@@ -205,9 +214,9 @@ describe("OpenAPI Contract Validation Tests", () => {
       .post("/api/contracts")
       .set("x-api-key", "test-api-key")
       .send({
-        id: "C1",
+        id: "CONEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         name: "Contract One",
-        functions: [],
+        functions: [{ name: "noop" }],
       });
     expect(res.status).toBe(409);
     expect(() => validateResponse("/api/contracts", "POST", 409, res.body)).not.toThrow();
@@ -218,7 +227,7 @@ describe("OpenAPI Contract Validation Tests", () => {
       .post("/api/contracts")
       .set("x-api-key", "test-api-key")
       .send({
-        id: "C4",
+        id: "CFOURAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       });
     expect(res.status).toBe(400);
     expect(() => validateResponse("/api/contracts", "POST", 400, res.body)).not.toThrow();
