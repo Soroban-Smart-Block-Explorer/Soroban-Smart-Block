@@ -5,6 +5,7 @@ import { api } from "../api";
 import type { NftToken } from "../api";
 import NftCard from "../components/NftCard";
 import NftDetailModal from "../components/NftDetailModal";
+import NftCollectionAnalytics from "../components/NftCollectionAnalytics";
 
 const PAGE_SIZE = 50;
 
@@ -61,6 +62,9 @@ export default function NftGallery() {
           )}
         </div>
       </div>
+
+      {/* Collection-level analytics (#810) — mint volume + unique-holder trends */}
+      <NftCollectionAnalytics contractId={contractId} />
 
       {/* Owner filter */}
       <div className="card" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>

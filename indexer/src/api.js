@@ -1383,6 +1383,24 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/tokens/:contractId/nfts/analytics
+  //   Collection-level analytics (issue #810): mint volume over time and a
+  //   unique-holder-count trend, derived from indexed NFT mint/transfer events.
+  //   ?days=<n> — rolling window length, default 30, clamped 7..365.
+  app.get("/api/tokens/:contractId/nfts/analytics", async (req, res) => {
+    try {
+      const { contractId } = req.params;
+      const days = req.query.days !== undefined ? Number(req.query.days) : 30;
+      if (isNaN(days) || days < 1 || days > 365) {
+        return res.status(422).json({ error: "Invalid days" });
+      }
+      const analytics = await db.getNftCollectionAnalytics(contractId, days);
+      res.json(analytics);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // GET /api/tokens/:contractId/nfts/:tokenId/history
   //   Returns the full mint + transfer event history for a single NFT token.
   app.get("/api/tokens/:contractId/nfts/:tokenId/history", async (req, res) => {

@@ -1899,6 +1899,48 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/tokens/{contractId}/nfts/analytics:
+    get:
+      summary: Collection-level NFT analytics
+      description: >-
+        Returns mint volume over time and a unique-holder-count trend for an NFT
+        collection, derived from already-indexed NFT mint/transfer events.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+          description: Rolling window length in days (clamped server-side to 7..365)
+      responses:
+        "200":
+          description: Collection analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NftAnalyticsResponse"
+        "422":
+          description: Invalid days value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/tokens/{contractId}/nfts/{tokenId}/history:
     get:
       summary: Transfer history for a single NFT token
@@ -4243,6 +4285,52 @@ components:
         balance:
           type: string
           description: Human-readable balance formatted using the token's decimals
+
+    NftAnalyticsResponse:
+      type: object
+      required: [contract_id, days, totals, mint_volume, holder_count]
+      properties:
+        contract_id:
+          type: string
+        days:
+          type: integer
+        totals:
+          type: object
+          required: [minted, transfers, unique_holders]
+          properties:
+            minted:
+              type: integer
+              description: Total mint events (mint_nft / create) for the collection
+            transfers:
+              type: integer
+              description: Total NFT transfer events for the collection
+            unique_holders:
+              type: integer
+              description: Distinct recipient addresses ever seen across mint + transfer events
+        mint_volume:
+          type: array
+          description: Daily mint counts over the window, zero-filled
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
+        holder_count:
+          type: array
+          description: Cumulative distinct-holder curve over the window, zero-filled
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
 
     NftListResponse:
       type: object
