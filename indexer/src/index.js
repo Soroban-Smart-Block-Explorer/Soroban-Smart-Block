@@ -37,6 +37,7 @@ import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
 import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
+import { deliverWebhooksForEvent, retryWebhookDelivery } from "./webhookDelivery.js";
 import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
 import { runIntegrityChecks } from "./routes/admin.js";
 
@@ -201,6 +202,10 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   await db.upsertEventValidated(decoded);
   // Bust wallet event caches (#534) — any new event may reference a wallet address.
   cacheInvalidate("wallet:events:*").catch(() => {});
+  // Notify matching webhook subscriptions (non-blocking; failures retry via the DLQ).
+  deliverWebhooksForEvent(decoded).catch((err) =>
+    console.error("[webhookDelivery] dispatch failed:", err.message),
+  );
 
   // Persist per-key state diffs for the timeline.
   const diffs = extractStateDiffs(rawSorobanEvent, decoded);
@@ -229,6 +234,20 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
 
   console.log(`[${rawSorobanEvent.ledger}] ${decoded.function}: ${decoded.description}`);
   return decoded;
+}
+
+/**
+ * dead_letter_queue.processRetries() calls a single handler for every due
+ * entry regardless of what originally failed — dispatch webhook-delivery
+ * retries (marked `kind: "webhook_delivery"` by webhookDelivery.js) to their
+ * own handler, and fall back to the normal ledger-event retry path for
+ * everything else.
+ */
+async function dlqRetryDispatch(rawEvent) {
+  if (rawEvent?.kind === "webhook_delivery") {
+    return retryWebhookDelivery(rawEvent);
+  }
+  return processSingleEvent(rawEvent);
 }
 
 /**
@@ -336,7 +355,7 @@ async function run() {
     refreshAllVaults().catch(() => {});
     alertManager.checkIndexerDown().catch(() => {});
     alertManager.checkResourceConstraints().catch(() => {});
-    dlqProcessRetries(processSingleEvent).catch(() => {}); // retry transient failures
+    dlqProcessRetries(dlqRetryDispatch).catch(() => {}); // retry transient failures
   }, 60_000);
 
   // resume from the highest indexed ledger so no events are missed

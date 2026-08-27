@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import ThemeToggle from "./ThemeToggle";
 import NetworkSwitcher from "./NetworkSwitcher";
+import { useRecentSearches } from "../hooks/useRecentSearches";
 
 const NAV_LINKS = [
   { to: "/contracts", label: "Registry" },
@@ -18,19 +19,30 @@ const NAV_LINKS = [
 export default function Nav() {
   const [q, setQ] = useState("");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
   const nav = useNavigate();
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const { recent, add: addRecentSearch, remove: removeRecentSearch, clearAll: clearRecentSearches } =
+    useRecentSearches();
+
+  function goToSearch(query: string, kind?: string) {
+    const params = new URLSearchParams({ q: query });
+    if (kind) params.set("kind", kind);
+    addRecentSearch(query, kind ?? "all");
+    nav(`/search?${params}`);
+  }
 
   function search(e: React.FormEvent) {
     e.preventDefault();
     const v = q.trim();
     if (!v) return;
-    const params = new URLSearchParams({ q: v });
-    if (v.startsWith("G") && v.length === 56) params.set("kind", "wallet");
-    else if (v.startsWith("M") && v.length === 56) params.set("kind", "wallet");
-    else if (v.startsWith("C") && v.length === 56) params.set("kind", "contract");
-    nav(`/search?${params}`);
+    let kind: string | undefined;
+    if (v.startsWith("G") && v.length === 56) kind = "wallet";
+    else if (v.startsWith("M") && v.length === 56) kind = "wallet";
+    else if (v.startsWith("C") && v.length === 56) kind = "contract";
+    goToSearch(v, kind);
     setQ("");
+    setSearchFocused(false);
   }
 
   // Handle keyboard shortcuts: / to focus search, Escape to blur
@@ -162,15 +174,107 @@ export default function Nav() {
           ☰
         </button>
 
-        <form onSubmit={search} className="nav-search-form" style={{ display: "flex", gap: 8, flex: 1, maxWidth: 600 }}>
+        <form
+          onSubmit={search}
+          className="nav-search-form"
+          style={{ display: "flex", gap: 8, flex: 1, maxWidth: 600, position: "relative" }}
+        >
           <input
             ref={searchInputRef}
             value={q}
             onChange={(e) => setQ(e.target.value)}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
             placeholder="Search contracts, events, wallets… (press / to focus)"
             style={{ flex: 1 }}
           />
           <button type="submit">Search</button>
+
+          {searchFocused && !q.trim() && recent.length > 0 && (
+            <div
+              style={{
+                position: "absolute",
+                top: "calc(100% + 6px)",
+                left: 0,
+                right: 0,
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+                zIndex: 50,
+                padding: 8,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--muted)",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  padding: "4px 8px",
+                }}
+              >
+                Recent searches
+              </div>
+              {recent.map((entry) => (
+                <div
+                  key={`${entry.kind}:${entry.query}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    goToSearch(entry.query, entry.kind === "all" ? undefined : entry.kind);
+                    setQ("");
+                    setSearchFocused(false);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    fontSize: 13,
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {entry.query}
+                  </span>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      removeRecentSearch(entry.query, entry.kind);
+                    }}
+                    title="Remove"
+                    aria-label={`Remove ${entry.query} from recent searches`}
+                    style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 12 }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <div style={{ borderTop: "1px solid var(--border)", marginTop: 4, paddingTop: 4 }}>
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    clearRecentSearches();
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "var(--muted)",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    padding: "4px 8px",
+                  }}
+                >
+                  ✕ Clear all
+                </button>
+              </div>
+            </div>
+          )}
         </form>
         <NetworkSwitcher />
         <ThemeToggle />
