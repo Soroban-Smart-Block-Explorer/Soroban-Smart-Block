@@ -1950,6 +1950,147 @@ export const db = {
 
     return { data, next_cursor };
   },
+
+  // ── Webhook subscriptions ────────────────────────────────────────────────────
+
+  /** Number of consecutive delivery failures after which a subscription is auto-disabled. */
+  WEBHOOK_MAX_CONSECUTIVE_FAILURES: 5,
+
+  async createWebhookSubscription({ api_key_id, url, contract_id, function_filter, secret }) {
+    const { rows } = await pool.query(
+      `INSERT INTO webhook_subscriptions (api_key_id, url, contract_id, function_filter, secret)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at`,
+      [api_key_id, url, contract_id ?? null, function_filter ?? null, secret],
+    );
+    return rows[0];
+  },
+
+  /** List subscriptions for one API key, excluding the signing secret. */
+  async listWebhookSubscriptions(apiKeyId) {
+    const { rows } = await pool.query(
+      `SELECT id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at
+       FROM webhook_subscriptions
+       WHERE api_key_id = $1
+       ORDER BY created_at DESC`,
+      [apiKeyId],
+    );
+    return rows;
+  },
+
+  /** Fetch one subscription including its secret (for signing outbound requests). */
+  async getWebhookSubscription(id) {
+    const { rows } = await pool.query(`SELECT * FROM webhook_subscriptions WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  },
+
+  async deactivateWebhookSubscription(id, apiKeyId) {
+    const { rows } = await pool.query(
+      `UPDATE webhook_subscriptions SET active = FALSE
+       WHERE id = $1 AND api_key_id = $2
+       RETURNING id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at`,
+      [id, apiKeyId],
+    );
+    return rows[0] ?? null;
+  },
+
+  /** Active subscriptions whose contract/function filters match a newly-indexed event. */
+  async getMatchingWebhookSubscriptions(contractId, functionName) {
+    const { rows } = await pool.query(
+      `SELECT * FROM webhook_subscriptions
+       WHERE active = TRUE
+         AND (contract_id IS NULL OR contract_id = $1)
+         AND (function_filter IS NULL OR function_filter = $2)`,
+      [contractId ?? null, functionName ?? null],
+    );
+    return rows;
+  },
+
+  /**
+   * Record the outcome of a delivery attempt, and update the subscription's
+   * consecutive-failure counter — auto-disabling it once the threshold is hit.
+   */
+  async recordWebhookDelivery({ webhook_id, event_seq, url, request_body, response_status, response_body, duration_ms, success }) {
+    const { rows } = await pool.query(
+      `INSERT INTO webhook_deliveries
+         (webhook_id, event_seq, url, request_body, response_status, response_body, duration_ms, delivered_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        webhook_id,
+        event_seq ?? null,
+        url,
+        request_body,
+        response_status ?? null,
+        response_body ?? null,
+        duration_ms ?? null,
+        success ? new Date() : null,
+      ],
+    );
+
+    if (success) {
+      await pool.query(
+        `UPDATE webhook_subscriptions SET failure_count = 0, last_triggered_at = NOW() WHERE id = $1`,
+        [webhook_id],
+      );
+    } else {
+      await pool.query(
+        `UPDATE webhook_subscriptions
+         SET failure_count = failure_count + 1,
+             active = (failure_count + 1) < $2,
+             last_triggered_at = NOW()
+         WHERE id = $1`,
+        [webhook_id, this.WEBHOOK_MAX_CONSECUTIVE_FAILURES],
+      );
+    }
+
+    return rows[0];
+  },
+
+  async listWebhookDeliveries(webhookId, { page = 1, limit = 25 } = {}) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.min(Math.max(1, Number(limit) || 25), 100);
+    const offset = (safePage - 1) * safeLimit;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      pool.query(
+        `SELECT id, webhook_id, event_seq, url, response_status, response_body, duration_ms, delivered_at, created_at
+         FROM webhook_deliveries
+         WHERE webhook_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [webhookId, safeLimit, offset],
+      ),
+      pool.query(`SELECT COUNT(*)::INT AS total FROM webhook_deliveries WHERE webhook_id = $1`, [webhookId]),
+    ]);
+
+    const total = countRows[0].total;
+    return { data: rows, pagination: { page: safePage, limit: safeLimit, total, total_pages: Math.ceil(total / safeLimit) } };
+  },
+
+  /** Total webhook delivery attempts ever made across all of one API key's subscriptions ("events received"). */
+  async countWebhookDeliveriesForApiKey(apiKeyId) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::INT AS total
+       FROM webhook_deliveries d
+       JOIN webhook_subscriptions w ON w.id = d.webhook_id
+       WHERE w.api_key_id = $1`,
+      [apiKeyId],
+    );
+    return rows[0].total;
+  },
+
+  /** Fetch one delivery row together with its parent subscription (for retry/ownership checks). */
+  async getWebhookDeliveryWithSubscription(deliveryId) {
+    const { rows } = await pool.query(
+      `SELECT d.*, w.api_key_id, w.url AS webhook_url, w.secret, w.active AS webhook_active
+       FROM webhook_deliveries d
+       JOIN webhook_subscriptions w ON w.id = d.webhook_id
+       WHERE d.id = $1`,
+      [deliveryId],
+    );
+    return rows[0] ?? null;
+  },
 };
 
 function normalizeSearchTerms(q) {

@@ -27,6 +27,8 @@ import { abuseDetector } from "./rateLimit/abuseDetector.js";
 import { rateLimitHeaderWriter } from "./rateLimit/headers.js";
 import { auditLoggerMiddleware, ensureAuditPartitions } from "./audit/auditLogger.js";
 import registerAdminRoutes from "./routes/admin.js";
+import registerWebhookRoutes from "./routes/webhooks.js";
+import registerDashboardRoutes from "./routes/dashboard.js";
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
 import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
 import {
@@ -344,6 +346,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
     next();
   });
   registerAdminRoutes(app);
+
+  // ── Self-service routes (auth-gated by req.rateContext.keyId) ────────────
+  registerWebhookRoutes(app);
+  registerDashboardRoutes(app);
 
   // ── API Documentation ────────────────────────────────────────────────────────
   const openApiPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../docs/api/openapi.yaml");
