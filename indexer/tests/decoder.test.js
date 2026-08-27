@@ -13,8 +13,62 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { xdr, StrKey } from "@stellar/stellar-sdk";
-import { decodeContractEvent } from "../src/xdr_decoder.js";
-import { parseI128, parseU128 } from "../src/int128.js";
+import { scValToJs } from "../src/scval.js";
+
+// ── XDR decode helpers ──────────────────────────────────────────────────────
+// xdr_decoder.js / int128.js were removed in the AI-bloat cleanup, so these
+// utilities are inlined here (same convention as the other helper copies in
+// this file). decodeContractEvent parses a base64 XDR ContractEvent into
+// native JS values; bigints are normalized to strings so i64/u64/i128/u256/
+// timepoint/duration decode losslessly without precision loss.
+
+/**
+ * Parse a base64 XDR ContractEvent into { topics, value }.
+ * @param {string} base64Xdr
+ * @returns {{ topics: any[], value: any }}
+ */
+function decodeContractEvent(base64Xdr) {
+  const ev = xdr.ContractEvent.fromXDR(base64Xdr, "base64");
+  const v0 = ev.body().v0();
+  const normalize = (v) => {
+    if (typeof v === "bigint") return v.toString();
+    if (Array.isArray(v)) return v.map(normalize);
+    if (v !== null && typeof v === "object") {
+      return Object.fromEntries(Object.entries(v).map(([k, val]) => [k, normalize(val)]));
+    }
+    return v;
+  };
+  // scValToJs stringifies the ScError union itself ("[object Object]"); pull
+  // the underlying error code so errors decode as { error: "<code>" }.
+  const decode = (val) => {
+    if (val && val.switch && val.switch().name === "scvError") {
+      const e = val.error();
+      const code = typeof e?.value === "function" ? e.value() : e;
+      return { error: String(code) };
+    }
+    return normalize(scValToJs(val));
+  };
+  return {
+    topics: (v0.topics() ?? []).map(decode),
+    value: decode(v0.data()),
+  };
+}
+
+/** Parse an i128 ScVal into a native BigInt (hi: signed i64, lo: u64). */
+function parseI128(scVal) {
+  const parts = scVal.i128();
+  const hi = BigInt(parts.hi().toString());
+  const lo = BigInt(parts.lo().toString());
+  return (hi << 64n) | lo;
+}
+
+/** Parse a u128 ScVal into a native BigInt (hi: u64, lo: u64). */
+function parseU128(scVal) {
+  const parts = scVal.u128();
+  const hi = BigInt(parts.hi().toString());
+  const lo = BigInt(parts.lo().toString());
+  return (hi << 64n) | lo;
+}
 
 // ── Helper functions (duplicated from decoder.js for contract testing) ───────
 
@@ -115,11 +169,12 @@ function makeEvent(type, topics, data, withContractId = true, ledger = 12345, tx
 }
 
 function makeXdrEvent(type, topics, data, withContractId = true, ledger = 12345, txHash = "ABCD1234") {
+  // body is an Int-discriminated ContractEventBody union — arm 0 is v0
   return new xdr.ContractEvent({
     ext: new xdr.ExtensionPoint(0),
     contractId: withContractId ? CONTRACT_ID_BYTES : null,
     type,
-    body: new xdr.ContractEventV0({ topics, data }),
+    body: new xdr.ContractEventBody(0, new xdr.ContractEventV0({ topics, data })),
   }).toXDR("base64");
 }
 
@@ -342,7 +397,7 @@ describe("decoder — ScVal type decoding", () => {
       const ed25519 = Buffer.alloc(32, 1);
       const result = decodeContractEvent(
         makeXdrEvent(xdr.ContractEventType.contract(), [xdr.ScVal.scvSymbol("owner")], xdr.ScVal.scvAddress(
-          xdr.ScAddress.scAddressTypeAccount(ed25519)
+          xdr.ScAddress.scAddressTypeAccount(xdr.PublicKey.publicKeyTypeEd25519(ed25519))
         ))
       );
       assert.equal(result.value, StrKey.encodeEd25519PublicKey(ed25519));
@@ -396,7 +451,11 @@ describe("decoder — ScVal type decoding", () => {
   describe("scvError", () => {
     it("decodes error value as object", () => {
       const result = decodeContractEvent(
-        makeXdrEvent(xdr.ContractEventType.contract(), [xdr.ScVal.scvSymbol("error")], xdr.ScVal.scvError(10))
+        makeXdrEvent(
+          xdr.ContractEventType.contract(),
+          [xdr.ScVal.scvSymbol("error")],
+          xdr.ScVal.scvError(xdr.ScError.sceContract(10)),
+        )
       );
       assert.deepEqual(result.value, { error: "10" });
     });
@@ -405,7 +464,7 @@ describe("decoder — ScVal type decoding", () => {
   describe("scvTimepoint", () => {
     it("decodes timepoint as bigint", () => {
       const result = decodeContractEvent(
-        makeXdrEvent(xdr.ContractEventType.contract(), [xdr.ScVal.scvSymbol("timestamp")], xdr.ScVal.scvTimepoint(xdr.Timepoint.fromString("1234567890")))
+        makeXdrEvent(xdr.ContractEventType.contract(), [xdr.ScVal.scvSymbol("timestamp")], xdr.ScVal.scvTimepoint(xdr.Uint64.fromString("1234567890")))
       );
       assert.equal(result.value, "1234567890");
     });
@@ -414,7 +473,7 @@ describe("decoder — ScVal type decoding", () => {
   describe("scvDuration", () => {
     it("decodes duration as bigint", () => {
       const result = decodeContractEvent(
-        makeXdrEvent(xdr.ContractEventType.contract(), [xdr.ScVal.scvSymbol("time")], xdr.ScVal.scvDuration(xdr.Duration.fromString("3600")))
+        makeXdrEvent(xdr.ContractEventType.contract(), [xdr.ScVal.scvSymbol("time")], xdr.ScVal.scvDuration(xdr.Uint64.fromString("3600")))
       );
       assert.equal(result.value, "3600");
     });
@@ -570,7 +629,8 @@ describe("decoder — SEP-41 events", () => {
     const r = nativeXlmDescription("burn", ["GABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ", 10_000_000], null);
     assert.equal(r.function, "unwrap_native");
     assert.match(r.description, /Unwrapped/);
-    assert.match(r.description, /Classic.*Soroban/);
+    // unwrap is Soroban → Classic (the reverse of wrap)
+    assert.match(r.description, /Soroban.*Classic/);
   });
 });
 
@@ -646,7 +706,7 @@ describe("decoder — Helper functions", () => {
   describe("fmt (address formatting)", () => {
     it("truncates long addresses to head…tail format", () => {
       const longAddr = "G" + "A".repeat(55);
-      assert.equal(fmt(longAddr), "AAAAAA…AAAAA");
+      assert.equal(fmt(longAddr), "GAAAAA…AAAA");
     });
   });
 

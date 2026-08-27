@@ -576,6 +576,27 @@ export interface NftTokensResponse {
   };
 }
 
+// One point in a collection-level NFT analytics series (mint volume or holder count)
+export interface NftAnalyticsPoint {
+  date: string; // YYYY-MM-DD
+  count: number;
+}
+
+// Collection-level NFT analytics — GET /api/tokens/:contractId/nfts/analytics (issue #810)
+export interface NftCollectionAnalytics {
+  contract_id: string;
+  days: number;
+  totals: {
+    minted: number;
+    transfers: number;
+    unique_holders: number;
+  };
+  /** Daily NFT mint counts over the window, zero-filled. */
+  mint_volume: NftAnalyticsPoint[];
+  /** Cumulative distinct-holder curve over the window, zero-filled. */
+  holder_count: NftAnalyticsPoint[];
+}
+
 // Single event entry in NFT token history
 export interface NftHistoryEvent {
   seq: number;
@@ -727,6 +748,12 @@ export const api = {
   // Full transfer + mint history for a single NFT token
   nftHistory: (contractId: string, tokenId: string) =>
     get<NftTokenHistoryResponse>(`/tokens/${contractId}/nfts/${encodeURIComponent(tokenId)}/history`),
+
+  // Collection-level NFT analytics — mint volume + unique-holder trend (#810)
+  nftAnalytics: (contractId: string, days = 30) => {
+    const q = new URLSearchParams({ days: String(days) });
+    return get<NftCollectionAnalytics>(`/tokens/${contractId}/nfts/analytics?${q}`);
+  },
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),
 
