@@ -277,6 +277,7 @@ export default function Nav() {
           )}
         </form>
         <NetworkSwitcher />
+        <WalletConnectButton />
         <ThemeToggle />
       </header>
 
