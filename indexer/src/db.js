@@ -1464,6 +1464,129 @@ export const db = {
     }));
   },
 
+  /**
+   * Collection-level NFT analytics (issue #810): mint volume over time and a
+   * unique-holder-count trend, derived from already-indexed NFT mint/transfer
+   * events in the events table.
+   *
+   * Mint events are `mint_nft` / `create` (the decoder's NFT mint functions,
+   * #562). Transfers are `transfer` events on the collection contract. The
+   * holder curve counts distinct recipient addresses from mint + transfer
+   * events, cumulatively, over the rolling window.
+   *
+   * Recipient extraction prefers the structured `raw_topics` layout
+   * (topics[0]=fn, so topics[1] is the recipient for mint, topics[2] for
+   * transfer) and falls back to the decoded description text.
+   *
+   * @param {string} contractId
+   * @param {number} [days=30]  Rolling window length, clamped to 7..365.
+   * @returns {Promise<{
+   *   contract_id: string,
+   *   days: number,
+   *   totals: { minted: number, transfers: number, unique_holders: number },
+   *   mint_volume: { date: string, count: number }[],
+   *   holder_count: { date: string, count: number }[]
+   * }>}
+   */
+  async getNftCollectionAnalytics(contractId, days = 30) {
+    const daysN = Math.min(365, Math.max(7, Number(days) || 30));
+
+    const recipientExpr = (table) =>
+      `CASE
+         WHEN ${table}.function = 'transfer'
+           THEN COALESCE(NULLIF(${table}.raw_topics->>2, ''),
+                        (regexp_match(COALESCE(${table}.description, ''), ' to ([GCM][A-Z2-7]{55})'))[1])
+         ELSE COALESCE(NULLIF(${table}.raw_topics->>1, ''),
+                       (regexp_match(COALESCE(${table}.description, ''), '\\m[GCM][A-Z2-7]{55}\\M'))[1])
+       END`;
+
+    const [totalsRes, mintRes, holderDailyRes, holderTotalRes] = await Promise.all([
+      pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE function IN ('mint_nft', 'create'))::INT AS minted,
+           COUNT(*) FILTER (WHERE function = 'transfer')::INT AS transfers
+         FROM events
+         WHERE contract_id = $1`,
+        [contractId],
+      ),
+      // Daily mint volume within the rolling window
+      pool.query(
+        `SELECT to_char(created_at, 'YYYY-MM-DD') AS date, COUNT(*)::INT AS count
+         FROM events
+         WHERE contract_id = $1
+           AND function IN ('mint_nft', 'create')
+           AND created_at >= NOW() - make_interval(days => $2)
+         GROUP BY date
+         ORDER BY date`,
+        [contractId, daysN],
+      ),
+      // Per-day *new* recipients within the rolling window — each address is
+      // counted only on the first day it appears, so the cumulative curve in
+      // JS reflects the true distinct-holder count up to each day.
+      pool.query(
+        `WITH recipients AS (
+           SELECT to_char(created_at, 'YYYY-MM-DD') AS date,
+                  ${recipientExpr("e")} AS recipient
+           FROM events e
+           WHERE e.contract_id = $1
+             AND e.function IN ('mint_nft', 'create', 'transfer')
+             AND e.created_at >= NOW() - make_interval(days => $2)
+         ),
+         first_seen AS (
+           SELECT date, recipient,
+                  ROW_NUMBER() OVER (PARTITION BY recipient ORDER BY date) AS rn
+           FROM recipients
+           WHERE recipient ~ '^[GCM][A-Z2-7]{55}$'
+         )
+         SELECT date, COUNT(*) FILTER (WHERE rn = 1)::INT AS count
+         FROM first_seen
+         GROUP BY date
+         ORDER BY date`,
+        [contractId, daysN],
+      ),
+      // All-time distinct recipients — the collection's unique holder count
+      pool.query(
+        `WITH recipients AS (
+           SELECT ${recipientExpr("e")} AS recipient
+           FROM events e
+           WHERE e.contract_id = $1
+             AND e.function IN ('mint_nft', 'create', 'transfer')
+         )
+         SELECT COUNT(DISTINCT recipient)::INT AS unique_holders
+         FROM recipients
+         WHERE recipient ~ '^[GCM][A-Z2-7]{55}$'`,
+        [contractId],
+      ),
+    ]);
+
+    const mintByDate = new Map(mintRes.rows.map((r) => [r.date, r.count]));
+    const holdersByDate = new Map(holderDailyRes.rows.map((r) => [r.date, r.count]));
+
+    // Zero-fill the daily series and build the cumulative holder curve, so the
+    // frontend charts never see gaps (same convention as getContractStats).
+    const mint_volume = [];
+    const holder_count = [];
+    let cumulative = 0;
+    for (let i = daysN - 1; i >= 0; i--) {
+      const date = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+      mint_volume.push({ date, count: mintByDate.get(date) ?? 0 });
+      cumulative += holdersByDate.get(date) ?? 0;
+      holder_count.push({ date, count: cumulative });
+    }
+
+    return {
+      contract_id: contractId,
+      days: daysN,
+      totals: {
+        minted: totalsRes.rows[0].minted,
+        transfers: totalsRes.rows[0].transfers,
+        unique_holders: holderTotalRes.rows[0].unique_holders,
+      },
+      mint_volume,
+      holder_count,
+    };
+  },
+
   // ── Predictive Gap Detection helpers ────────────────────────────────────────
 
   /**

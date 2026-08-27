@@ -220,12 +220,13 @@ jobs:
 
       - name: Install deps
         run: |
+          npm ci
           cd indexer && npm ci
           cd ../frontend && npm ci
 
       - name: Lockfile drift check
         run: |
-          if ! git diff --exit-code indexer/package-lock.json frontend/package-lock.json; then
+          if ! git diff --exit-code package-lock.json indexer/package-lock.json frontend/package-lock.json; then
             echo "::error::A package-lock.json is out of sync — run 'npm install' in the relevant directory and commit the updated lockfile."
             exit 1
           fi
@@ -235,6 +236,14 @@ jobs:
 
       - name: Validate OpenAPI spec (redocly lint)
         run: npx -y @redocly/cli lint docs/api/openapi.yaml --format=stylish
+
+      - name: Postman collection drift check
+        run: |
+          node scripts/generate-postman-collection.js /tmp/postman_collection.json
+          if ! diff -u docs/api/postman_collection.json /tmp/postman_collection.json; then
+            echo "::error::docs/api/postman_collection.json is out of sync with docs/api/openapi.yaml — run 'npm run generate:postman' and commit the result."
+            exit 1
+          fi
 
       - name: Indexer tests
         run: npm test -- --coverage --coverageReporters=lcov

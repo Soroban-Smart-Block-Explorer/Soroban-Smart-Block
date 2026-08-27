@@ -3,7 +3,7 @@
 /**
  * Issue #209 — Alert Manager
  *
- * Monitors 8 alert conditions and routes notifications to Slack and PagerDuty.
+ * Monitors 9 alert conditions and routes notifications to Slack and PagerDuty.
  *
  * Conditions:
  *   1. INDEXER_DOWN        — indexer not polling within expected interval
@@ -14,6 +14,7 @@
  *   6. LOW_THROUGHPUT      — indexing rate below minimum threshold
  *   7. DLQ_THRESHOLD       — dead-letter-queue size exceeds maximum
  *   8. REORG_DETECTED      — chain reorganization detected (ledger hash mismatch)
+ *   9. DECODE_RATE_LOW     — decoder success rate below minimum over the last 24h
  */
 
 import config from "./config.js";
@@ -27,6 +28,7 @@ const DLQ_MAX_SIZE = config.ALERT_DLQ_MAX_SIZE;
 const MIN_THROUGHPUT = config.ALERT_MIN_THROUGHPUT;
 const MAX_HEAP_MB = config.ALERT_MAX_HEAP_MB;
 const INDEXER_STALL_MS = config.ALERT_INDEXER_STALL_MS;
+const MIN_DECODE_RATE = config.ALERT_MIN_DECODE_RATE;
 
 export const ALERT_CONDITIONS = {
   INDEXER_DOWN: "INDEXER_DOWN",
@@ -37,6 +39,7 @@ export const ALERT_CONDITIONS = {
   LOW_THROUGHPUT: "LOW_THROUGHPUT",
   DLQ_THRESHOLD: "DLQ_THRESHOLD",
   REORG_DETECTED: "REORG_DETECTED",
+  DECODE_RATE_LOW: "DECODE_RATE_LOW",
 };
 
 const SEVERITY = {
@@ -48,6 +51,7 @@ const SEVERITY = {
   [ALERT_CONDITIONS.LOW_THROUGHPUT]: "warning",
   [ALERT_CONDITIONS.DLQ_THRESHOLD]: "warning",
   [ALERT_CONDITIONS.REORG_DETECTED]: "critical",
+  [ALERT_CONDITIONS.DECODE_RATE_LOW]: "warning",
 };
 
 // Active alert state — maps condition → timestamp when first fired
@@ -240,4 +244,20 @@ export async function checkDlqSize(size) {
  */
 export async function alertReorg(ledger) {
   await fireAlert(ALERT_CONDITIONS.REORG_DETECTED, `Chain reorganization detected at ledger ${ledger}`);
+}
+
+/**
+ * Check decoder success rate over the trailing 24h window.
+ *
+ * @param {number} successRate  Fraction [0, 1] of events successfully decoded
+ */
+export async function checkDecodeRate(successRate) {
+  if (successRate < MIN_DECODE_RATE) {
+    await fireAlert(
+      ALERT_CONDITIONS.DECODE_RATE_LOW,
+      `Decoder success rate ${(successRate * 100).toFixed(1)}% over the last 24h is below minimum ${(MIN_DECODE_RATE * 100).toFixed(1)}%`,
+    );
+  } else {
+    resolveAlert(ALERT_CONDITIONS.DECODE_RATE_LOW);
+  }
 }

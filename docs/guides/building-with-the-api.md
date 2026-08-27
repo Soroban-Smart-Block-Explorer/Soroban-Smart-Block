@@ -6,6 +6,13 @@ The full contract is in [`openapi.json`](../api/openapi.json); try any endpoint 
 the [Swagger playground](../api/playground.html) or the
 [try-it console](../api/try-it.html).
 
+Prefer a desktop client? Import
+[`postman_collection.json`](../api/postman_collection.json) into Postman or
+Insomnia (Insomnia opens Postman v2.1 collections natively) for a ready-made
+request for every documented endpoint, grouped by tag. It's generated from
+`openapi.yaml` — regenerate it with `npm run generate:postman` after changing
+the spec; CI fails if the committed file drifts from the spec.
+
 ## Base URL and authentication
 
 The API listens on `http://localhost:3001` by default. When an API key is

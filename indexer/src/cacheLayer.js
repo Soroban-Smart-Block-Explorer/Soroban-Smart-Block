@@ -30,6 +30,7 @@ const TTL_CONFIG = {
   stats: { l1: 60, l2: 300, l3: "public, max-age=300" },
   wallet_balances: { l1: 30, l2: 30, l3: "public, max-age=30" },
   horizon_account: { l1: 60, l2: 60, l3: "private, max-age=60" },
+  rpc_health: { l1: 5, l2: 5, l3: "public, max-age=5" },
   default: { l1: 30, l2: 60, l3: "public, max-age=60" },
 };
 

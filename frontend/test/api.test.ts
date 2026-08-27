@@ -94,6 +94,16 @@ describe("api utility", () => {
     const result = await api.contractStats("C1");
     expect(result.total_events).toBe(100);
     expect(result.unique_callers).toBe(10);
+    const [url] = (fetch as any).mock.calls[0];
+    expect(url).not.toContain("range=");
+  });
+
+  it("contractStats appends the range query param when provided (#799)", async () => {
+    mockFetch({ total_events: 100, unique_callers: 10, first_seen_ledger: 1, last_seen_ledger: 2, events_per_day: [], range: 365 });
+    const result = await api.contractStats("C1", 365);
+    expect(result.range).toBe(365);
+    const [url] = (fetch as any).mock.calls[0];
+    expect(url).toContain("range=365");
   });
 
   it("search builds encoded query string", async () => {
