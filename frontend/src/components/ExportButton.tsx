@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 
 type ExportTarget = "events" | "contracts";
-type ExportFormat = "csv" | "json";
+type ExportFormat = "csv" | "json" | "ndjson";
 
 interface ExportButtonProps {
   target: ExportTarget;
@@ -32,7 +32,8 @@ export default function ExportButton({ target, params = {} }: ExportButtonProps)
     setOpen(false);
     const a = document.createElement("a");
     a.href = buildUrl(format);
-    a.download = `${target}.${format}`;
+    const ext = format === "ndjson" ? "ndjson" : format;
+    a.download = `${target}.${ext}`;
     a.click();
   }
 
@@ -71,7 +72,7 @@ export default function ExportButton({ target, params = {} }: ExportButtonProps)
             boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
           }}
         >
-          {(["csv", "json"] as ExportFormat[]).map((fmt) => (
+          {(["csv", "json", "ndjson"] as ExportFormat[]).map((fmt) => (
             <button
               key={fmt}
               onClick={() => download(fmt)}

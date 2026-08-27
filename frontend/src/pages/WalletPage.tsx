@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
+import ExportButton from "../components/ExportButton";
 import WalletBalances from "../components/WalletBalances";
 import ProtocolBadge from "../components/ProtocolBadge";
 import {
@@ -357,22 +358,14 @@ export default function WalletPage() {
             >
               🔗 Share
             </button>
-            {/* Export CSV button (#528) */}
-            <button
-              onClick={exportCsv}
-              title="Download wallet event history as CSV"
-              style={{
-                padding: "8px 16px",
-                background: "var(--accent)",
-                color: "#fff",
-                border: "none",
-                borderRadius: 4,
-                cursor: "pointer",
-                fontSize: 13,
+            {/* Export dropdown (CSV / NDJSON) */}
+            <ExportButton
+              target="events"
+              params={{
+                wallet: address || undefined,
+                fn: fnFilter || undefined,
               }}
-            >
-              ↓ Export CSV
-            </button>
+            />
           </div>
         </div>
 
