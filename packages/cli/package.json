@@ -1,0 +1,29 @@
+{
+  "name": "soroban-explorer",
+  "version": "0.1.0",
+  "description": "CLI tool for querying the Soroban Smart Block Explorer from the terminal",
+  "type": "module",
+  "main": "./src/cli.js",
+  "bin": {
+    "soroban-explorer": "./src/cli.js"
+  },
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "test": "node --test src/*.test.js",
+    "lint": "eslint src/"
+  },
+  "keywords": [
+    "soroban",
+    "stellar",
+    "block-explorer",
+    "cli",
+    "smart-contracts"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {}
+}

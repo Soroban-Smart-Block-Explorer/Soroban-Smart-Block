@@ -8,6 +8,7 @@
     "doctor": "node scripts/doctor.js",
     "configure-branch-protection": "node scripts/configure-branch-protection.js --branch main",
     "deploy:contract": "node scripts/deploy-contract.js",
+    "generate:postman": "node scripts/generate-postman-collection.js",
     "dev": "make dev",
     "prepare": "husky"
   },
@@ -16,6 +17,7 @@
     "@commitlint/config-conventional": "^19.2.2",
     "c8": "^11.0.0",
     "husky": "^9.0.0",
+    "openapi-to-postmanv2": "^6.3.3",
     "pg": "^8.12.0"
   }
 }

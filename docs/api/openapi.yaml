@@ -462,7 +462,8 @@ paths:
       summary: Get contract statistics
       description: >-
         Returns aggregate statistics for a contract: total events, unique
-        callers, first/last seen ledger, and a 30-day events-per-day series.
+        callers, first/last seen ledger, and a daily event-volume series
+        over the trailing `range` days (default 30, max 365).
       parameters:
         - name: id
           in: path
@@ -471,6 +472,18 @@ paths:
             type: string
             example: "CC4VM2DTTR4QO4J4E5K2YUXM"
           description: Contract ID
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 30
+            example: 90
+          description: >-
+            Number of trailing days to include in the events_per_day series
+            (1-365, default 30). The UI uses 30, 90, and 365-day presets.
       responses:
         "200":
           description: Contract statistics
@@ -486,7 +499,14 @@ paths:
                     unique_callers: 87
                     first_seen_ledger: 1000001
                     last_seen_ledger: 1050320
+                    range: 90
                     events_per_day: []
+        "422":
+          description: Invalid range query parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Contract not found
           content:
@@ -1888,6 +1908,48 @@ paths:
                     pagination: { page: 1, limit: 50, total: 0, total_pages: 0, has_next: false }
         "422":
           description: Invalid page or limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{contractId}/nfts/analytics:
+    get:
+      summary: Collection-level NFT analytics
+      description: >-
+        Returns mint volume over time and a unique-holder-count trend for an NFT
+        collection, derived from already-indexed NFT mint/transfer events.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+          description: Rolling window length in days (clamped server-side to 7..365)
+      responses:
+        "200":
+          description: Collection analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NftAnalyticsResponse"
+        "422":
+          description: Invalid days value
           content:
             application/json:
               schema:
@@ -3840,13 +3902,17 @@ components:
     AdminBearerAuth:
       type: http
       scheme: bearer
-      description: Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
-    MetricsApiKeyAuth:
-      type: http
-      scheme: bearer
-      description: |
-        Bearer token gating GET /api/metrics, supplied through the optional
-        `METRICS_API_KEY` environment variable. Not required when unset.
+      description: >
+        Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
+        When `ADMIN_TOTP_SECRET` is also set, clients must send a current 6-digit
+        TOTP code in the `X-Admin-TOTP` header in addition to this bearer token.
+    AdminTotpHeader:
+      type: apiKey
+      in: header
+      name: X-Admin-TOTP
+      description: >
+        Optional RFC 6238 TOTP code required only when `ADMIN_TOTP_SECRET` is configured.
+        Compatible with standard authenticator apps (30s step, 6 digits, SHA-1).
 
   schemas:
     HealthStatus:
@@ -4405,6 +4471,52 @@ components:
         balance:
           type: string
           description: Human-readable balance formatted using the token's decimals
+
+    NftAnalyticsResponse:
+      type: object
+      required: [contract_id, days, totals, mint_volume, holder_count]
+      properties:
+        contract_id:
+          type: string
+        days:
+          type: integer
+        totals:
+          type: object
+          required: [minted, transfers, unique_holders]
+          properties:
+            minted:
+              type: integer
+              description: Total mint events (mint_nft / create) for the collection
+            transfers:
+              type: integer
+              description: Total NFT transfer events for the collection
+            unique_holders:
+              type: integer
+              description: Distinct recipient addresses ever seen across mint + transfer events
+        mint_volume:
+          type: array
+          description: Daily mint counts over the window, zero-filled
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
+        holder_count:
+          type: array
+          description: Cumulative distinct-holder curve over the window, zero-filled
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
 
     NftListResponse:
       type: object
@@ -4989,7 +5101,7 @@ components:
 
     ContractStats:
       type: object
-      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day]
+      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day, range]
       properties:
         total_events:
           type: integer
@@ -5005,6 +5117,10 @@ components:
           type: integer
           nullable: true
           example: 1050320
+        range:
+          type: integer
+          description: The number of trailing days requested via the range query parameter
+          example: 90
         events_per_day:
           type: array
           items:

@@ -259,8 +259,8 @@ const configSchema = z.object({
   // ── API Authentication & Rate Limiting ──────────────────────────────────────
   ADMIN_SECRET: z.string().optional(),
 
-  // Gates GET /api/metrics with a Bearer token when set; unset = unauthenticated.
-  METRICS_API_KEY: z.string().optional(),
+  // Optional base32 TOTP secret; when set, /api/admin/* also requires X-Admin-TOTP
+  ADMIN_TOTP_SECRET: z.string().optional(),
 
   RATE_LIMIT_CONFIG: z.string().optional(),
 
