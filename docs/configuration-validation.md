@@ -201,12 +201,26 @@ These fields must be positive floating-point numbers:
 - `GITHUB_TOKEN`
 - `SIMULATE_SOURCE`
 - `ADMIN_SECRET`
+- `ADMIN_TOTP_SECRET`
 - `RATE_LIMIT_CONFIG`
 - `GEO_RATE_MULTIPLIERS`
 - `GEOIP_DB_PATH`
 - `STRIPE_WEBHOOK_SECRET`
 - `STRIPE_SECRET_KEY`
 - `KAFKA_BROKERS`
+
+### Admin TOTP (optional 2FA)
+
+When `ADMIN_TOTP_SECRET` is set to a non-empty **base32** string, every `/api/admin/*` request must include a valid 6-digit code in the `X-Admin-TOTP` header in addition to `Authorization: Bearer <ADMIN_SECRET>`. Leave the variable unset (or blank) to keep bearer-only admin auth.
+
+Generate a secret and enroll an authenticator app (Google Authenticator, Aegis, 1Password, etc.):
+
+```bash
+# 20 random bytes → base32 (Python)
+python3 -c "import base64,os; print(base64.b32encode(os.urandom(20)).decode())"
+```
+
+Add the value to your authenticator as a time-based (TOTP) key with 30-second period / SHA-1 / 6 digits. Existing deployments that do not set `ADMIN_TOTP_SECRET` are unchanged.
 
 ## Error Messages
 

@@ -3758,7 +3758,17 @@ components:
     AdminBearerAuth:
       type: http
       scheme: bearer
-      description: Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
+      description: >
+        Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
+        When `ADMIN_TOTP_SECRET` is also set, clients must send a current 6-digit
+        TOTP code in the `X-Admin-TOTP` header in addition to this bearer token.
+    AdminTotpHeader:
+      type: apiKey
+      in: header
+      name: X-Admin-TOTP
+      description: >
+        Optional RFC 6238 TOTP code required only when `ADMIN_TOTP_SECRET` is configured.
+        Compatible with standard authenticator apps (30s step, 6 digits, SHA-1).
 
   schemas:
     HealthStatus:

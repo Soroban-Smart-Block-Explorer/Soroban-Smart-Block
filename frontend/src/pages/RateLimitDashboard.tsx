@@ -31,7 +31,9 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 
 export default function RateLimitDashboard() {
   const [adminToken, setAdminToken] = useState(() => sessionStorage.getItem("admin_token") ?? "");
-  const [tokenInput, setTokenInput] = useState("");
+  const [adminTotp, setAdminTotp] = useState(() => sessionStorage.getItem("admin_totp") ?? "");
+  const [tokenInput, setTokenInput] = useState(() => sessionStorage.getItem("admin_token") ?? "");
+  const [totpInput, setTotpInput] = useState("");
   const [authed, setAuthed] = useState(false);
 
   const [hitsData, setHitsData] = useState([]);
@@ -42,11 +44,45 @@ export default function RateLimitDashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const headers = { Authorization: `Bearer ${adminToken}` };
+  const buildHeaders = useCallback((): HeadersInit => {
+    const headers: Record<string, string> = { Authorization: `Bearer ${adminToken}` };
+    if (adminTotp) {
+      headers["X-Admin-TOTP"] = adminTotp;
+    }
+    return headers;
+  }, [adminToken, adminTotp]);
+
+  const signIn = () => {
+    const token = tokenInput.trim() || adminToken;
+    if (!token) {
+      setError("Admin token is required.");
+      return;
+    }
+    sessionStorage.setItem("admin_token", token);
+    setAdminToken(token);
+    setTokenInput(token);
+    if (totpInput.trim()) {
+      sessionStorage.setItem("admin_totp", totpInput.trim());
+      setAdminTotp(totpInput.trim());
+    } else {
+      sessionStorage.removeItem("admin_totp");
+      setAdminTotp("");
+    }
+  };
+
+  const signOut = () => {
+    sessionStorage.removeItem("admin_token");
+    sessionStorage.removeItem("admin_totp");
+    setAdminToken("");
+    setAdminTotp("");
+    setTotpInput("");
+    setAuthed(false);
+  };
 
   const fetchAll = useCallback(async () => {
     if (!adminToken) return;
     try {
+      const headers = buildHeaders();
       const [hitsRes, topRes, heatmapRes, recsRes] = await Promise.all([
         fetch("/api/admin/analytics/rate-limit-hits?minutes=60", { headers }),
         fetch(`/api/admin/analytics/top-users?window=${topWindow}`, { headers }),
@@ -56,7 +92,19 @@ export default function RateLimitDashboard() {
 
       if (hitsRes.status === 401) {
         setAuthed(false);
-        setError("Invalid or expired admin token.");
+        let body: { totp_required?: boolean } = {};
+        try {
+          body = await hitsRes.json();
+        } catch {
+          /* ignore */
+        }
+        if (body.totp_required) {
+          sessionStorage.removeItem("admin_totp");
+          setAdminTotp("");
+          setError("Enter a current authenticator (TOTP) code to continue.");
+        } else {
+          setError("Invalid or expired admin token.");
+        }
         return;
       }
 
@@ -70,7 +118,7 @@ export default function RateLimitDashboard() {
     } catch (e: any) {
       setError(e.message);
     }
-  }, [adminToken, topWindow]);
+  }, [adminToken, topWindow, buildHeaders]);
 
   useEffect(() => {
     if (!adminToken) return;
@@ -82,11 +130,11 @@ export default function RateLimitDashboard() {
   // Re-fetch top users when window changes
   useEffect(() => {
     if (!authed) return;
-    fetch(`/api/admin/analytics/top-users?window=${topWindow}`, { headers })
+    fetch(`/api/admin/analytics/top-users?window=${topWindow}`, { headers: buildHeaders() })
       .then((r) => r.json())
       .then(setTopUsers)
       .catch(() => {});
-  }, [topWindow]);
+  }, [topWindow, authed, buildHeaders]);
 
   // Login screen
   if (!adminToken || !authed) {
@@ -103,7 +151,8 @@ export default function RateLimitDashboard() {
       >
         <h2 style={{ margin: "0 0 8px", fontSize: 18 }}>Admin Login</h2>
         <p style={{ color: "#6b7280", fontSize: 13, marginBottom: 20 }}>
-          Enter your ADMIN_SECRET to access the Rate Limit Dashboard.
+          Enter your ADMIN_SECRET to access the Rate Limit Dashboard. If admin 2FA is
+          enabled, also enter a current authenticator code.
         </p>
         {error && (
           <div
@@ -125,10 +174,7 @@ export default function RateLimitDashboard() {
           value={tokenInput}
           onChange={(e) => setTokenInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              sessionStorage.setItem("admin_token", tokenInput);
-              setAdminToken(tokenInput);
-            }
+            if (e.key === "Enter") signIn();
           }}
           style={{
             width: "100%",
@@ -141,11 +187,29 @@ export default function RateLimitDashboard() {
           }}
           aria-label="Admin token"
         />
-        <button
-          onClick={() => {
-            sessionStorage.setItem("admin_token", tokenInput);
-            setAdminToken(tokenInput);
+        <input
+          type="text"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          placeholder="TOTP code (if 2FA enabled)"
+          value={totpInput}
+          onChange={(e) => setTotpInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") signIn();
           }}
+          style={{
+            width: "100%",
+            padding: "8px 12px",
+            borderRadius: 4,
+            border: "1px solid #d1d5db",
+            fontSize: 14,
+            boxSizing: "border-box",
+            marginBottom: 12,
+          }}
+          aria-label="TOTP code"
+        />
+        <button
+          onClick={signIn}
           style={{
             width: "100%",
             padding: "8px 12px",
@@ -182,11 +246,7 @@ export default function RateLimitDashboard() {
             </span>
           )}
           <button
-            onClick={() => {
-              sessionStorage.removeItem("admin_token");
-              setAdminToken("");
-              setAuthed(false);
-            }}
+            onClick={signOut}
             style={{
               padding: "4px 12px",
               fontSize: 12,

@@ -4,12 +4,17 @@
  * Checks the `Authorization: Bearer <token>` header against `ADMIN_SECRET`.
  * Uses crypto.timingSafeEqual to prevent timing-based secret enumeration.
  *
+ * When `ADMIN_TOTP_SECRET` is set (non-empty), also requires a valid TOTP code
+ * in the `X-Admin-TOTP` header (RFC 6238, authenticator apps).
+ *
  * Returns 401 `{ error: "Unauthorized" }` if the header is missing, malformed,
- * or the token does not match. Calls next() if the token is valid.
+ * or the token does not match. When Bearer is valid but TOTP fails, the body
+ * also includes `totp_required: true`. Calls next() if auth succeeds.
  */
 
 import crypto from 'crypto';
 import { getClientIp, ipInCidrList } from './ipUtils.js';
+import { verifyTotp } from './totp.js';
 
 /**
  * Express middleware that enforces admin authentication via a Bearer token.
@@ -64,6 +69,16 @@ function adminAuthMiddleware(req, res, next) {
     }
   } catch {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // Optional TOTP second factor (opt-in when ADMIN_TOTP_SECRET is set).
+  const totpSecret = process.env.ADMIN_TOTP_SECRET;
+  if (totpSecret) {
+    const raw = req.headers['x-admin-totp'];
+    const code = Array.isArray(raw) ? raw[0] : raw;
+    if (!verifyTotp(totpSecret, code ?? '')) {
+      return res.status(401).json({ error: 'Unauthorized', totp_required: true });
+    }
   }
 
   return next();
