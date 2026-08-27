@@ -637,6 +637,43 @@ export default function registerAdminRoutes(app) {
     });
   }
 
+  // ── POST /api/admin/dlq/:id/retry ─────────────────────────────────────────
+  // Triggers an immediate retry of the specified DLQ entry without waiting for
+  // the scheduled retry window. Sets next_retry_at = NOW() so the next
+  // processRetries() tick picks it up immediately.
+  //
+  // 400 — id is not a number
+  // 404 — DLQ entry not found
+  // 409 — DLQ entry is already resolved
+  // 200 — { ok: true, id, next_retry_at }
+  router.post('/dlq/:id/retry', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'id must be a number' });
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, resolved, retry_count, max_retries FROM dead_letter_queue WHERE id = $1`,
+        [id],
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: `DLQ entry ${id} not found` });
+      }
+      const entry = rows[0];
+      if (entry.resolved) {
+        return res.status(409).json({ error: 'DLQ entry is already resolved' });
+      }
+      const nextRetryAt = new Date().toISOString();
+      await pool.query(
+        `UPDATE dead_letter_queue SET next_retry_at = $1, updated_at = NOW() WHERE id = $2`,
+        [nextRetryAt, id],
+      );
+      return res.json({ ok: true, id, next_retry_at: nextRetryAt });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
   // Mount the router under /api/admin
   app.use('/api/admin', router);
 
