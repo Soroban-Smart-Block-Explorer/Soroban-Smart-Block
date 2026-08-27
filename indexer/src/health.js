@@ -15,8 +15,40 @@ import { db, pool } from "./db.js";
 import { getActiveAlerts } from "./alertManager.js";
 
 // ── Health check state ────────────────────────────────────────────────────────
-let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0 };
+let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0, ledgerLag: 0 };
 let _workerStatus = { healthy: true, errors: 0, lastRun: Date.now() };
+
+// ── Indexer stats (for the frontend's home-page stats bar) ────────────────
+// COUNT(*) over `events` and `dead_letter_queue` on every /api/health poll
+// (every 10s per client, and there may be several clients) would add
+// avoidable load, so these are memoized for a few seconds.
+let _statsCache = null;
+let _statsCacheAt = 0;
+const STATS_CACHE_MS = 5000;
+
+async function getIndexerStats() {
+  const now = Date.now();
+  if (_statsCache && now - _statsCacheAt < STATS_CACHE_MS) return _statsCache;
+
+  const [totalRes, recentRes, dlqRes] = await Promise.all([
+    db.query("SELECT COUNT(*)::INT AS total FROM events"),
+    db.query("SELECT COUNT(*)::INT AS recent FROM events WHERE created_at > NOW() - INTERVAL '5 minutes'"),
+    db.query("SELECT COUNT(*)::INT AS failed FROM dead_letter_queue WHERE resolved = FALSE"),
+  ]);
+
+  const totalEvents = totalRes.rows[0]?.total ?? 0;
+  const recentEvents = recentRes.rows[0]?.recent ?? 0;
+  const failedDecodes = dlqRes.rows[0]?.failed ?? 0;
+  const decodeAttempts = totalEvents + failedDecodes;
+
+  _statsCache = {
+    total_events: totalEvents,
+    events_per_minute: Math.round((recentEvents / 5) * 10) / 10,
+    decode_success_rate: decodeAttempts > 0 ? Math.round((totalEvents / decodeAttempts) * 10000) / 100 : 100,
+  };
+  _statsCacheAt = now;
+  return _statsCache;
+}
 
 // Global Redis client reference (set by cacheLayer or health check)
 let _redisClient = null;
@@ -32,12 +64,13 @@ export function setRedisClient(client) {
 /**
  * Update indexer health status (called from main daemon)
  */
-export function updateIndexerStatus(ledger, lagSeconds) {
+export function updateIndexerStatus(ledger, lagSeconds, ledgerLag = 0) {
   _indexerStatus = {
     healthy: lagSeconds < 120, // unhealthy if >2 minutes behind
     lastLedger: ledger,
     lastSync: Date.now(),
     lagSeconds,
+    ledgerLag,
   };
 }
 
@@ -164,6 +197,7 @@ function checkIndexer() {
     status: _indexerStatus.healthy && !stale ? "healthy" : "unhealthy",
     lastLedger: _indexerStatus.lastLedger,
     lagSeconds: _indexerStatus.lagSeconds,
+    ledgerLag: _indexerStatus.ledgerLag,
     lastSyncAgo: Math.floor(timeSinceLastSync / 1000),
   };
 }
@@ -188,9 +222,10 @@ function checkWorkers() {
  * Returns detailed status for all dependencies
  */
 export async function getHealthStatus() {
-  const [database, cache] = await Promise.all([
+  const [database, cache, stats] = await Promise.all([
     checkDatabase(),
     checkCache(),
+    getIndexerStats().catch(() => ({ total_events: null, events_per_minute: null, decode_success_rate: null })),
   ]);
 
   const indexer = checkIndexer();
@@ -200,7 +235,7 @@ export async function getHealthStatus() {
   // Overall status: healthy if all critical dependencies are healthy
   // Cache is optional, workers are degradable
   const criticalHealthy = database.status === "healthy" && indexer.status === "healthy";
-  const allHealthy = criticalHealthy && 
+  const allHealthy = criticalHealthy &&
     (cache.status === "healthy" || cache.status === "disabled") &&
     workers.status === "healthy";
 
@@ -212,6 +247,13 @@ export async function getHealthStatus() {
       cache,
       indexer,
       workers,
+    },
+    // Powers the frontend's compact home-page stats bar (polled every 10s).
+    stats: {
+      total_events: stats.total_events,
+      events_per_minute: stats.events_per_minute,
+      indexer_lag_ledgers: indexer.ledgerLag,
+      decode_success_rate: stats.decode_success_rate,
     },
     alerts: {
       active_count: activeAlerts.length,
