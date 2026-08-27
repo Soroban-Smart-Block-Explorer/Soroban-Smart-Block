@@ -251,6 +251,9 @@ const configSchema = z.object({
   // ── API Authentication & Rate Limiting ──────────────────────────────────────
   ADMIN_SECRET: z.string().optional(),
 
+  // Optional base32 TOTP secret; when set, /api/admin/* also requires X-Admin-TOTP
+  ADMIN_TOTP_SECRET: z.string().optional(),
+
   RATE_LIMIT_CONFIG: z.string().optional(),
 
   GEO_BLOCK_LIST: commaSeparatedList(),
