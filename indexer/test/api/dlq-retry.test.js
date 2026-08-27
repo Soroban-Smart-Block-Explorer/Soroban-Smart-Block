@@ -23,7 +23,10 @@ const decodeEvent = jest.fn(async (rawEvent) => {
 // The raw RPC event is JSONB-backed in the DLQ. Mocking only the XDR decoder
 // keeps this integration test deterministic while exercising the real handler,
 // validation, database upsert, and retry bookkeeping against PostgreSQL.
-jest.unstable_mockModule("../../src/decoder.js", () => ({ decode: decodeEvent }));
+jest.unstable_mockModule("../../src/decoder.js", () => ({
+  decode: decodeEvent,
+  getDecodeStats: jest.fn(() => ({ total: 0, decoded: 0, undecoded: 0, success_rate: 1, window: "24h" })),
+}));
 
 // Several transitive production modules schedule maintenance intervals at
 // import time. Capture those timers without faking Date (the DLQ backoff clock),

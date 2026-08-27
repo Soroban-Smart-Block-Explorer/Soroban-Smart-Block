@@ -8,6 +8,7 @@ import { parseTTLHostFunction, formatTTLExtension } from "./ttlExtensionParser.j
 import { parseZkHostFunctions, computeZkCostDelta } from "./zkHostFunctions.js";
 import { resolveAsset } from "./horizonClient.js";
 import config from "./config.js";
+import { decoderSuccessTotal, decoderFailureTotal } from "./metrics.js";
 
 // Classic operation types decoded from Horizon alongside Soroban events.
 const PATH_PAYMENT_TYPES = new Set(["path_payment_strict_send", "path_payment_strict_receive"]);
@@ -146,11 +147,74 @@ const NATIVE_SAC_IDS = new Set([
 const STELLARSWAP_CONTRACT_ID = config.STELLARSWAP_CONTRACT_ID || null;
 const BLEND_CONTRACT_ID = config.BLEND_CONTRACT_ID || null;
 
+// ── Decode success/failure tracking (24h rolling window) ─────────────────────
+// Hourly buckets keyed by epoch-hour, capped at 25 entries — cheap alternative
+// to storing a per-event timestamp list while still giving an accurate 24h
+// window for GET /api/stats/decoder and the DECODE_RATE_LOW alert.
+const DECODE_STATS_WINDOW_HOURS = 24;
+const _decodeBuckets = new Map(); // hourKey -> { success, failure }
+
+function _currentHourKey() {
+  return Math.floor(Date.now() / 3_600_000);
+}
+
+function _pruneDecodeBuckets() {
+  const cutoff = _currentHourKey() - DECODE_STATS_WINDOW_HOURS;
+  for (const key of _decodeBuckets.keys()) {
+    if (key <= cutoff) _decodeBuckets.delete(key);
+  }
+}
+
+function _recordDecodeOutcome(success) {
+  if (success) decoderSuccessTotal.inc();
+  else decoderFailureTotal.inc();
+
+  const key = _currentHourKey();
+  const bucket = _decodeBuckets.get(key) ?? { success: 0, failure: 0 };
+  if (success) bucket.success++;
+  else bucket.failure++;
+  _decodeBuckets.set(key, bucket);
+  _pruneDecodeBuckets();
+}
+
+/**
+ * Decode success/failure counts over the trailing 24 hours, for
+ * GET /api/stats/decoder and the DECODE_RATE_LOW alert condition.
+ */
+export function getDecodeStats() {
+  _pruneDecodeBuckets();
+  let decoded = 0;
+  let undecoded = 0;
+  for (const bucket of _decodeBuckets.values()) {
+    decoded += bucket.success;
+    undecoded += bucket.failure;
+  }
+  const total = decoded + undecoded;
+  return {
+    total,
+    decoded,
+    undecoded,
+    success_rate: total ? Number((decoded / total).toFixed(4)) : 1,
+    window: "24h",
+  };
+}
+
 /**
  * Decode a raw Soroban RPC event into a human-readable record.
  * Uses the ABI template when available; falls back to a generic description.
  */
-export async function decode(ev, { currentAbi = false } = {}) {
+export async function decode(ev, opts = {}) {
+  try {
+    const decoded = await decodeEvent(ev, opts);
+    _recordDecodeOutcome(true);
+    return decoded;
+  } catch (err) {
+    _recordDecodeOutcome(false);
+    throw err;
+  }
+}
+
+async function decodeEvent(ev, { currentAbi = false } = {}) {
   // Classic Stellar operations (payments, path payments) carry no contract ID —
   // they arrive from Horizon rather than Soroban RPC's getEvents.
   if (ev.contractId == null && ev.operation) {

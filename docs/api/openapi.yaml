@@ -3679,6 +3679,30 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/rpc/health:
+    get:
+      summary: Per-provider RPC health and performance snapshot
+      security: []
+      description: |
+        Returns health status for every configured Soroban RPC provider, sourced
+        from `rpcMultiNode.js`'s own call-outcome tracking (the same data that
+        drives failover) rather than a separate synthetic probe. Cached for 5s.
+      responses:
+        "200":
+          description: Per-provider health snapshot
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RpcProviderHealth"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/export/events:
     get:
       summary: Export events as CSV or JSON
@@ -3806,6 +3830,64 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/stats/decoder:
+    get:
+      summary: Decoder success/failure stats over the last 24h
+      description: |
+        Returns decode outcome counts backed by the `decoder_success_total` /
+        `decoder_failure_total` Prometheus counters, aggregated over a trailing
+        24-hour rolling window. Feeds the DECODE_RATE_LOW alert condition.
+      responses:
+        "200":
+          description: Decoder stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecoderStats"
+              examples:
+                success:
+                  summary: Healthy decode rate
+                  value: { total: 5000, decoded: 4980, undecoded: 20, success_rate: 0.996, window: "24h" }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/metrics:
+    get:
+      summary: Prometheus metrics (API-prefixed alias)
+      security:
+        - MetricsApiKeyAuth: []
+        - {}
+      description: |
+        Returns the same Prometheus registry as `/metrics` — event ingestion
+        (`soroban_events_ingested_total`), decode latency
+        (`soroban_decode_duration_ms`), RPC errors (`soroban_rpc_errors_total`),
+        DB pool gauges (`soroban_db_pool_total`/`idle`/`waiting`), decoder
+        success/failure counters, `dlq_depth`, and default Node.js process
+        metrics.
+
+        Gated by an optional `METRICS_API_KEY` Bearer token: when the env var
+        is set, requests must send `Authorization: Bearer <METRICS_API_KEY>`
+        or receive 401. When unset, the endpoint is unauthenticated.
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain; version=0.0.4:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid METRICS_API_KEY bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -3835,7 +3917,7 @@ components:
   schemas:
     HealthStatus:
       type: object
-      required: [status, timestamp, dependencies, alerts]
+      required: [status, timestamp, dependencies, alerts, dlq]
       properties:
         status:
           type: string
@@ -3861,6 +3943,79 @@ components:
               $ref: "#/components/schemas/WorkerHealth"
         alerts:
           $ref: "#/components/schemas/AlertSummary"
+        dlq:
+          $ref: "#/components/schemas/DlqStatus"
+
+    DlqStatus:
+      type: object
+      required: [depth]
+      properties:
+        depth:
+          type: integer
+          minimum: 0
+          description: >-
+            Number of unresolved dead-letter-queue entries, refreshed every
+            60s by the indexer daemon's periodic health loop.
+          example: 0
+
+    RpcProviderHealth:
+      type: object
+      required: [url, healthy, uptime, avgLatency, errorRate, latestLedger, healthScore]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: "https://soroban-testnet.stellar.org"
+        healthy:
+          type: boolean
+          description: Whether the provider is currently eligible for traffic
+        uptime:
+          type: number
+          description: Percentage of recent calls that succeeded
+          example: 99.5
+        avgLatency:
+          type: [integer, "null"]
+          description: Average successful-call latency in milliseconds over the sliding window, or null with no samples yet
+          example: 120
+        errorRate:
+          type: number
+          description: Percentage of recent calls that failed
+          example: 0.5
+        latestLedger:
+          type: integer
+          description: Most recent ledger sequence observed from this provider
+          example: 123456
+        healthScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Composite score — uptime 50% · inverse-latency 30% · inverse-error-rate 20%
+          example: 97
+
+    DecoderStats:
+      type: object
+      required: [total, decoded, undecoded, success_rate, window]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          example: 5000
+        decoded:
+          type: integer
+          minimum: 0
+          example: 4980
+        undecoded:
+          type: integer
+          minimum: 0
+          example: 20
+        success_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+          example: 0.996
+        window:
+          type: string
+          example: "24h"
 
     HealthErrorStatus:
       type: object
@@ -3889,6 +4044,7 @@ components:
         - LOW_THROUGHPUT
         - DLQ_THRESHOLD
         - REORG_DETECTED
+        - DECODE_RATE_LOW
 
     ActiveAlert:
       type: object

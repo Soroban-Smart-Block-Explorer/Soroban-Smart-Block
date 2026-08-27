@@ -17,6 +17,7 @@ import { getActiveAlerts } from "./alertManager.js";
 // ── Health check state ────────────────────────────────────────────────────────
 let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0, ledgerLag: 0 };
 let _workerStatus = { healthy: true, errors: 0, lastRun: Date.now() };
+let _dlqDepth = 0;
 
 // ── Indexer stats (for the frontend's home-page stats bar) ────────────────
 // COUNT(*) over `events` and `dead_letter_queue` on every /api/health poll
@@ -83,6 +84,15 @@ export function updateWorkerStatus(errorCount = 0) {
     errors: errorCount,
     lastRun: Date.now(),
   };
+}
+
+/**
+ * Update the dead-letter-queue depth reported on GET /api/health.
+ * Called every 60s from the indexer daemon's periodic health loop, alongside
+ * the dlq_depth Prometheus gauge and alertManager.checkDlqSize().
+ */
+export function updateDlqDepth(depth) {
+  _dlqDepth = depth;
 }
 
 /**
@@ -258,6 +268,9 @@ export async function getHealthStatus() {
     alerts: {
       active_count: activeAlerts.length,
       conditions: activeAlerts.map(({ condition }) => condition),
+    },
+    dlq: {
+      depth: _dlqDepth,
     },
   };
 }
