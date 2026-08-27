@@ -459,12 +459,14 @@ export interface DailyEventCount {
   count: number;
 }
 
-// Contract event/caller statistics — GET /api/contracts/:id/stats
+// Contract event/caller statistics — GET /api/contracts/:id/stats?range=
 export interface ContractStats {
   total_events: number;
   unique_callers: number;
   first_seen_ledger: number | null;
   last_seen_ledger: number | null;
+  /** Trailing days the events_per_day series covers (echo of ?range=). */
+  range?: number;
   events_per_day: DailyEventCount[];
 }
 
@@ -820,8 +822,10 @@ export const api = {
   // live TTL status (instance + code expiration ledgers)
   contractTTL: (id: string) => get<ContractTTL>(`/contracts/${id}/ttl`),
 
-  // event/caller stats + 30-day activity series
-  contractStats: (id: string) => get<ContractStats>(`/contracts/${id}/stats`),
+  // event/caller stats + daily activity series over the trailing `range`
+  // days (30/90/365 presets, defaults to 30 server-side)
+  contractStats: (id: string, range?: number) =>
+    get<ContractStats>(`/contracts/${id}/stats${range ? `?range=${range}` : ""}`),
 
   // storage-tier write breakdown
   contractStorageTiers: (id: string) => get<StorageTierCounts>(`/contracts/${id}/storage-tiers`),

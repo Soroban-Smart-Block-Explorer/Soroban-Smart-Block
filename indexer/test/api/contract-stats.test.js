@@ -2,7 +2,9 @@ import request from "supertest";
 
 // Issue #536: GET /api/contracts/:id/stats returns aggregate event stats for
 // a contract's stats widget — total events, unique callers, first/last seen
-// ledger, and a zero-filled 30-day daily trend for the sparkline.
+// ledger, and a zero-filled daily trend for the sparkline.
+// Issue #799: the same endpoint accepts a ?range= query param (1-365, default
+// 30) so the contract detail page can render 30/90/365-day event-volume trends.
 
 const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/soroban_test";
 process.env.DATABASE_URL = DB_URL;
@@ -68,6 +70,31 @@ describe("GET /api/contracts/:id/stats (issue #536)", () => {
     expect(res.body.unique_callers).toBe(0);
     expect(res.body.events_per_day).toHaveLength(30);
     expect(res.body.events_per_day.every((d) => d.count === 0)).toBe(true);
+    expect(res.body.range).toBe(30);
+  });
+
+  it("returns a 90-day zero-filled series when ?range=90 (issue #799)", async () => {
+    const res = await request(server).get("/api/contracts/CNOEVENTS536/stats?range=90");
+    expect(res.status).toBe(200);
+    expect(res.body.events_per_day).toHaveLength(90);
+    expect(res.body.events_per_day.every((d) => d.count === 0)).toBe(true);
+    expect(res.body.range).toBe(90);
+  });
+
+  it("returns a 365-day zero-filled series when ?range=365 (issue #799)", async () => {
+    const res = await request(server).get("/api/contracts/CNOEVENTS536/stats?range=365");
+    expect(res.status).toBe(200);
+    expect(res.body.events_per_day).toHaveLength(365);
+    expect(res.body.events_per_day.every((d) => d.count === 0)).toBe(true);
+    expect(res.body.range).toBe(365);
+  });
+
+  it("rejects invalid range values with 422 (issue #799)", async () => {
+    for (const bad of ["abc", "0", "-5", "366", "30.5"]) {
+      const res = await request(server).get(`/api/contracts/CNOEVENTS536/stats?range=${bad}`);
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("Invalid range");
+    }
   });
 
   it("caches the response (X-Cache: MISS then HIT)", async () => {

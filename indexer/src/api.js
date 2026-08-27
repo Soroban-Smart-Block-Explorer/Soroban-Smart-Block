@@ -1810,17 +1810,34 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Contract Stats ────────────────────────────────────────────
 
-  // GET /api/contracts/:id/stats — event/caller counts + 30-day activity sparkline
+  // GET /api/contracts/:id/stats?range=30|90|365 — event/caller counts + a
+  // daily event-volume series over the trailing `range` days (default 30,
+  // max 365), oldest first and zero-filled. Backs the contract detail page's
+  // stats widget and the selectable-time-range invocation frequency chart
+  // (#799). The series is computed by db.getContractEventsByDay, which uses
+  // idx_events_contract_created (migration 028) for the long-range scan.
   app.get(
     "/api/contracts/:id/stats",
-    makeCache("stats", (req) => `contracts:stats:${req.params.id}`),
+    // Validate before the cache middleware so malformed params can never be
+    // served a cached 200 (their cache key would normalize to the default).
+    (req, res, next) => {
+      if (req.query.range !== undefined) {
+        const parsedRange = Number(req.query.range);
+        if (!Number.isInteger(parsedRange) || parsedRange < 1 || parsedRange > 365) {
+          return res.status(422).json({ error: "Invalid range" });
+        }
+      }
+      next();
+    },
+    makeCache("stats", (req) => `contracts:stats:${req.params.id}:${req.query.range ?? 30}`),
     async (req, res) => {
       try {
+        const range = req.query.range !== undefined ? Number(req.query.range) : 30;
         const [stats, eventsPerDay] = await Promise.all([
           db.getContractStats(req.params.id),
-          db.getContractEventsByDay(req.params.id, 30),
+          db.getContractEventsByDay(req.params.id, range),
         ]);
-        res.json({ ...stats, events_per_day: eventsPerDay });
+        res.json({ ...stats, events_per_day: eventsPerDay, range });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
