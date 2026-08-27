@@ -17,6 +17,7 @@ import { getActiveAlerts } from "./alertManager.js";
 // ── Health check state ────────────────────────────────────────────────────────
 let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0 };
 let _workerStatus = { healthy: true, errors: 0, lastRun: Date.now() };
+let _dlqDepth = 0;
 
 // Global Redis client reference (set by cacheLayer or health check)
 let _redisClient = null;
@@ -50,6 +51,15 @@ export function updateWorkerStatus(errorCount = 0) {
     errors: errorCount,
     lastRun: Date.now(),
   };
+}
+
+/**
+ * Update the dead-letter-queue depth reported on GET /api/health.
+ * Called every 60s from the indexer daemon's periodic health loop, alongside
+ * the dlq_depth Prometheus gauge and alertManager.checkDlqSize().
+ */
+export function updateDlqDepth(depth) {
+  _dlqDepth = depth;
 }
 
 /**
@@ -216,6 +226,9 @@ export async function getHealthStatus() {
     alerts: {
       active_count: activeAlerts.length,
       conditions: activeAlerts.map(({ condition }) => condition),
+    },
+    dlq: {
+      depth: _dlqDepth,
     },
   };
 }

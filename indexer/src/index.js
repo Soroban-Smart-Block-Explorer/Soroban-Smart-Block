@@ -4,7 +4,7 @@ import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import config from "./config.js";
 import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
-import { decode } from "./decoder.js";
+import { decode, getDecodeStats } from "./decoder.js";
 import { startAbiSync } from "./githubAbiSync.js";
 import { seedBuiltinAbis } from "./abiSeeder.js";
 import { startContractVerifier } from "./contractVerifier.js";
@@ -30,13 +30,13 @@ import { checkForReorg, recordLedgerHash } from "./reorgWorker.js";
 import { startReDecodeWorker } from "./reDecodeWorker.js";
 import { warmCache } from "./cacheWarming.js";
 import { cacheInvalidate } from "./cacheLayer.js";
-import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics } from "./metrics.js";
+import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics, dlqDepth } from "./metrics.js";
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
 import { startAuditPartitionCron, startAuditFlush } from "./audit/auditLogger.js";
-import { updateIndexerStatus, updateWorkerStatus } from "./health.js";
+import { updateIndexerStatus, updateWorkerStatus, updateDlqDepth } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
-import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue } from "./deadLetterQueue.js";
+import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue, getDlqDepth } from "./deadLetterQueue.js";
 import { recordLedger as gapRecordLedger, analyze as gapAnalyze } from "./predictiveGapDetector.js";
 import { runIntegrityChecks } from "./routes/admin.js";
 
@@ -336,7 +336,15 @@ async function run() {
     refreshAllVaults().catch(() => {});
     alertManager.checkIndexerDown().catch(() => {});
     alertManager.checkResourceConstraints().catch(() => {});
+    alertManager.checkDecodeRate(getDecodeStats().success_rate).catch(() => {});
     dlqProcessRetries(processSingleEvent).catch(() => {}); // retry transient failures
+    getDlqDepth()
+      .then((depth) => {
+        dlqDepth.set(depth);
+        updateDlqDepth(depth);
+        return alertManager.checkDlqSize(depth);
+      })
+      .catch((err) => logger.error({ err: err.message }, "dlq depth check failed"));
   }, 60_000);
 
   // resume from the highest indexed ledger so no events are missed

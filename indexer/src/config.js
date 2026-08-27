@@ -199,6 +199,14 @@ const configSchema = z.object({
 
   ALERT_INDEXER_STALL_MS: positiveInt(30000),
 
+  ALERT_MIN_DECODE_RATE: z
+    .string()
+    .optional()
+    .transform((val) => (val ? parseFloat(val) : 0.7))
+    .refine((val) => !isNaN(val) && val > 0 && val <= 1, {
+      message: "ALERT_MIN_DECODE_RATE must be a number between 0 (exclusive) and 1 (inclusive)",
+    }),
+
   PAGERDUTY_INTEGRATION_KEY: z.string().optional(),
 
   // ── Dead Letter Queue ───────────────────────────────────────────────────────
@@ -250,6 +258,9 @@ const configSchema = z.object({
 
   // ── API Authentication & Rate Limiting ──────────────────────────────────────
   ADMIN_SECRET: z.string().optional(),
+
+  // Gates GET /api/metrics with a Bearer token when set; unset = unauthenticated.
+  METRICS_API_KEY: z.string().optional(),
 
   RATE_LIMIT_CONFIG: z.string().optional(),
 

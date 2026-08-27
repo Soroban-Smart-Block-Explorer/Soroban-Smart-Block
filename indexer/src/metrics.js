@@ -62,6 +62,27 @@ export const decoderSchemaViolationsTotal = new Counter({
   registers: [registry],
 });
 
+/** Total events successfully decoded by decode(). */
+export const decoderSuccessTotal = new Counter({
+  name: "decoder_success_total",
+  help: "Total number of events successfully decoded",
+  registers: [registry],
+});
+
+/** Total events that threw during decode(). */
+export const decoderFailureTotal = new Counter({
+  name: "decoder_failure_total",
+  help: "Total number of events that failed to decode",
+  registers: [registry],
+});
+
+/** Current depth (unresolved count) of the dead letter queue. */
+export const dlqDepth = new Gauge({
+  name: "dlq_depth",
+  help: "Number of unresolved dead-letter-queue entries",
+  registers: [registry],
+});
+
 /** Cache hits/misses by cache layer type (e.g. cache="wallet"). */
 export const cacheHitTotal = new Counter({
   name: "cache_hit_total",
