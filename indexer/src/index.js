@@ -397,7 +397,8 @@ async function run() {
       alertManager.recordPoll();
       gapRecordLedger(polledFrom);
       const lagSeconds = Math.floor((Date.now() - (polledFrom * 5000)) / 1000); // approximate lag
-      updateIndexerStatus(polledFrom, lagSeconds);
+      const ledgerLag = Math.max(0, latestLedger - polledFrom);
+      updateIndexerStatus(polledFrom, lagSeconds, ledgerLag);
 
       const immediateForkLedger = await checkForReorg(latestLedger, latestLedgerHash).catch((err) => {
         logger.error({ err: err.message, ledger: latestLedger }, "reorg fast-path check failed");

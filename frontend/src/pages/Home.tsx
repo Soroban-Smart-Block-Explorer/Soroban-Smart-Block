@@ -6,6 +6,7 @@ import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
 import SkeletonLoader from "../components/SkeletonLoader";
+import StatsBar from "../components/StatsBar";
 import { useEventStream } from "../hooks/useEventStream";
 import { useMetaTags } from "../hooks/useMetaTags";
 
@@ -105,6 +106,8 @@ export default function Home() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <StatsBar />
+
       <div>
         <h1 style={{ fontSize: 22, marginBottom: 4 }}>Soroban Smart Block Explorer</h1>
         <p style={{ color: "var(--muted)" }}>Human-readable Soroban contract events on Stellar.</p>

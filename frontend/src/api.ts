@@ -263,6 +263,20 @@ export interface SearchResponse {
   suggestions: SearchSuggestion[];
 }
 
+// GET /api/health — polled every 10s by the home page's compact stats bar.
+export interface HealthStats {
+  total_events: number | null;
+  events_per_minute: number | null;
+  indexer_lag_ledgers: number | null;
+  decode_success_rate: number | null;
+}
+
+export interface HealthResponse {
+  status: "healthy" | "degraded" | "unhealthy";
+  timestamp: string;
+  stats: HealthStats;
+}
+
 export interface HorizonBalance {
   asset_type: string;
   asset_code?: string;
@@ -689,6 +703,8 @@ export const api = {
     return get<SearchResponse>(`/search?${params}`);
   },
   zkCosts: (seq: number) => get<{ calls: ZkHostCall[]; delta: ZkCostDelta | null }>(`/events/${seq}/zk-costs`),
+  /** Powers the home page's compact stats bar — polled every 10s. */
+  health: () => get<HealthResponse>("/health"),
   contract: (id: string) => get<ContractMeta>(`/contracts/${id}`),
   listContracts: (page = 1, limit = 25, type?: string) => {
     const q = new URLSearchParams();
