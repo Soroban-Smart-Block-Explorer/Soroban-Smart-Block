@@ -110,6 +110,10 @@ cd frontend && npx eslint --max-warnings 0 src/ && npm run build
 
 # Formatting (run from repo root)
 npx prettier --check "indexer/src/**/*.{js,json}" "frontend/src/**/*.{ts,tsx}" "**/*.md"
+
+# API docs (run from repo root)
+npx -y @redocly/cli lint docs/api/openapi.yaml --format=stylish
+npm run generate:postman && git diff --exit-code docs/api/postman_collection.json
 ```
 
 ## Pull request checklist
@@ -121,6 +125,7 @@ npx prettier --check "indexer/src/**/*.{js,json}" "frontend/src/**/*.{ts,tsx}" "
 - [ ] Frontend: `eslint` zero warnings and `npm run build` pass.
 - [ ] Prettier formatting passes.
 - [ ] OpenAPI specification (`docs/api/openapi.yaml`) is updated and in sync with any endpoint changes.
+- [ ] Postman collection (`docs/api/postman_collection.json`) regenerated with `npm run generate:postman` if the OpenAPI spec changed.
 - [ ] Documentation is updated for user-facing or API changes.
 - [ ] The PR description explains the change and links the issue it closes.
 - [ ] No secrets or `.env` values are committed.

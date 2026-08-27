@@ -9,6 +9,7 @@ import {
   checkLedgerGap,
   checkThroughput,
   checkDlqSize,
+  checkDecodeRate,
 } from "../src/alertManager.js";
 
 // Reset active alert state between tests by resolving all conditions
@@ -19,8 +20,8 @@ function resetAlerts() {
 }
 
 describe("ALERT_CONDITIONS", () => {
-  it("exports exactly 8 conditions", () => {
-    assert.equal(Object.keys(ALERT_CONDITIONS).length, 8);
+  it("exports exactly 9 conditions", () => {
+    assert.equal(Object.keys(ALERT_CONDITIONS).length, 9);
   });
 
   it("includes all required condition names", () => {
@@ -33,6 +34,7 @@ describe("ALERT_CONDITIONS", () => {
       "LOW_THROUGHPUT",
       "DLQ_THRESHOLD",
       "REORG_DETECTED",
+      "DECODE_RATE_LOW",
     ];
     for (const name of expected) {
       assert.ok(name in ALERT_CONDITIONS, `missing condition: ${name}`);
@@ -163,5 +165,24 @@ describe("checkDlqSize", () => {
     await checkDlqSize(max - 1);
     const active = getActiveAlerts();
     assert.ok(!active.some((a) => a.condition === ALERT_CONDITIONS.DLQ_THRESHOLD));
+  });
+});
+
+describe("checkDecodeRate", () => {
+  beforeEach(() => resetAlerts());
+
+  it("fires DECODE_RATE_LOW when rate is below minimum", async () => {
+    const min = Number(process.env.ALERT_MIN_DECODE_RATE ?? 0.7);
+    await checkDecodeRate(min - 0.1);
+    const active = getActiveAlerts();
+    assert.ok(active.some((a) => a.condition === ALERT_CONDITIONS.DECODE_RATE_LOW));
+  });
+
+  it("resolves DECODE_RATE_LOW when rate meets minimum", async () => {
+    await fireAlert(ALERT_CONDITIONS.DECODE_RATE_LOW, "low decode rate");
+    const min = Number(process.env.ALERT_MIN_DECODE_RATE ?? 0.7);
+    await checkDecodeRate(Math.min(1, min + 0.1));
+    const active = getActiveAlerts();
+    assert.ok(!active.some((a) => a.condition === ALERT_CONDITIONS.DECODE_RATE_LOW));
   });
 });

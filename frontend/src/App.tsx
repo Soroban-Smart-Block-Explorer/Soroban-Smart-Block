@@ -23,6 +23,7 @@ const RateLimitDashboard = lazy(() => import("./pages/RateLimitDashboard"));
 const NftGallery = lazy(() => import("./pages/NftGallery"));
 const RegistrationSuccessPage = lazy(() => import("./pages/RegistrationSuccessPage"));
 const AbiDiffPage = lazy(() => import("./pages/AbiDiffPage"));
+const DashboardPage = lazy(() => import("./pages/DashboardPage"));
 
 function Fallback() {
   return <p style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>Loading…</p>;
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="/sub-invocations" element={<SubInvocationPage />} />
             <Route path="/admin/rate-limits" element={<RateLimitDashboard />} />
             <Route path="/nft/:contractId" element={<NftGallery />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
           </Routes>
         </Suspense>
       </main>

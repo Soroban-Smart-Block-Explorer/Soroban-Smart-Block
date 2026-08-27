@@ -1464,6 +1464,129 @@ export const db = {
     }));
   },
 
+  /**
+   * Collection-level NFT analytics (issue #810): mint volume over time and a
+   * unique-holder-count trend, derived from already-indexed NFT mint/transfer
+   * events in the events table.
+   *
+   * Mint events are `mint_nft` / `create` (the decoder's NFT mint functions,
+   * #562). Transfers are `transfer` events on the collection contract. The
+   * holder curve counts distinct recipient addresses from mint + transfer
+   * events, cumulatively, over the rolling window.
+   *
+   * Recipient extraction prefers the structured `raw_topics` layout
+   * (topics[0]=fn, so topics[1] is the recipient for mint, topics[2] for
+   * transfer) and falls back to the decoded description text.
+   *
+   * @param {string} contractId
+   * @param {number} [days=30]  Rolling window length, clamped to 7..365.
+   * @returns {Promise<{
+   *   contract_id: string,
+   *   days: number,
+   *   totals: { minted: number, transfers: number, unique_holders: number },
+   *   mint_volume: { date: string, count: number }[],
+   *   holder_count: { date: string, count: number }[]
+   * }>}
+   */
+  async getNftCollectionAnalytics(contractId, days = 30) {
+    const daysN = Math.min(365, Math.max(7, Number(days) || 30));
+
+    const recipientExpr = (table) =>
+      `CASE
+         WHEN ${table}.function = 'transfer'
+           THEN COALESCE(NULLIF(${table}.raw_topics->>2, ''),
+                        (regexp_match(COALESCE(${table}.description, ''), ' to ([GCM][A-Z2-7]{55})'))[1])
+         ELSE COALESCE(NULLIF(${table}.raw_topics->>1, ''),
+                       (regexp_match(COALESCE(${table}.description, ''), '\\m[GCM][A-Z2-7]{55}\\M'))[1])
+       END`;
+
+    const [totalsRes, mintRes, holderDailyRes, holderTotalRes] = await Promise.all([
+      pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE function IN ('mint_nft', 'create'))::INT AS minted,
+           COUNT(*) FILTER (WHERE function = 'transfer')::INT AS transfers
+         FROM events
+         WHERE contract_id = $1`,
+        [contractId],
+      ),
+      // Daily mint volume within the rolling window
+      pool.query(
+        `SELECT to_char(created_at, 'YYYY-MM-DD') AS date, COUNT(*)::INT AS count
+         FROM events
+         WHERE contract_id = $1
+           AND function IN ('mint_nft', 'create')
+           AND created_at >= NOW() - make_interval(days => $2)
+         GROUP BY date
+         ORDER BY date`,
+        [contractId, daysN],
+      ),
+      // Per-day *new* recipients within the rolling window — each address is
+      // counted only on the first day it appears, so the cumulative curve in
+      // JS reflects the true distinct-holder count up to each day.
+      pool.query(
+        `WITH recipients AS (
+           SELECT to_char(created_at, 'YYYY-MM-DD') AS date,
+                  ${recipientExpr("e")} AS recipient
+           FROM events e
+           WHERE e.contract_id = $1
+             AND e.function IN ('mint_nft', 'create', 'transfer')
+             AND e.created_at >= NOW() - make_interval(days => $2)
+         ),
+         first_seen AS (
+           SELECT date, recipient,
+                  ROW_NUMBER() OVER (PARTITION BY recipient ORDER BY date) AS rn
+           FROM recipients
+           WHERE recipient ~ '^[GCM][A-Z2-7]{55}$'
+         )
+         SELECT date, COUNT(*) FILTER (WHERE rn = 1)::INT AS count
+         FROM first_seen
+         GROUP BY date
+         ORDER BY date`,
+        [contractId, daysN],
+      ),
+      // All-time distinct recipients — the collection's unique holder count
+      pool.query(
+        `WITH recipients AS (
+           SELECT ${recipientExpr("e")} AS recipient
+           FROM events e
+           WHERE e.contract_id = $1
+             AND e.function IN ('mint_nft', 'create', 'transfer')
+         )
+         SELECT COUNT(DISTINCT recipient)::INT AS unique_holders
+         FROM recipients
+         WHERE recipient ~ '^[GCM][A-Z2-7]{55}$'`,
+        [contractId],
+      ),
+    ]);
+
+    const mintByDate = new Map(mintRes.rows.map((r) => [r.date, r.count]));
+    const holdersByDate = new Map(holderDailyRes.rows.map((r) => [r.date, r.count]));
+
+    // Zero-fill the daily series and build the cumulative holder curve, so the
+    // frontend charts never see gaps (same convention as getContractStats).
+    const mint_volume = [];
+    const holder_count = [];
+    let cumulative = 0;
+    for (let i = daysN - 1; i >= 0; i--) {
+      const date = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+      mint_volume.push({ date, count: mintByDate.get(date) ?? 0 });
+      cumulative += holdersByDate.get(date) ?? 0;
+      holder_count.push({ date, count: cumulative });
+    }
+
+    return {
+      contract_id: contractId,
+      days: daysN,
+      totals: {
+        minted: totalsRes.rows[0].minted,
+        transfers: totalsRes.rows[0].transfers,
+        unique_holders: holderTotalRes.rows[0].unique_holders,
+      },
+      mint_volume,
+      holder_count,
+    };
+  },
+
   // ── Predictive Gap Detection helpers ────────────────────────────────────────
 
   /**
@@ -1826,6 +1949,147 @@ export const db = {
     const next_cursor = hasMore ? Number(data[data.length - 1].id) : null;
 
     return { data, next_cursor };
+  },
+
+  // ── Webhook subscriptions ────────────────────────────────────────────────────
+
+  /** Number of consecutive delivery failures after which a subscription is auto-disabled. */
+  WEBHOOK_MAX_CONSECUTIVE_FAILURES: 5,
+
+  async createWebhookSubscription({ api_key_id, url, contract_id, function_filter, secret }) {
+    const { rows } = await pool.query(
+      `INSERT INTO webhook_subscriptions (api_key_id, url, contract_id, function_filter, secret)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at`,
+      [api_key_id, url, contract_id ?? null, function_filter ?? null, secret],
+    );
+    return rows[0];
+  },
+
+  /** List subscriptions for one API key, excluding the signing secret. */
+  async listWebhookSubscriptions(apiKeyId) {
+    const { rows } = await pool.query(
+      `SELECT id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at
+       FROM webhook_subscriptions
+       WHERE api_key_id = $1
+       ORDER BY created_at DESC`,
+      [apiKeyId],
+    );
+    return rows;
+  },
+
+  /** Fetch one subscription including its secret (for signing outbound requests). */
+  async getWebhookSubscription(id) {
+    const { rows } = await pool.query(`SELECT * FROM webhook_subscriptions WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  },
+
+  async deactivateWebhookSubscription(id, apiKeyId) {
+    const { rows } = await pool.query(
+      `UPDATE webhook_subscriptions SET active = FALSE
+       WHERE id = $1 AND api_key_id = $2
+       RETURNING id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at`,
+      [id, apiKeyId],
+    );
+    return rows[0] ?? null;
+  },
+
+  /** Active subscriptions whose contract/function filters match a newly-indexed event. */
+  async getMatchingWebhookSubscriptions(contractId, functionName) {
+    const { rows } = await pool.query(
+      `SELECT * FROM webhook_subscriptions
+       WHERE active = TRUE
+         AND (contract_id IS NULL OR contract_id = $1)
+         AND (function_filter IS NULL OR function_filter = $2)`,
+      [contractId ?? null, functionName ?? null],
+    );
+    return rows;
+  },
+
+  /**
+   * Record the outcome of a delivery attempt, and update the subscription's
+   * consecutive-failure counter — auto-disabling it once the threshold is hit.
+   */
+  async recordWebhookDelivery({ webhook_id, event_seq, url, request_body, response_status, response_body, duration_ms, success }) {
+    const { rows } = await pool.query(
+      `INSERT INTO webhook_deliveries
+         (webhook_id, event_seq, url, request_body, response_status, response_body, duration_ms, delivered_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        webhook_id,
+        event_seq ?? null,
+        url,
+        request_body,
+        response_status ?? null,
+        response_body ?? null,
+        duration_ms ?? null,
+        success ? new Date() : null,
+      ],
+    );
+
+    if (success) {
+      await pool.query(
+        `UPDATE webhook_subscriptions SET failure_count = 0, last_triggered_at = NOW() WHERE id = $1`,
+        [webhook_id],
+      );
+    } else {
+      await pool.query(
+        `UPDATE webhook_subscriptions
+         SET failure_count = failure_count + 1,
+             active = (failure_count + 1) < $2,
+             last_triggered_at = NOW()
+         WHERE id = $1`,
+        [webhook_id, this.WEBHOOK_MAX_CONSECUTIVE_FAILURES],
+      );
+    }
+
+    return rows[0];
+  },
+
+  async listWebhookDeliveries(webhookId, { page = 1, limit = 25 } = {}) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.min(Math.max(1, Number(limit) || 25), 100);
+    const offset = (safePage - 1) * safeLimit;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      pool.query(
+        `SELECT id, webhook_id, event_seq, url, response_status, response_body, duration_ms, delivered_at, created_at
+         FROM webhook_deliveries
+         WHERE webhook_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [webhookId, safeLimit, offset],
+      ),
+      pool.query(`SELECT COUNT(*)::INT AS total FROM webhook_deliveries WHERE webhook_id = $1`, [webhookId]),
+    ]);
+
+    const total = countRows[0].total;
+    return { data: rows, pagination: { page: safePage, limit: safeLimit, total, total_pages: Math.ceil(total / safeLimit) } };
+  },
+
+  /** Total webhook delivery attempts ever made across all of one API key's subscriptions ("events received"). */
+  async countWebhookDeliveriesForApiKey(apiKeyId) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::INT AS total
+       FROM webhook_deliveries d
+       JOIN webhook_subscriptions w ON w.id = d.webhook_id
+       WHERE w.api_key_id = $1`,
+      [apiKeyId],
+    );
+    return rows[0].total;
+  },
+
+  /** Fetch one delivery row together with its parent subscription (for retry/ownership checks). */
+  async getWebhookDeliveryWithSubscription(deliveryId) {
+    const { rows } = await pool.query(
+      `SELECT d.*, w.api_key_id, w.url AS webhook_url, w.secret, w.active AS webhook_active
+       FROM webhook_deliveries d
+       JOIN webhook_subscriptions w ON w.id = d.webhook_id
+       WHERE d.id = $1`,
+      [deliveryId],
+    );
+    return rows[0] ?? null;
   },
 };
 

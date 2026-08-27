@@ -101,10 +101,12 @@ async function listKeys(page = 1, limit = 50) {
  * @param {string[]} [data.allowed_ips]
  * @param {string[]} [data.allowed_endpoints]
  * @param {string} [data.expires_at]   — ISO-8601 timestamp
+ * @param {string} [data.email]        — owner email (self-service "my keys" grouping)
  * @returns {Promise<{ key: string, record: object }>}
  */
 async function createKey(data) {
-  const { name, tier = 'free', rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at } = data ?? {};
+  const { name, tier = 'free', rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, email, verified = false } =
+    data ?? {};
 
   // Validate required fields.
   if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -136,13 +138,14 @@ async function createKey(data) {
 
   const { rows } = await pool.query(
     `INSERT INTO api_keys
-       (name, key_hash, key_prefix, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
+       (name, email, key_hash, key_prefix, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id, name, email, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     [
       name.trim(),
+      email ?? null,
       keyHash,
       keyPrefix,
       tier,
@@ -151,6 +154,7 @@ async function createKey(data) {
       allowed_ips ? JSON.stringify(allowed_ips) : null,
       allowed_endpoints ? JSON.stringify(allowed_endpoints) : null,
       expires_at ?? null,
+      verified,
     ],
   );
 
@@ -208,7 +212,7 @@ async function updateKey(id, updates) {
     `UPDATE api_keys
      SET ${setClauses.join(', ')}
      WHERE id = $${idParam}
-     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
+     RETURNING id, name, email, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     params,
@@ -236,7 +240,7 @@ async function deleteKey(id) {
     `UPDATE api_keys
      SET revoked = TRUE, updated_at = NOW()
      WHERE id = $1
-     RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
+     RETURNING id, name, email, key_prefix, tier, rate_limit, daily_limit,
                allowed_ips, allowed_endpoints, expires_at,
                revoked, last_used_at, usage_count, created_at, updated_at`,
     [id],
@@ -270,7 +274,7 @@ async function rotateKey(id) {
 
     // Load the existing record to copy metadata.
     const { rows: existingRows } = await client.query(
-      `SELECT name, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified
+      `SELECT name, email, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified
        FROM api_keys WHERE id = $1 FOR UPDATE`,
       [id],
     );
@@ -289,13 +293,14 @@ async function rotateKey(id) {
 
     const { rows: insertRows } = await client.query(
       `INSERT INTO api_keys
-         (name, key_hash, key_prefix, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       RETURNING id, name, key_prefix, tier, rate_limit, daily_limit,
+         (name, email, key_hash, key_prefix, tier, rate_limit, daily_limit, allowed_ips, allowed_endpoints, expires_at, verified)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING id, name, email, key_prefix, tier, rate_limit, daily_limit,
                  allowed_ips, allowed_endpoints, expires_at,
                  revoked, last_used_at, usage_count, created_at, updated_at`,
       [
         existing.name,
+        existing.email ?? null,
         keyHash,
         keyPrefix,
         existing.tier,
@@ -371,4 +376,68 @@ async function getKeyUsage(id) {
   return rows[0] ?? { today: 0, this_month: 0, limit_daily: 0 };
 }
 
-export { listKeys, createKey, updateKey, deleteKey, rotateKey, getKeyUsage };
+// ── Self-service helpers (dashboard) ─────────────────────────────────────────
+// The dashboard scopes "my keys" by the `email` recorded on the authenticating
+// key (set at self-service creation via POST /api/keys, migration 010). Keys
+// created by an admin with no email fall back to being their own sole owner.
+
+/**
+ * Fetch a single key record (without key_hash) by id, or null if not found.
+ * @param {string} id — UUID
+ */
+async function getKeyById(id) {
+  const { rows } = await pool.query(
+    `SELECT id, name, email, key_prefix, tier, rate_limit, daily_limit,
+            allowed_ips, allowed_endpoints, expires_at,
+            revoked, verified, last_used_at, usage_count, created_at, updated_at
+     FROM api_keys WHERE id = $1`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * List all keys sharing the same email as the given key (self-service "my keys").
+ * Keys with no email only ever see themselves.
+ * @param {string} id — UUID of the authenticating key
+ */
+async function listKeysForOwner(id) {
+  const self = await getKeyById(id);
+  if (!self) throw new Error(`API key not found: ${id}`);
+
+  if (!self.email) return [self];
+
+  const { rows } = await pool.query(
+    `SELECT id, name, email, key_prefix, tier, rate_limit, daily_limit,
+            allowed_ips, allowed_endpoints, expires_at,
+            revoked, verified, last_used_at, usage_count, created_at, updated_at
+     FROM api_keys WHERE email = $1 ORDER BY created_at DESC`,
+    [self.email],
+  );
+  return rows;
+}
+
+/** Throws unless `targetId` belongs to the same owner (email, or itself) as `callerId`. */
+async function assertOwnsKey(callerId, targetId) {
+  const caller = await getKeyById(callerId);
+  if (!caller) throw new Error(`API key not found: ${callerId}`);
+  if (targetId === callerId) return;
+
+  const target = await getKeyById(targetId);
+  if (!target) throw new Error(`API key not found: ${targetId}`);
+  if (!caller.email || target.email !== caller.email) {
+    throw new Error("not authorized to manage this API key");
+  }
+}
+
+export {
+  listKeys,
+  createKey,
+  updateKey,
+  deleteKey,
+  rotateKey,
+  getKeyUsage,
+  getKeyById,
+  listKeysForOwner,
+  assertOwnsKey,
+};

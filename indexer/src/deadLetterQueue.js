@@ -151,6 +151,17 @@ export async function getItems({ page = 1, limit = 25, resolved = false } = {}) 
 }
 
 /**
+ * Current count of unresolved DLQ entries, for the dlq_depth gauge and the
+ * `dlq.depth` field on GET /api/health.
+ *
+ * @returns {Promise<number>}
+ */
+export async function getDlqDepth() {
+  const { rows } = await db.query(`SELECT COUNT(*)::INT AS count FROM dead_letter_queue WHERE resolved = FALSE`);
+  return rows[0].count;
+}
+
+/**
  * Mark a DLQ entry as manually resolved.
  *
  * @param {number} id

@@ -14,8 +14,9 @@ import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./h
 import { attachWebSocketServer, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
-import { getRpcNodeStatus } from "./rpcMultiNode.js";
+import { getRpcNodeStatus, getProviderStats } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration } from "./metrics.js";
+import { getDecodeStats } from "./decoder.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
 import { geoIpRateLimiter } from "./rateLimit/geoIpLimiter.js";
@@ -26,6 +27,8 @@ import { abuseDetector } from "./rateLimit/abuseDetector.js";
 import { rateLimitHeaderWriter } from "./rateLimit/headers.js";
 import { auditLoggerMiddleware, ensureAuditPartitions } from "./audit/auditLogger.js";
 import registerAdminRoutes from "./routes/admin.js";
+import registerWebhookRoutes from "./routes/webhooks.js";
+import registerDashboardRoutes from "./routes/dashboard.js";
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
 import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
 import {
@@ -151,6 +154,18 @@ function requireApiKey(req, res, next) {
   if (!apiKey) return next();
   const key = req.headers["x-api-key"];
   if (!key || key !== apiKey) return res.status(401).json({ error: "Unauthorized" });
+  next();
+}
+
+// Gates GET /api/metrics with a Bearer token when METRICS_API_KEY is set;
+// unset (the default) leaves the scrape endpoint unauthenticated.
+function requireMetricsApiKey(req, res, next) {
+  const metricsKey = process.env.METRICS_API_KEY;
+  if (!metricsKey) return next();
+  const [scheme, token] = String(req.headers["authorization"] || "").split(" ");
+  if (scheme !== "Bearer" || token !== metricsKey) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
   next();
 }
 
@@ -332,6 +347,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
   registerAdminRoutes(app);
 
+  // ── Self-service routes (auth-gated by req.rateContext.keyId) ────────────
+  registerWebhookRoutes(app);
+  registerDashboardRoutes(app);
+
   // ── API Documentation ────────────────────────────────────────────────────────
   const openApiPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../docs/api/openapi.yaml");
   if (fs.existsSync(openApiPath)) {
@@ -415,6 +434,19 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── Prometheus metrics ────────────────────────────────────────────────────
   // Scraped by Prometheus or any OpenMetrics-compatible collector.
   app.get("/metrics", async (_req, res) => {
+    try {
+      res.set("Content-Type", registry.contentType);
+      res.end(await registry.metrics());
+    } catch (e) {
+      res.status(500).end(e.message);
+    }
+  });
+
+  // API-prefixed alias, gated by an optional METRICS_API_KEY Bearer token.
+  // Serves the same registry — eventsIngested, decodeLatency, rpcErrors,
+  // dbPoolTotal/Idle/Waiting, decoder_success_total, decoder_failure_total,
+  // dlq_depth, and the rest of ./metrics.js are all registered on it.
+  app.get("/api/metrics", requireMetricsApiKey, async (_req, res) => {
     try {
       res.set("Content-Type", registry.contentType);
       res.end(await registry.metrics());
@@ -1383,6 +1415,24 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/tokens/:contractId/nfts/analytics
+  //   Collection-level analytics (issue #810): mint volume over time and a
+  //   unique-holder-count trend, derived from indexed NFT mint/transfer events.
+  //   ?days=<n> — rolling window length, default 30, clamped 7..365.
+  app.get("/api/tokens/:contractId/nfts/analytics", async (req, res) => {
+    try {
+      const { contractId } = req.params;
+      const days = req.query.days !== undefined ? Number(req.query.days) : 30;
+      if (isNaN(days) || days < 1 || days > 365) {
+        return res.status(422).json({ error: "Invalid days" });
+      }
+      const analytics = await db.getNftCollectionAnalytics(contractId, days);
+      res.json(analytics);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // GET /api/tokens/:contractId/nfts/:tokenId/history
   //   Returns the full mint + transfer event history for a single NFT token.
   app.get("/api/tokens/:contractId/nfts/:tokenId/history", async (req, res) => {
@@ -1721,6 +1771,20 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/rpc/health — per-provider health/performance snapshot sourced
+  // from rpcMultiNode.js's own call-outcome tracking. Cached for 5s.
+  app.get(
+    "/api/rpc/health",
+    makeCache("rpc_health", () => "rpc:health"),
+    (_req, res) => {
+      try {
+        res.json(getProviderStats());
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
+    },
+  );
+
   // ── Multi-Signature Source Code Verification ───────────────────
 
   // POST /api/contracts/:id/source-verifications
@@ -1792,17 +1856,34 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Contract Stats ────────────────────────────────────────────
 
-  // GET /api/contracts/:id/stats — event/caller counts + 30-day activity sparkline
+  // GET /api/contracts/:id/stats?range=30|90|365 — event/caller counts + a
+  // daily event-volume series over the trailing `range` days (default 30,
+  // max 365), oldest first and zero-filled. Backs the contract detail page's
+  // stats widget and the selectable-time-range invocation frequency chart
+  // (#799). The series is computed by db.getContractEventsByDay, which uses
+  // idx_events_contract_created (migration 028) for the long-range scan.
   app.get(
     "/api/contracts/:id/stats",
-    makeCache("stats", (req) => `contracts:stats:${req.params.id}`),
+    // Validate before the cache middleware so malformed params can never be
+    // served a cached 200 (their cache key would normalize to the default).
+    (req, res, next) => {
+      if (req.query.range !== undefined) {
+        const parsedRange = Number(req.query.range);
+        if (!Number.isInteger(parsedRange) || parsedRange < 1 || parsedRange > 365) {
+          return res.status(422).json({ error: "Invalid range" });
+        }
+      }
+      next();
+    },
+    makeCache("stats", (req) => `contracts:stats:${req.params.id}:${req.query.range ?? 30}`),
     async (req, res) => {
       try {
+        const range = req.query.range !== undefined ? Number(req.query.range) : 30;
         const [stats, eventsPerDay] = await Promise.all([
           db.getContractStats(req.params.id),
-          db.getContractEventsByDay(req.params.id, 30),
+          db.getContractEventsByDay(req.params.id, range),
         ]);
-        res.json({ ...stats, events_per_day: eventsPerDay });
+        res.json({ ...stats, events_per_day: eventsPerDay, range });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
@@ -2085,6 +2166,16 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
     },
   );
+
+  // ── Decoder stats endpoint ─────────────────────────────────────────────────
+  // GET /api/stats/decoder — decode success/failure counts over the last 24h.
+  app.get("/api/stats/decoder", (_req, res) => {
+    try {
+      res.json(getDecodeStats());
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   // ── GraphQL endpoint ───────────────────────────────────────────
   if (!runningUnderTest) attachGraphQL(app);
