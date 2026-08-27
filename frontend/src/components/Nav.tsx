@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import ThemeToggle from "./ThemeToggle";
 import NetworkSwitcher from "./NetworkSwitcher";
+import WalletConnectButton from "./WalletConnectButton";
 
 const NAV_LINKS = [
   { to: "/contracts", label: "Registry" },
@@ -173,6 +174,7 @@ export default function Nav() {
           <button type="submit">Search</button>
         </form>
         <NetworkSwitcher />
+        <WalletConnectButton />
         <ThemeToggle />
       </header>
 
