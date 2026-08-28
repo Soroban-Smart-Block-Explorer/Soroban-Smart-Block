@@ -2,8 +2,14 @@
  * Admin Routes
  *
  * Mounts all admin-gated routes under `/api/admin/` using adminAuthMiddleware.
- * Also preserves the existing non-auth admin utility routes (health, doctor,
- * db-init, export) that were previously registered directly on the app.
+ *
+ * The legacy no-auth utility routes (`/api/doctor`, `/api/setup/db-init`,
+ * `/api/export/*`) that used to be registered here directly on `app` were
+ * removed (see issue: unauthenticated db-init). `api.js` already defines
+ * `/api/setup/doctor` and `/api/setup/db-init` behind `blockInProduction`,
+ * and the export routes — registering unguarded duplicates here shadowed
+ * those guards because this router is mounted first. Do not re-add
+ * unauthenticated routes to this file.
  *
  * Admin API key management routes:
  *   GET    /api/admin/api-keys              — paginated list (no key_hash)
@@ -28,10 +34,12 @@ import {
   rotateKey,
   getKeyUsage,
 } from '../admin/keyManager.js';
-import { getRedisClient } from '../rateLimit/tokenBucket.js';
 import { db, pool } from '../db.js';
-import { runAllChecks } from '../doctor-lib.js';
 import { getActiveAlerts, resolveAlert } from '../alertManager.js';
+// Note: getRedisClient (rateLimit/tokenBucket.js) and runAllChecks
+// (doctor-lib.js) were imported here but never called anywhere in this
+// file — dead imports left over from the removed legacy /api/doctor route
+// (see comment below). Not re-added.
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
@@ -51,31 +59,9 @@ const AUDIT_LOG_COLUMNS = [
   'request_body_hash',
 ];
 
-const EVENT_COLUMNS = [
-  'seq',
-  'contract_id',
-  'function',
-  'ledger',
-  'tx_hash',
-  'description',
-  'cpu_instructions',
-  'mem_bytes',
-  'fee_charged',
-  'is_clawback',
-  'is_high_bloat_risk',
-];
-
-const CONTRACT_COLUMNS = [
-  'id',
-  'name',
-  'description',
-  'registered_by',
-  'has_circuit_breaker',
-  'is_paused',
-  'is_rwa',
-  'rwa_type',
-  'created_at',
-];
+// Note: EVENT_COLUMNS/CONTRACT_COLUMNS were only used by the removed legacy
+// /api/export/events and /api/export/contracts routes (see comment below)
+// and are dropped along with them.
 
 async function runIntegrityChecks() {
   const failed = [];
@@ -172,73 +158,13 @@ export { runIntegrityChecks };
 // ── Router factory ────────────────────────────────────────────────────────────
 
 /**
- * Returns an Express Router with all admin routes.
- * Also registers legacy utility routes on `app` directly (backwards compat).
+ * Returns an Express Router with all admin routes, mounted under /api/admin
+ * and gated by adminAuthMiddleware.
  *
  * @param {import('express').Express} app  — the Express app instance
  * @returns {import('express').Router}
  */
 export default function registerAdminRoutes(app) {
-  // ── Legacy utility routes (no auth) ───────────────────────────────────────
-  // /health is registered by api.js (comprehensive check via health.js). Skip it here.
-  app.get('/api/doctor', async (_req, res) => {
-    try {
-      const checks = await runAllChecks();
-      res.json(checks);
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/setup/db-init', async (req, res) => {
-    try {
-      await db.init();
-      res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.get('/api/export/events', async (req, res) => {
-    try {
-      const format = req.query.format === 'json' ? 'json' : 'csv';
-      const limit = Math.min(Number(req.query.limit) || 10000, 10000);
-      const rows = await db.getEventsForExport({
-        contract: req.query.contract,
-        fn: req.query.fn,
-        type: req.query.type,
-        limit,
-      });
-      if (format === 'json') {
-        res.setHeader('Content-Disposition', 'attachment; filename="events.json"');
-        res.setHeader('Content-Type', 'application/json');
-        return res.json(rows);
-      }
-      res.setHeader('Content-Disposition', 'attachment; filename="events.csv"');
-      res.setHeader('Content-Type', 'text/csv');
-      return res.send(rowsToCsv(rows, EVENT_COLUMNS));
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.get('/api/export/contracts', async (req, res) => {
-    try {
-      const format = req.query.format === 'json' ? 'json' : 'csv';
-      const rows = await db.getContractsForExport();
-      if (format === 'json') {
-        res.setHeader('Content-Disposition', 'attachment; filename="contracts.json"');
-        res.setHeader('Content-Type', 'application/json');
-        return res.json(rows);
-      }
-      res.setHeader('Content-Disposition', 'attachment; filename="contracts.csv"');
-      res.setHeader('Content-Type', 'text/csv');
-      return res.send(rowsToCsv(rows, CONTRACT_COLUMNS));
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
   // ── Auth-gated admin router ────────────────────────────────────────────────
   const router = Router();
 
@@ -710,6 +636,43 @@ export default function registerAdminRoutes(app) {
       }
     });
   }
+
+  // ── POST /api/admin/dlq/:id/retry ─────────────────────────────────────────
+  // Triggers an immediate retry of the specified DLQ entry without waiting for
+  // the scheduled retry window. Sets next_retry_at = NOW() so the next
+  // processRetries() tick picks it up immediately.
+  //
+  // 400 — id is not a number
+  // 404 — DLQ entry not found
+  // 409 — DLQ entry is already resolved
+  // 200 — { ok: true, id, next_retry_at }
+  router.post('/dlq/:id/retry', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'id must be a number' });
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, resolved, retry_count, max_retries FROM dead_letter_queue WHERE id = $1`,
+        [id],
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: `DLQ entry ${id} not found` });
+      }
+      const entry = rows[0];
+      if (entry.resolved) {
+        return res.status(409).json({ error: 'DLQ entry is already resolved' });
+      }
+      const nextRetryAt = new Date().toISOString();
+      await pool.query(
+        `UPDATE dead_letter_queue SET next_retry_at = $1, updated_at = NOW() WHERE id = $2`,
+        [nextRetryAt, id],
+      );
+      return res.json({ ok: true, id, next_retry_at: nextRetryAt });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
 
   // Mount the router under /api/admin
   app.use('/api/admin', router);

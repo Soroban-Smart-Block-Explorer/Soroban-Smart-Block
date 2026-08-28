@@ -18,6 +18,7 @@ import NetworkComparison from "../components/NetworkComparison";
 import AddressConnectionGraph from "../components/AddressConnectionGraph";
 import WasmHashZone from "../components/WasmHashZone";
 import { useLocalAbi } from "../hooks/useLocalAbi";
+import { useMetaTags } from "../hooks/useMetaTags";
 import TTLProgressBar from "../components/TTLProgressBar";
 import CircuitBreakerStatus from "../components/CircuitBreakerStatus";
 import QuorumFreezeBadge from "../components/QuorumFreezeBadge";
@@ -27,7 +28,7 @@ import StateDiffTimeline from "../components/StateDiffTimeline";
 import ExportButton from "../components/ExportButton";
 import AbiHistoryDrawer from "../components/AbiHistoryDrawer";
 import ProtocolBadge from "../components/ProtocolBadge";
-import InvocationFrequencyChart from "../components/InvocationFrequencyChart";
+import InvocationFrequencyChart, { type StatsRange } from "../components/InvocationFrequencyChart";
 import StorageTierStackedBar from "../components/StorageTierStackedBar";
 
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "abi-history";
@@ -99,6 +100,9 @@ export default function ContractPage() {
   const [selectedFn, setSelectedFn] = useState("");
   const [snippetFn, setSnippetFn] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  // Shared event-volume time range for the stats widget + invocation chart (#799)
+  const [statsRange, setStatsRange] = useState<StatsRange>(30);
 
   // ── Local ABI (session-only, never sent to server) ──────────────────────────
   const { localAbi, loadAbi, clearAbi, parseError } = useLocalAbi(id);
@@ -390,8 +394,8 @@ export default function ContractPage() {
       {/* Tab: Overview */}
       {tab === "overview" && (
         <>
-          {/* Contract stats widget — total events, unique callers, last activity, sparkline (#536) */}
-          <ContractStatsWidget contractId={id} />
+          {/* Contract stats widget — total events, unique callers, last activity, sparkline (#536, #799) */}
+          <ContractStatsWidget contractId={id} range={statsRange} />
 
           {/* Local ABI upload zone — shown for unverified contracts or when
               the user wants to override descriptions with a local file */}
@@ -497,8 +501,8 @@ export default function ContractPage() {
           {/* Live TTL expiration progress bars */}
           <TTLProgressBar contractId={id} />
 
-          {/* Invocation frequency (last 30 days) */}
-          <InvocationFrequencyChart contractId={id} />
+          {/* Event volume trend with selectable 30/90/365-day range (#799) */}
+          <InvocationFrequencyChart contractId={id} range={statsRange} onRangeChange={setStatsRange} />
 
           {/* Storage writes by durability tier */}
           <StorageTierStackedBar contractId={id} />

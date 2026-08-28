@@ -2,7 +2,7 @@
 -- so that PATCH /api/contracts/:id can enforce ownership.
 
 ALTER TABLE contracts
-  ADD COLUMN IF NOT EXISTS registered_by_key_id INT REFERENCES api_keys(id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS registered_by_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_contracts_registered_by_key
   ON contracts (registered_by_key_id)

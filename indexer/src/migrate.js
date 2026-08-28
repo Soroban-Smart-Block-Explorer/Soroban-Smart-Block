@@ -14,6 +14,23 @@ const MIGRATIONS_DIR = path.resolve(
   "../migrations",
 );
 
+// `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block (and
+// Postgres rejects it if it isn't the sole statement in its query message —
+// the simple query protocol treats multiple ;-separated statements as one
+// implicit transaction). Migrations that use it are split into individual
+// statements and run outside BEGIN/COMMIT, each as its own query.
+const CONCURRENTLY_RE = /\bCONCURRENTLY\b/i;
+
+function splitStatements(sql) {
+  return sql
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 /**
  * Run all pending migrations against the provided pg pool.
  * @param {import('pg').Pool} pool
@@ -41,6 +58,27 @@ export async function runMigrations(pool) {
     if (appliedSet.has(file)) continue;
 
     const sql = await readFile(path.join(MIGRATIONS_DIR, file), "utf8");
+
+    if (CONCURRENTLY_RE.test(sql)) {
+      // No transaction wrapper — each statement commits (or fails) on its
+      // own. Statements use IF NOT EXISTS so a re-run after a partial
+      // failure is safe.
+      try {
+        for (const statement of splitStatements(sql)) {
+          await pool.query(statement);
+        }
+        await pool.query(
+          "INSERT INTO schema_migrations (version) VALUES ($1)",
+          [file],
+        );
+        console.log(`[migrations] applied ${file} (non-transactional)`);
+        ran++;
+      } catch (err) {
+        throw new Error(`Migration ${file} failed: ${err.message}`);
+      }
+      continue;
+    }
+
     const client = await pool.connect();
     try {
       await client.query("BEGIN");

@@ -263,6 +263,20 @@ export interface SearchResponse {
   suggestions: SearchSuggestion[];
 }
 
+// GET /api/health — polled every 10s by the home page's compact stats bar.
+export interface HealthStats {
+  total_events: number | null;
+  events_per_minute: number | null;
+  indexer_lag_ledgers: number | null;
+  decode_success_rate: number | null;
+}
+
+export interface HealthResponse {
+  status: "healthy" | "degraded" | "unhealthy";
+  timestamp: string;
+  stats: HealthStats;
+}
+
 export interface HorizonBalance {
   asset_type: string;
   asset_code?: string;
@@ -339,7 +353,7 @@ async function mutationFetch(
 ): Promise<Response> {
   const buildHeaders = (token: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...options.headers,
+    ...(options.headers as Record<string, string> | undefined),
     ...(token ? { "X-CSRF-Token": token } : {}),
   });
 
@@ -459,12 +473,14 @@ export interface DailyEventCount {
   count: number;
 }
 
-// Contract event/caller statistics — GET /api/contracts/:id/stats
+// Contract event/caller statistics — GET /api/contracts/:id/stats?range=
 export interface ContractStats {
   total_events: number;
   unique_callers: number;
   first_seen_ledger: number | null;
   last_seen_ledger: number | null;
+  /** Trailing days the events_per_day series covers (echo of ?range=). */
+  range?: number;
   events_per_day: DailyEventCount[];
 }
 
@@ -576,6 +592,27 @@ export interface NftTokensResponse {
   };
 }
 
+// One point in a collection-level NFT analytics series (mint volume or holder count)
+export interface NftAnalyticsPoint {
+  date: string; // YYYY-MM-DD
+  count: number;
+}
+
+// Collection-level NFT analytics — GET /api/tokens/:contractId/nfts/analytics (issue #810)
+export interface NftCollectionAnalytics {
+  contract_id: string;
+  days: number;
+  totals: {
+    minted: number;
+    transfers: number;
+    unique_holders: number;
+  };
+  /** Daily NFT mint counts over the window, zero-filled. */
+  mint_volume: NftAnalyticsPoint[];
+  /** Cumulative distinct-holder curve over the window, zero-filled. */
+  holder_count: NftAnalyticsPoint[];
+}
+
 // Single event entry in NFT token history
 export interface NftHistoryEvent {
   seq: number;
@@ -666,6 +703,8 @@ export const api = {
     return get<SearchResponse>(`/search?${params}`);
   },
   zkCosts: (seq: number) => get<{ calls: ZkHostCall[]; delta: ZkCostDelta | null }>(`/events/${seq}/zk-costs`),
+  /** Powers the home page's compact stats bar — polled every 10s. */
+  health: () => get<HealthResponse>("/health"),
   contract: (id: string) => get<ContractMeta>(`/contracts/${id}`),
   listContracts: (page = 1, limit = 25, type?: string) => {
     const q = new URLSearchParams();
@@ -727,6 +766,12 @@ export const api = {
   // Full transfer + mint history for a single NFT token
   nftHistory: (contractId: string, tokenId: string) =>
     get<NftTokenHistoryResponse>(`/tokens/${contractId}/nfts/${encodeURIComponent(tokenId)}/history`),
+
+  // Collection-level NFT analytics — mint volume + unique-holder trend (#810)
+  nftAnalytics: (contractId: string, days = 30) => {
+    const q = new URLSearchParams({ days: String(days) });
+    return get<NftCollectionAnalytics>(`/tokens/${contractId}/nfts/analytics?${q}`);
+  },
   networkComparison: (id: string) => get<NetworkComparisonResult>(`/contracts/${id}/network-comparison`),
   addressGraph: (id: string) => get<AddressGraphData>(`/contracts/${id}/address-graph`),
 
@@ -793,8 +838,10 @@ export const api = {
   // live TTL status (instance + code expiration ledgers)
   contractTTL: (id: string) => get<ContractTTL>(`/contracts/${id}/ttl`),
 
-  // event/caller stats + 30-day activity series
-  contractStats: (id: string) => get<ContractStats>(`/contracts/${id}/stats`),
+  // event/caller stats + daily activity series over the trailing `range`
+  // days (30/90/365 presets, defaults to 30 server-side)
+  contractStats: (id: string, range?: number) =>
+    get<ContractStats>(`/contracts/${id}/stats${range ? `?range=${range}` : ""}`),
 
   // storage-tier write breakdown
   contractStorageTiers: (id: string) => get<StorageTierCounts>(`/contracts/${id}/storage-tiers`),

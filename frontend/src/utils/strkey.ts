@@ -22,6 +22,11 @@ export function isContractAddress(addr: string): boolean {
   return typeof addr === "string" && addr.startsWith("C") && addr.length === 56;
 }
 
+/** Returns true if the string is a recognized Stellar address of any kind (G/M/C). */
+export function isValidStellarAddress(addr: string): boolean {
+  return isAccountAddress(addr) || isMuxedAddress(addr) || isContractAddress(addr);
+}
+
 /**
  * Returns the route target for a Stellar address:
  *  - G... → /wallet/:addr

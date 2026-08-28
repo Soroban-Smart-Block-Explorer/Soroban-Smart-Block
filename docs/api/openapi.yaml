@@ -462,14 +462,28 @@ paths:
       summary: Get contract statistics
       description: >-
         Returns aggregate statistics for a contract: total events, unique
-        callers, first/last seen ledger, and a 30-day events-per-day series.
+        callers, first/last seen ledger, and a daily event-volume series
+        over the trailing `range` days (default 30, max 365).
       parameters:
         - name: id
           in: path
           required: true
           schema:
             type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
           description: Contract ID
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 30
+            example: 90
+          description: >-
+            Number of trailing days to include in the events_per_day series
+            (1-365, default 30). The UI uses 30, 90, and 365-day presets.
       responses:
         "200":
           description: Contract statistics
@@ -477,6 +491,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContractStats"
+              examples:
+                success:
+                  summary: Active contract stats
+                  value:
+                    total_events: 1204
+                    unique_callers: 87
+                    first_seen_ledger: 1000001
+                    last_seen_ledger: 1050320
+                    range: 90
+                    events_per_day: []
+        "422":
+          description: Invalid range query parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Contract not found
           content:
@@ -720,11 +750,30 @@ paths:
                     type: boolean
                     example: true
         "400":
-          description: Invalid input or ABI verification failed
+          description: >-
+            Invalid input. Body-schema failures (AJV) return `{ errors: [...] }`
+            with one entry per violation; ABI verification failures return
+            `{ error, details }`.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                oneOf:
+                  - type: object
+                    required: [errors]
+                    properties:
+                      errors:
+                        type: array
+                        items:
+                          type: object
+                          required: [path, message]
+                          properties:
+                            path:
+                              type: string
+                              example: "/functions"
+                            message:
+                              type: string
+                              example: "must have required property 'functions'"
+                  - $ref: "#/components/schemas/ErrorResponse"
         "403":
           description: CSRF token missing or mismatch (browser clients without x-api-key)
           content:
@@ -1203,43 +1252,6 @@ paths:
                   value:
                     events: []
                     pagination: { page: 1, limit: 25, total: 0 }
-        "500":
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/contracts/{id}/stats:
-    get:
-      summary: Contract event statistics
-      description: >-
-        Returns aggregate counts (total events, unique callers, first/last seen
-        ledger) and a 30-day daily activity sparkline for the contract stats
-        widget.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
-      responses:
-        "200":
-          description: Contract statistics
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ContractStats"
-              examples:
-                success:
-                  summary: Active contract stats
-                  value:
-                    total_events: 1204
-                    unique_callers: 87
-                    first_seen_ledger: 1000001
-                    last_seen_ledger: 1050320
-                    events_per_day: []
         "500":
           description: Internal server error
           content:
@@ -1896,6 +1908,48 @@ paths:
                     pagination: { page: 1, limit: 50, total: 0, total_pages: 0, has_next: false }
         "422":
           description: Invalid page or limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{contractId}/nfts/analytics:
+    get:
+      summary: Collection-level NFT analytics
+      description: >-
+        Returns mint volume over time and a unique-holder-count trend for an NFT
+        collection, derived from already-indexed NFT mint/transfer events.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+          description: Rolling window length in days (clamped server-side to 7..365)
+      responses:
+        "200":
+          description: Collection analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NftAnalyticsResponse"
+        "422":
+          description: Invalid days value
           content:
             application/json:
               schema:
@@ -3625,6 +3679,30 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/rpc/health:
+    get:
+      summary: Per-provider RPC health and performance snapshot
+      security: []
+      description: |
+        Returns health status for every configured Soroban RPC provider, sourced
+        from `rpcMultiNode.js`'s own call-outcome tracking (the same data that
+        drives failover) rather than a separate synthetic probe. Cached for 5s.
+      responses:
+        "200":
+          description: Per-provider health snapshot
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RpcProviderHealth"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/export/events:
     get:
       summary: Export events as CSV or JSON
@@ -3752,6 +3830,64 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/stats/decoder:
+    get:
+      summary: Decoder success/failure stats over the last 24h
+      description: |
+        Returns decode outcome counts backed by the `decoder_success_total` /
+        `decoder_failure_total` Prometheus counters, aggregated over a trailing
+        24-hour rolling window. Feeds the DECODE_RATE_LOW alert condition.
+      responses:
+        "200":
+          description: Decoder stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecoderStats"
+              examples:
+                success:
+                  summary: Healthy decode rate
+                  value: { total: 5000, decoded: 4980, undecoded: 20, success_rate: 0.996, window: "24h" }
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/metrics:
+    get:
+      summary: Prometheus metrics (API-prefixed alias)
+      security:
+        - MetricsApiKeyAuth: []
+        - {}
+      description: |
+        Returns the same Prometheus registry as `/metrics` — event ingestion
+        (`soroban_events_ingested_total`), decode latency
+        (`soroban_decode_duration_ms`), RPC errors (`soroban_rpc_errors_total`),
+        DB pool gauges (`soroban_db_pool_total`/`idle`/`waiting`), decoder
+        success/failure counters, `dlq_depth`, and default Node.js process
+        metrics.
+
+        Gated by an optional `METRICS_API_KEY` Bearer token: when the env var
+        is set, requests must send `Authorization: Bearer <METRICS_API_KEY>`
+        or receive 401. When unset, the endpoint is unauthenticated.
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain; version=0.0.4:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid METRICS_API_KEY bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -3766,12 +3902,22 @@ components:
     AdminBearerAuth:
       type: http
       scheme: bearer
-      description: Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
+      description: >
+        Admin bearer token supplied through the `ADMIN_SECRET` environment variable.
+        When `ADMIN_TOTP_SECRET` is also set, clients must send a current 6-digit
+        TOTP code in the `X-Admin-TOTP` header in addition to this bearer token.
+    AdminTotpHeader:
+      type: apiKey
+      in: header
+      name: X-Admin-TOTP
+      description: >
+        Optional RFC 6238 TOTP code required only when `ADMIN_TOTP_SECRET` is configured.
+        Compatible with standard authenticator apps (30s step, 6 digits, SHA-1).
 
   schemas:
     HealthStatus:
       type: object
-      required: [status, timestamp, dependencies, alerts]
+      required: [status, timestamp, dependencies, alerts, dlq]
       properties:
         status:
           type: string
@@ -3797,6 +3943,79 @@ components:
               $ref: "#/components/schemas/WorkerHealth"
         alerts:
           $ref: "#/components/schemas/AlertSummary"
+        dlq:
+          $ref: "#/components/schemas/DlqStatus"
+
+    DlqStatus:
+      type: object
+      required: [depth]
+      properties:
+        depth:
+          type: integer
+          minimum: 0
+          description: >-
+            Number of unresolved dead-letter-queue entries, refreshed every
+            60s by the indexer daemon's periodic health loop.
+          example: 0
+
+    RpcProviderHealth:
+      type: object
+      required: [url, healthy, uptime, avgLatency, errorRate, latestLedger, healthScore]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: "https://soroban-testnet.stellar.org"
+        healthy:
+          type: boolean
+          description: Whether the provider is currently eligible for traffic
+        uptime:
+          type: number
+          description: Percentage of recent calls that succeeded
+          example: 99.5
+        avgLatency:
+          type: [integer, "null"]
+          description: Average successful-call latency in milliseconds over the sliding window, or null with no samples yet
+          example: 120
+        errorRate:
+          type: number
+          description: Percentage of recent calls that failed
+          example: 0.5
+        latestLedger:
+          type: integer
+          description: Most recent ledger sequence observed from this provider
+          example: 123456
+        healthScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Composite score — uptime 50% · inverse-latency 30% · inverse-error-rate 20%
+          example: 97
+
+    DecoderStats:
+      type: object
+      required: [total, decoded, undecoded, success_rate, window]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          example: 5000
+        decoded:
+          type: integer
+          minimum: 0
+          example: 4980
+        undecoded:
+          type: integer
+          minimum: 0
+          example: 20
+        success_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+          example: 0.996
+        window:
+          type: string
+          example: "24h"
 
     HealthErrorStatus:
       type: object
@@ -3825,6 +4044,7 @@ components:
         - LOW_THROUGHPUT
         - DLQ_THRESHOLD
         - REORG_DETECTED
+        - DECODE_RATE_LOW
 
     ActiveAlert:
       type: object
@@ -4019,6 +4239,475 @@ components:
         error:
           type: string
           example: "Detailed error message"
+
+    TransactionStatus:
+      type: object
+      required: [tx_hash, status, ledger, error]
+      properties:
+        tx_hash:
+          type: string
+          example: "a3f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+        status:
+          type: string
+          enum: [pending, success, error]
+          example: "success"
+        ledger:
+          type: integer
+          nullable: true
+          description: Ledger sequence the transaction was included in, or null while pending.
+          example: 1050320
+        error:
+          type: string
+          nullable: true
+          description: Error detail when status is "error", otherwise null.
+          example: null
+
+    WasmBuildMetadata:
+      type: object
+      required: [wasm_hash]
+      properties:
+        wasm_hash:
+          type: string
+          example: "abc123"
+        contract_id:
+          type: string
+          nullable: true
+        size_bytes:
+          type: integer
+          nullable: true
+          example: 204800
+        sdk_version:
+          type: string
+          nullable: true
+          example: "21.0.0"
+        compiler:
+          type: string
+          nullable: true
+          example: "rustc 1.78.0"
+        optimizer:
+          type: string
+          nullable: true
+        repository:
+          type: string
+          nullable: true
+        commit:
+          type: string
+          nullable: true
+        producers:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+        ledger:
+          type: integer
+          nullable: true
+        tx_hash:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ContractAbi:
+      type: object
+      description: Standardised ABI JSON combining on-chain spec with registered metadata.
+      required: [id, functions]
+      properties:
+        id:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        name:
+          type: string
+        description:
+          type: string
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionSpec"
+        wasm_hash:
+          type: string
+          nullable: true
+
+    ContractSpecFull:
+      type: object
+      required: [functions, types]
+      properties:
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionSpec"
+        types:
+          type: array
+          items:
+            type: object
+            required: [kind, name]
+            properties:
+              kind:
+                type: string
+                enum: [struct, enum, union, error_enum]
+              name:
+                type: string
+              fields:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    type:
+                      type: string
+              cases:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: integer
+                    types:
+                      type: array
+                      items:
+                        type: string
+
+    UpgradeRecord:
+      type: object
+      required: [ledger, old_hash, new_hash, tx_hash, timestamp]
+      properties:
+        ledger:
+          type: integer
+        old_hash:
+          type: string
+          nullable: true
+        new_hash:
+          type: string
+          nullable: true
+        tx_hash:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+
+    CallGraph:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [id, label, type]
+            properties:
+              id:
+                type: string
+              label:
+                type: string
+              type:
+                type: string
+                example: "contract"
+        edges:
+          type: array
+          items:
+            type: object
+            required: [source, target]
+            properties:
+              source:
+                type: string
+              target:
+                type: string
+              label:
+                type: string
+                nullable: true
+              call_count:
+                type: integer
+
+    ContractTtl:
+      type: object
+      required: [contract_id, current_ledger, instance, code]
+      properties:
+        contract_id:
+          type: string
+        current_ledger:
+          type: integer
+        instance:
+          type: object
+          properties:
+            live_until_ledger:
+              type: integer
+              nullable: true
+        code:
+          type: object
+          properties:
+            live_until_ledger:
+              type: integer
+              nullable: true
+
+    SourceVerification:
+      type: object
+      required: [signer, signature, compiler_hash, wasm_hash, submitted_at]
+      properties:
+        signer:
+          type: string
+        signature:
+          type: string
+        compiler_hash:
+          type: string
+        wasm_hash:
+          type: string
+        submitted_at:
+          type: string
+          format: date-time
+
+    TokenHolder:
+      type: object
+      required: [address, balance_raw, balance]
+      properties:
+        address:
+          type: string
+        balance_raw:
+          type: string
+          description: Raw integer balance as a string (avoids precision loss for i128 values)
+        balance:
+          type: string
+          description: Human-readable balance formatted using the token's decimals
+
+    NftAnalyticsResponse:
+      type: object
+      required: [contract_id, days, totals, mint_volume, holder_count]
+      properties:
+        contract_id:
+          type: string
+        days:
+          type: integer
+        totals:
+          type: object
+          required: [minted, transfers, unique_holders]
+          properties:
+            minted:
+              type: integer
+              description: Total mint events (mint_nft / create) for the collection
+            transfers:
+              type: integer
+              description: Total NFT transfer events for the collection
+            unique_holders:
+              type: integer
+              description: Distinct recipient addresses ever seen across mint + transfer events
+        mint_volume:
+          type: array
+          description: Daily mint counts over the window, zero-filled
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
+        holder_count:
+          type: array
+          description: Cumulative distinct-holder curve over the window, zero-filled
+          items:
+            type: object
+            required: [date, count]
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
+
+    NftListResponse:
+      type: object
+      required: [contract_id, tokens, pagination]
+      properties:
+        contract_id:
+          type: string
+        tokens:
+          type: array
+          items:
+            type: object
+            required: [token_id, owner, metadata, last_transfer_ledger]
+            properties:
+              token_id:
+                type: string
+              owner:
+                type: string
+              metadata:
+                type: object
+                nullable: true
+                additionalProperties: true
+              last_transfer_ledger:
+                type: integer
+                nullable: true
+        pagination:
+          type: object
+          properties:
+            page:
+              type: integer
+            limit:
+              type: integer
+            total:
+              type: integer
+            total_pages:
+              type: integer
+            has_next:
+              type: boolean
+
+    SandboxRecord:
+      type: object
+      required: [sandboxId, templateId]
+      properties:
+        sandboxId:
+          type: string
+          example: "sandbox-abc123"
+        templateId:
+          type: string
+          example: "soroban-hello-world"
+        files:
+          type: object
+          additionalProperties:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SandboxSummary:
+      type: object
+      required: [sandboxId, templateId, updated_at]
+      properties:
+        sandboxId:
+          type: string
+        templateId:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    SandboxSimulateResult:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        returnValue:
+          type: string
+          nullable: true
+        cost:
+          type: object
+          nullable: true
+          properties:
+            cpuInsns:
+              type: string
+            memBytes:
+              type: string
+        minResourceFee:
+          type: string
+          nullable: true
+        latestLedger:
+          type: integer
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    SimulateResult:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        returnValue:
+          type: string
+          nullable: true
+        cost:
+          type: object
+          nullable: true
+          properties:
+            cpuInsns:
+              type: string
+            memBytes:
+              type: string
+        error:
+          type: string
+          nullable: true
+
+    BatchSubRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Relative API path to dispatch as a sub-request, including query string.
+          example: "/api/events?limit=2"
+        method:
+          type: string
+          default: GET
+          enum: [GET, POST]
+        body:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    BatchSubResult:
+      type: object
+      required: [status, body]
+      properties:
+        status:
+          type: integer
+          example: 200
+        body:
+          description: The dispatched sub-request's own response body.
+          additionalProperties: true
+
+    AuditLogEntry:
+      type: object
+      required: [id, timestamp, tier, ip, method, endpoint, status_code]
+      properties:
+        id:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        api_key_id:
+          type: string
+          nullable: true
+        key_name:
+          type: string
+          nullable: true
+        tier:
+          type: string
+          example: "free"
+        ip:
+          type: string
+        method:
+          type: string
+          example: "GET"
+        endpoint:
+          type: string
+          example: "/api/events"
+        status_code:
+          type: integer
+          example: 200
+        response_time_ms:
+          type: integer
+        rate_limit_remaining:
+          type: integer
+          nullable: true
+        user_agent:
+          type: string
+          nullable: true
+        request_body_hash:
+          type: string
+          nullable: true
+          description: SHA-256 hash of the request body for state-changing calls, null otherwise.
 
     WalletBalance:
       type: object
@@ -4412,7 +5101,7 @@ components:
 
     ContractStats:
       type: object
-      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day]
+      required: [total_events, unique_callers, first_seen_ledger, last_seen_ledger, events_per_day, range]
       properties:
         total_events:
           type: integer
@@ -4428,6 +5117,10 @@ components:
           type: integer
           nullable: true
           example: 1050320
+        range:
+          type: integer
+          description: The number of trailing days requested via the range query parameter
+          example: 90
         events_per_day:
           type: array
           items:

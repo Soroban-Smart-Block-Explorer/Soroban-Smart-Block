@@ -22,7 +22,7 @@ const { startApi } = await import("../../src/api.js");
 
 describe("POST /api/contracts — ABI schema validation (issue #522)", () => {
   let server;
-  const validId = "CSCHEMA522ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJK";
+  const validId = "CSCHEMA522ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKABC";
 
   beforeAll(async () => {
     await db.init();

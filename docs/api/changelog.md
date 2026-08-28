@@ -14,8 +14,10 @@ from `indexer/openapi.yaml`). Try endpoints live in the
 ### Added
 
 - This changelog and a generated OpenAPI 3.1 JSON document for tooling.
-- `GET /api/contracts/{id}/stats` — event/caller counts and a 30-day daily
-  activity series for a contract, cached for 5 minutes.
+- `GET /api/contracts/{id}/stats` — event/caller counts and a daily activity
+  series for a contract, cached for 5 minutes. Accepts an optional `range`
+  query parameter (1-365 days, default 30) for the historical 30/90/365-day
+  event-volume trend (#799).
 - `GET /api/contracts/{id}/storage-tiers` — write counts grouped by storage
   durability tier (temporary, persistent, instance).
 - `GET /api/assets/{issuer}/{code}` — classic Stellar asset metadata resolved

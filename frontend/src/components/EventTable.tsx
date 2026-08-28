@@ -1,5 +1,5 @@
 import { useMemo, useRef } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
@@ -288,6 +288,7 @@ function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: Contr
 export default function EventTable({ events }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef);
+  const navigate = useNavigate();
 
   // Batch-fetch contract metadata for the badge shown next to each contract
   // name (issue #556) — one request per unique contract on the page, cached
@@ -352,7 +353,14 @@ export default function EventTable({ events }: Props) {
         {/* Spacer div creates the full scrollable height */}
         <div style={{ height: totalHeight, position: "relative" }}>
           {visibleItems.map(({ item, style }) => (
-            <div key={item.seq} style={style}>
+            <div
+              key={item.seq}
+              style={{ ...style, cursor: 'pointer', outline: 'none' }}
+              tabIndex={0}
+              role="row"
+              aria-label={`Event #${item.seq}`}
+              onKeyDown={(e) => { if (e.key === 'Enter') navigate(`/event/${item.seq}`); }}
+            >
               <table
                 style={{
                   width: "100%",

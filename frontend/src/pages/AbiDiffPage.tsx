@@ -425,10 +425,7 @@ export default function AbiDiffPage() {
     enabled: !!contractId,
   });
 
-  // api.abiHistory may return AbiVersionEntry[] or AbiHistoryResponse shape
-  const versions: AbiVersionEntry[] = Array.isArray(historyResp)
-    ? (historyResp as AbiVersionEntry[])
-    : ((historyResp as { history?: AbiVersionEntry[] })?.history ?? []);
+  const versions: AbiVersionEntry[] = historyResp ?? [];
 
   const firstVer = versions[0]?.abi_version ?? 0;
   const lastVer = versions[versions.length - 1]?.abi_version ?? 0;

@@ -74,7 +74,7 @@ Soroban Smart Block Explorer decodes contract calls on the fly using an ABI-like
 ### 1. Clone & configure
 
 ```bash
-git clone https://github.com/your-org/Soroban-Smart-Block
+git clone https://github.com/Soroban-Smart-Block-Explorer/Soroban-Smart-Block
 cd Soroban-Smart-Block
 
 # Root .env — used by Docker Compose

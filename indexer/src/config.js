@@ -199,6 +199,14 @@ const configSchema = z.object({
 
   ALERT_INDEXER_STALL_MS: positiveInt(30000),
 
+  ALERT_MIN_DECODE_RATE: z
+    .string()
+    .optional()
+    .transform((val) => (val ? parseFloat(val) : 0.7))
+    .refine((val) => !isNaN(val) && val > 0 && val <= 1, {
+      message: "ALERT_MIN_DECODE_RATE must be a number between 0 (exclusive) and 1 (inclusive)",
+    }),
+
   PAGERDUTY_INTEGRATION_KEY: z.string().optional(),
 
   // ── Dead Letter Queue ───────────────────────────────────────────────────────
@@ -251,6 +259,9 @@ const configSchema = z.object({
   // ── API Authentication & Rate Limiting ──────────────────────────────────────
   ADMIN_SECRET: z.string().optional(),
 
+  // Optional base32 TOTP secret; when set, /api/admin/* also requires X-Admin-TOTP
+  ADMIN_TOTP_SECRET: z.string().optional(),
+
   RATE_LIMIT_CONFIG: z.string().optional(),
 
   GEO_BLOCK_LIST: commaSeparatedList(),
@@ -275,6 +286,19 @@ const configSchema = z.object({
   MAX_GRAPHQL_COMPLEXITY: positiveInt(1000).refine((val) => val >= 100 && val <= 100000, {
     message: "MAX_GRAPHQL_COMPLEXITY must be between 100 and 100000",
   }),
+}).superRefine((val, ctx) => {
+  // requireApiKey() in api.js fails OPEN (allows the request through) when
+  // API_KEY is unset, so an unset API_KEY in production silently disables
+  // auth on every write route (/api/contracts, /api/verify, /api/simulate,
+  // /api/sandbox/simulate, /api/auth-tree, source-verifications). Fail fast
+  // at startup instead of failing open at request time.
+  if (process.env.NODE_ENV === "production" && !val.API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["API_KEY"],
+      message: "API_KEY is required when NODE_ENV=production (write routes fail open without it)",
+    });
+  }
 });
 
 // ── Validate and Export Configuration ─────────────────────────────────────────

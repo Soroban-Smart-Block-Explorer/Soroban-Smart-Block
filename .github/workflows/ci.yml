@@ -220,12 +220,13 @@ jobs:
 
       - name: Install deps
         run: |
+          npm ci
           cd indexer && npm ci
           cd ../frontend && npm ci
 
       - name: Lockfile drift check
         run: |
-          if ! git diff --exit-code indexer/package-lock.json frontend/package-lock.json; then
+          if ! git diff --exit-code package-lock.json indexer/package-lock.json frontend/package-lock.json; then
             echo "::error::A package-lock.json is out of sync — run 'npm install' in the relevant directory and commit the updated lockfile."
             exit 1
           fi
@@ -235,6 +236,14 @@ jobs:
 
       - name: Validate OpenAPI spec (redocly lint)
         run: npx -y @redocly/cli lint docs/api/openapi.yaml --format=stylish
+
+      - name: Postman collection drift check
+        run: |
+          node scripts/generate-postman-collection.js /tmp/postman_collection.json
+          if ! diff -u docs/api/postman_collection.json /tmp/postman_collection.json; then
+            echo "::error::docs/api/postman_collection.json is out of sync with docs/api/openapi.yaml — run 'npm run generate:postman' and commit the result."
+            exit 1
+          fi
 
       - name: Indexer tests
         run: npm test -- --coverage --coverageReporters=lcov
@@ -275,9 +284,23 @@ jobs:
         with:
           node-version: 20
 
-      - name: Smoke test — health endpoint
+      # This job doesn't start a server itself — it's meant to smoke test a
+      # real deployed testnet indexer. Without the secret configured there's
+      # nothing to test against, so skip rather than fail CI on every push.
+      - name: Check testnet URL is configured
+        id: check
         run: |
-          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          if [ -z "${{ secrets.TESTNET_INDEXER_URL }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::TESTNET_INDEXER_URL secret not configured — skipping testnet smoke tests"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test — health endpoint
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL }}"
           echo "Testing health endpoint at $TESTNET_URL/api/health"
           
           RESPONSE=$(curl -s -w "\n%{http_code}" "$TESTNET_URL/api/health")
@@ -295,8 +318,9 @@ jobs:
           echo "✓ Health endpoint returned $HTTP_CODE"
 
       - name: Smoke test — events endpoint
+        if: steps.check.outputs.skip != 'true'
         run: |
-          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL }}"
           echo "Testing events endpoint at $TESTNET_URL/api/events"
           
           RESPONSE=$(curl -s "$TESTNET_URL/api/events?limit=1")
@@ -313,8 +337,9 @@ jobs:
           echo "✓ Events endpoint returned $EVENT_COUNT events"
 
       - name: Smoke test — response time check
+        if: steps.check.outputs.skip != 'true'
         run: |
-          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL || 'http://localhost:3001' }}"
+          TESTNET_URL="${{ secrets.TESTNET_INDEXER_URL }}"
           echo "Testing response time at $TESTNET_URL/api/health"
           
           START=$(date +%s%N)

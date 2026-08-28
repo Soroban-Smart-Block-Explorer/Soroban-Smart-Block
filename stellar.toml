@@ -7,14 +7,14 @@ NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
 
 [DOCUMENTATION]
 ORG_NAME        = "Soroban Smart Block Explorer"
-ORG_GITHUB      = "https://github.com/your-org/Soroban-Smart-Block"
+ORG_GITHUB      = "https://github.com/Soroban-Smart-Block-Explorer/Soroban-Smart-Block"
 ORG_DESCRIPTION = "Human-readable Soroban contract event explorer for Stellar."
 ORG_OFFICIAL    = false
 
 [[PRINCIPALS]]
-name  = "Project Maintainer"
-email = "maintainer@example.com"
-github = "your-github-handle"
+name  = "Sunday Abel"
+email = "abel123sunday@gmail.com"
+github = "Sundayabel222"
 
 # ── Soroban Contracts ─────────────────────────────────────────────────────────
 [[CONTRACTS]]
@@ -23,4 +23,4 @@ description = "ABI-like contract registry and on-chain decoded event store."
 # Fill in after deploying to testnet:
 contract_id = ""
 network     = "testnet"
-source_url  = "https://github.com/your-org/Soroban-Smart-Block/tree/main/contracts/explorer"
+source_url  = "https://github.com/Soroban-Smart-Block-Explorer/Soroban-Smart-Block/tree/main/contracts/explorer"

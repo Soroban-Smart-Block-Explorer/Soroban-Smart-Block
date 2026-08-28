@@ -1,13 +1,6 @@
 import { SandboxFile } from "./webcontainer";
 
-declare global {
-  interface ImportMeta {
-    readonly env: {
-      readonly VITE_API_URL?: string;
-    };
-  }
-}
-
+// ImportMetaEnv (including VITE_API_URL) is declared globally in src/env.d.ts.
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
 export interface SavedSandbox {

@@ -1,97 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-const BASE = "/api";
-
-async function get(path: string) {
-  const res = await fetch(BASE + path);
-  if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
-  return res.json();
-}
-
-const api = {
-  events: (params: { contract?: string; fn?: string; after_seq?: number; limit?: number; type?: string }) => {
-    const q = new URLSearchParams();
-    if (params.contract) q.set("contract", params.contract);
-    if (params.fn) q.set("fn", params.fn);
-    if (params.after_seq) q.set("after_seq", String(params.after_seq));
-    if (params.limit) q.set("limit", String(params.limit));
-    if (params.type) q.set("type", params.type);
-    return get<{ data: Array<{ seq: number }>; next_cursor: number | null }>(`/events?${q}`);
-  },
-  event: (seq: number) => get<{ seq: number }>(`/events/${seq}`),
-  contract: (id: string) => get<{ id: string; name: string }>(`/contracts/${id}`),
-  wallet: (address: string) => get<{ events: Array<{ seq: number }> }>(`/wallet/${address}`),
-  contractStats: (id: string) =>
-    get<{ total_events: number; unique_callers: number; first_seen_ledger: number | null; last_seen_ledger: number | null; events_per_day: Array<{ date: string; count: number }> }>(
-      `/contracts/${id}/stats`,
-    ),
-  search: (q: string, limit = 10) =>
-    get<{ contracts: unknown[]; events: unknown[]; wallets: unknown[]; suggestions: unknown[] }>(
-      `/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-    ),
-  burnAlerts: (contract: string) => get<Array<{ contractId: string }>>(`/burn-alerts?contract=${contract}`),
-  migrationStatus: (id: string) => get<{ pending: boolean }>(`/contracts/${id}/migration-status`),
-  roles: (id: string) => get<Array<{ role: string; address: string }>>(`/contracts/${id}/roles`),
-  contractTTL: (id: string) => get<{ contract_id: string; current_ledger: number }>(`/contracts/${id}/ttl`),
-  stateDiffs: (id: string, key?: string) => {
-    const q = key ? `?key=${encodeURIComponent(key)}` : "";
-    return get<Array<{ ledger: number }>>(`/contracts/${id}/state-diffs${q}`);
-  },
-  contractGraph: (limit = 500) =>
-    get<{ nodes: Array<{ id: string }>; links: Array<{ source: string; target: string }> }>(`/contract-graph?limit=${limit}`),
-  quorumFreeze: (id: string) => get<{ is_frozen: boolean }>(`/contracts/${id}/quorum-freeze`),
-  specFull: (id: string) =>
-    get<{ functions: Array<{ name: string }>; types: Array<{ name: string }> }>(`/contracts/${id}/spec-full`),
-  downloadAbi: async (id: string) => {
-    const res = await fetch(`${BASE}/contracts/${id}/abi`);
-    if (!res.ok) throw new Error(`API ${res.status}: /contracts/${id}/abi`);
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${id}.abi.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  },
-  subInvocations: (txHash: string) => get<Array<{ id: number; parent_tx_hash: string }>>(`/transactions/${txHash}/sub-invocations`),
-  circuitBreakerStatus: (id: string) =>
-    get<{ has_circuit_breaker: boolean; is_paused: boolean; status: string }>(`/contracts/${id}/circuit-breaker`),
-  rwaMetadata: (id: string) => get<{ is_rwa: boolean }>(`/contracts/${id}/rwa-metadata`),
-  wasmMetadata: (id: string) => get<{ wasm_hash: string }>(`/contracts/${id}/wasm`),
-  upgradeHistory: (id: string) => get<Array<{ ledger: number; old_hash: string | null; new_hash: string | null }>>(`/contracts/${id}/upgrades`),
-  contractCallGraph: (id: string) =>
-    get<{ nodes: Array<{ id: string }>; edges: Array<{ source: string; target: string }> }>(`/contracts/${id}/call-graph`),
-  sourceVerifications: (id: string, wasmHash?: string) => {
-    const q = wasmHash ? `?wasm_hash=${encodeURIComponent(wasmHash)}` : "";
-    return get<Array<{ signer: string }>>(`/contracts/${id}/source-verifications${q}`);
-  },
-  batchSimulate: (calls: Array<{ id: string; contractId: string; functionName: string; args: unknown[] }>, sourceAccount?: string) =>
-    fetch(`${BASE}/batch/simulate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ calls, sourceAccount }),
-    }).then((r) => r.json()),
-  batchEstimateGas: (calls: Array<{ id: string; contractId: string; functionName: string; args: unknown[] }>, sourceAccount?: string) =>
-    fetch(`${BASE}/batch/estimate-gas`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ calls, sourceAccount }),
-    }).then((r) => r.json()),
-  batchOptimize: (calls: Array<{ id: string; contractId: string; functionName: string; args: unknown[] }>, sourceAccount?: string) =>
-    fetch(`${BASE}/batch/optimize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ calls, sourceAccount }),
-    }).then((r) => r.json()),
-  batchValidate: (calls: Array<{ id: string; contractId: string; functionName: string; args: unknown[] }>, sourceAccount?: string) =>
-    fetch(`${BASE}/batch/validate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ calls, sourceAccount }),
-    }).then((r) => r.json()),
-};
+import { api } from "../src/api";
 
 describe("api utility", () => {
   beforeEach(() => {
@@ -186,6 +94,16 @@ describe("api utility", () => {
     const result = await api.contractStats("C1");
     expect(result.total_events).toBe(100);
     expect(result.unique_callers).toBe(10);
+    const [url] = (fetch as any).mock.calls[0];
+    expect(url).not.toContain("range=");
+  });
+
+  it("contractStats appends the range query param when provided (#799)", async () => {
+    mockFetch({ total_events: 100, unique_callers: 10, first_seen_ledger: 1, last_seen_ledger: 2, events_per_day: [], range: 365 });
+    const result = await api.contractStats("C1", 365);
+    expect(result.range).toBe(365);
+    const [url] = (fetch as any).mock.calls[0];
+    expect(url).toContain("range=365");
   });
 
   it("search builds encoded query string", async () => {
@@ -193,7 +111,8 @@ describe("api utility", () => {
     const result = await api.search("USDC transfer", 25);
     expect(result.contracts).toEqual([]);
     const [url] = (fetch as any).mock.calls[0];
-    expect(url).toContain("q=USDC%20transfer");
+    // URLSearchParams encodes spaces as "+", equivalent to %20 in a query string.
+    expect(url).toContain("q=USDC+transfer");
     expect(url).toContain("limit=25");
   });
 
