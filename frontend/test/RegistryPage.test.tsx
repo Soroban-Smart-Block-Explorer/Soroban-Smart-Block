@@ -14,7 +14,7 @@ describe("RegistryPage", () => {
       }),
     });
 
-    (global as any).fetch = fetchMock;
+    global.fetch = fetchMock as unknown as typeof fetch;
 
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -59,7 +59,7 @@ describe("RegistryPage", () => {
       }),
     });
 
-    (global as any).fetch = fetchMock;
+    global.fetch = fetchMock as unknown as typeof fetch;
 
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -107,7 +107,7 @@ describe("RegistryPage", () => {
       }),
     });
 
-    (global as any).fetch = fetchMock;
+    global.fetch = fetchMock as unknown as typeof fetch;
 
     const queryClient = new QueryClient({
       defaultOptions: {
