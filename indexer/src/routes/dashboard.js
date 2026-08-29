@@ -14,15 +14,19 @@
  *   POST   /api/dashboard/api-keys/:id/rotate      — rotate one of my keys
  *   DELETE /api/dashboard/api-keys/:id             — revoke one of my keys
  *   GET    /api/dashboard/api-keys/:id/usage       — requests + events-received for one key
+ *   PUT    /api/dashboard/api-keys/:id/allowed-ips — replace the CIDR allowlist for one of my keys
  */
 
 import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuthenticatedKey } from "../auth/requireAuthenticatedKey.js";
-import { createKey, rotateKey, deleteKey, getKeyUsage, getKeyById, listKeysForOwner, assertOwnsKey } from "../admin/keyManager.js";
+import { createKey, rotateKey, deleteKey, updateKey, getKeyUsage, getKeyById, listKeysForOwner, assertOwnsKey } from "../admin/keyManager.js";
 
 const router = Router();
 router.use(requireAuthenticatedKey);
+
+// IPv4, optionally with a /0-32 prefix (a bare IP is treated as /32).
+const CIDR_RE = /^(\d{1,3}\.){3}\d{1,3}(\/(3[0-2]|[12]?\d))?$/;
 
 function statusForError(message) {
   if (/not found/i.test(message)) return 404;
@@ -89,6 +93,22 @@ router.delete("/api-keys/:id", async (req, res) => {
     await assertOwnsKey(req.rateContext.keyId, req.params.id);
     await deleteKey(req.params.id);
     res.status(204).end();
+  } catch (e) {
+    res.status(statusForError(e.message)).json({ error: e.message });
+  }
+});
+
+router.put("/api-keys/:id/allowed-ips", async (req, res) => {
+  try {
+    await assertOwnsKey(req.rateContext.keyId, req.params.id);
+
+    const { allowed_ips } = req.body ?? {};
+    if (!Array.isArray(allowed_ips) || !allowed_ips.every((ip) => typeof ip === "string" && CIDR_RE.test(ip))) {
+      return res.status(400).json({ error: "allowed_ips must be an array of valid IPv4 CIDR strings" });
+    }
+
+    const record = await updateKey(req.params.id, { allowed_ips });
+    res.json(record);
   } catch (e) {
     res.status(statusForError(e.message)).json({ error: e.message });
   }
