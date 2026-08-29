@@ -270,6 +270,60 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+  # ── License Compliance ────────────────────────────────────────────────────
+  # Closes #743 — flags any new dependency with an incompatible or unusual
+  # license before merge (npm via license-checker, Rust via cargo-deny).
+  license-compliance:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    env:
+      NPM_ALLOWED_LICENSES: >-
+        MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;BlueOak-1.0.0;MIT-0;
+        Unlicense;0BSD;CC0-1.0;(MIT AND BSD-3-Clause);(MIT AND Zlib);
+        (MIT OR GPL-3.0-or-later)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install indexer deps
+        run: npm ci
+        working-directory: indexer
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: License check — indexer (npm)
+        run: |
+          npx -y license-checker@25.0.1 --production \
+            --onlyAllow "$NPM_ALLOWED_LICENSES" \
+            --excludePackages "soroban-explorer-indexer@0.1.0"
+        working-directory: indexer
+
+      - name: License check — frontend (npm)
+        run: |
+          npx -y license-checker@25.0.1 --production \
+            --onlyAllow "$NPM_ALLOWED_LICENSES" \
+            --excludePackages "soroban-explorer-frontend@0.1.0"
+        working-directory: frontend
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: License check — Rust workspace (cargo-deny)
+        run: cargo deny check licenses
+
+      - name: License check — ticket contract (cargo-deny)
+        working-directory: contracts/ticket
+        run: cargo deny --config ../../deny.toml check licenses
+
   # ── Testnet Smoke Tests ──────────────────────────────────────────────────────
   # Gated on main branch only. Tests health, events, and WebSocket connectivity
   # against the running testnet indexer.

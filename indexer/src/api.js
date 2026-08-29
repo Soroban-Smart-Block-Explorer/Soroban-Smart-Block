@@ -268,6 +268,16 @@ export function createApi({ logDestination, dbOverride } = {}) {
     res.setHeader("Permissions-Policy", "camera=(), microphone=()");
     next();
   });
+  // Report-only CSP: does not block anything (safe alongside the enforced
+  // policy above), but lets us observe what a tighter policy would break
+  // before ever enforcing it. Violations are POSTed to /api/csp-report.
+  app.use((req, res, next) => {
+    res.setHeader(
+      "Content-Security-Policy-Report-Only",
+      "default-src 'self'; script-src 'self'; style-src 'self'; report-uri /api/csp-report",
+    );
+    next();
+  });
   const isWildcard = process.env.CORS_ORIGINS === '*';
   const allowedOrigins = isWildcard
     ? []
@@ -310,6 +320,19 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // Must be registered BEFORE verifyCsrf so it is exempt from CSRF checking
   // (it is what issues the token in the first place).
   app.get("/api/csrf-token", csrfTokenHandler);
+
+  // ── CSP violation reports ───────────────────────────────────────────────────
+  // Registered before verifyCsrf so browser-sent reports (no CSRF token) aren't
+  // rejected. Logged so violations are visible in log-based observability.
+  app.post(
+    "/api/csp-report",
+    express.json({ type: ["application/csp-report", "application/json"] }),
+    (req, res) => {
+      const report = req.body?.["csp-report"] || req.body;
+      console.warn("[csp-violation]", JSON.stringify(report));
+      res.status(204).end();
+    },
+  );
 
   // ── CSRF verification — applied globally to all state-changing methods ─────
   // Exemptions (handled inside verifyCsrf):

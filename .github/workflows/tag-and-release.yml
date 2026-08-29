@@ -64,6 +64,47 @@ jobs:
       - name: Run contract tests
         run: cargo test -p soroban-explorer-contract
 
+      # ── 5b. SBOMs ────────────────────────────────────────────────────────────
+      # Closes #744 — generate a Software Bill of Materials for all three
+      # components and publish them as downloadable release artifacts.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install indexer deps
+        run: npm ci
+        working-directory: indexer
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: SBOM — indexer (npm)
+        run: npx -y @cyclonedx/cyclonedx-npm --output-file ../sbom-indexer.json
+        working-directory: indexer
+
+      - name: SBOM — frontend (npm)
+        run: npx -y @cyclonedx/cyclonedx-npm --output-file ../sbom-frontend.json
+        working-directory: frontend
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: SBOM — explorer contract (Rust)
+        run: cargo cyclonedx --format json -p soroban-explorer-contract
+
+      - name: SBOM — ticket contract (Rust)
+        working-directory: contracts/ticket
+        run: cargo cyclonedx --format json -p ticket
+
+      - name: Collect SBOMs
+        run: |
+          mkdir -p sboms
+          mv sbom-indexer.json sboms/
+          mv sbom-frontend.json sboms/
+          mv contracts/explorer/*.cdx.json sboms/sbom-explorer-contract.json
+          mv contracts/ticket/*.cdx.json sboms/sbom-ticket-contract.json
+
       # ── 6. Create and push the annotated tag ───────────────────────────────
       - name: Create annotated tag
         env:
@@ -98,6 +139,8 @@ jobs:
 
             ## Artifacts
             - `soroban_explorer_contract.wasm` — optimised WASM (≈30 K)
+            - `sbom-indexer.json`, `sbom-frontend.json` — CycloneDX SBOM (npm)
+            - `sbom-explorer-contract.json`, `sbom-ticket-contract.json` — CycloneDX SBOM (Rust)
 
             ## Build verification
             ```
@@ -106,5 +149,9 @@ jobs:
             ```
           files: |
             target/wasm32-unknown-unknown/release/soroban_explorer_contract.wasm
+            sboms/sbom-indexer.json
+            sboms/sbom-frontend.json
+            sboms/sbom-explorer-contract.json
+            sboms/sbom-ticket-contract.json
           generate_release_notes: false
           prerelease: false
