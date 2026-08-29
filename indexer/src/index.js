@@ -1,7 +1,10 @@
 import "dotenv/config";
 import { pathToFileURL } from "node:url";
 import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
+import { initSentry } from "./sentry.js";
 import config from "./config.js";
+
+initSentry();
 import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
 import { decode, getDecodeStats } from "./decoder.js";

@@ -14,6 +14,7 @@ import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { api, type ContractListItem, type ContractsListResponse, type ContractStats } from "../api";
 import { truncateAddress } from "../utils/strkey";
 import ProtocolBadge from "../components/ProtocolBadge";
+import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
 
 // Max concurrent /stats requests when batch-fetching activity for the visible page (#609).
 const MAX_CONCURRENT_STATS_FETCHES = 10;
@@ -118,6 +119,11 @@ export default function RegistryPage() {
 
   const contracts = data?.contracts ?? [];
   const pagination = data?.pagination;
+
+  // Virtualize the row list so large pages (or a future higher page size)
+  // stay smooth on scroll (#751).
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const { totalHeight, visibleItems } = useVirtualList(contracts, scrollContainerRef);
 
   // Batch-fetch event-count / last-activity stats for the visible contracts,
   // capped at MAX_CONCURRENT_STATS_FETCHES concurrent requests (#609).
@@ -226,58 +232,77 @@ export default function RegistryPage() {
               <th style={{ padding: "8px 4px" }}>Activity</th>
             </tr>
           </thead>
-          <tbody>
-            {isLoading && Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)}
-            {!isLoading && contracts.map((c: ContractListItem) => (
-              <tr key={c.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                <td style={{ padding: "10px 4px" }}>
-                  <Link to={`/contract/${c.id}`} style={{ fontWeight: 600 }}>
-                    {c.name || truncateAddress(c.id)}
-                  </Link>{" "}
-                  <ProtocolBadge type={c.protocol_type} />
-                  {c.description && (
-                    <p style={{ color: "var(--muted)", marginTop: 2, fontSize: 12 }}>
-                      {c.description}
-                    </p>
-                  )}
-                </td>
-                <td style={{ padding: "10px 4px" }}>
-                  <code style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}>
-                    {c.id}
-                  </code>
-                </td>
-                <td style={{ padding: "10px 4px" }}>
-                  <code style={{ fontSize: 12 }}>{truncateAddress(c.registered_by)}</code>
-                </td>
-                <td style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 12 }}>
-                  {new Date(c.created_at).toLocaleString()}
-                </td>
-                <td style={{ padding: "10px 4px" }}>
-                  {statsById[c.id] ? (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <div>
-                        <div style={{ fontSize: 12 }}>
-                          {statsById[c.id].total_events.toLocaleString()} events
-                        </div>
-                        <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                          {(() => {
-                            const lastActive = [...statsById[c.id].events_per_day]
-                              .reverse()
-                              .find((d) => d.count > 0);
-                            return lastActive ? `Last active ${timeAgo(lastActive.date)}` : "No activity";
-                          })()}
-                        </div>
-                      </div>
-                      <MiniSparkline data={statsById[c.id].events_per_day.slice(-7)} />
-                    </div>
-                  ) : (
-                    <span style={{ fontSize: 11, color: "var(--muted)" }}>—</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
+          {isLoading && (
+            <tbody>
+              {Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)}
+            </tbody>
+          )}
         </table>
+
+        {!isLoading && contracts.length > 0 && (
+          <div
+            ref={scrollContainerRef}
+            data-testid="virtual-scroll-container"
+            style={{ overflowY: "auto", maxHeight: contracts.length > 10 ? 600 : undefined, position: "relative" }}
+          >
+            <div style={{ height: totalHeight, position: "relative" }}>
+              {visibleItems.map(({ item: c, style }: { item: ContractListItem; style: React.CSSProperties }) => (
+                <div key={c.id} style={{ ...style, height: ROW_HEIGHT }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+                    <tbody>
+                      <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "10px 4px" }}>
+                          <Link to={`/contract/${c.id}`} style={{ fontWeight: 600 }}>
+                            {c.name || truncateAddress(c.id)}
+                          </Link>{" "}
+                          <ProtocolBadge type={c.protocol_type} />
+                          {c.description && (
+                            <p style={{ color: "var(--muted)", marginTop: 2, fontSize: 12 }}>
+                              {c.description}
+                            </p>
+                          )}
+                        </td>
+                        <td style={{ padding: "10px 4px" }}>
+                          <code style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}>
+                            {c.id}
+                          </code>
+                        </td>
+                        <td style={{ padding: "10px 4px" }}>
+                          <code style={{ fontSize: 12 }}>{truncateAddress(c.registered_by)}</code>
+                        </td>
+                        <td style={{ padding: "10px 4px", color: "var(--muted)", fontSize: 12 }}>
+                          {new Date(c.created_at).toLocaleString()}
+                        </td>
+                        <td style={{ padding: "10px 4px" }}>
+                          {statsById[c.id] ? (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <div>
+                                <div style={{ fontSize: 12 }}>
+                                  {statsById[c.id].total_events.toLocaleString()} events
+                                </div>
+                                <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                                  {(() => {
+                                    const lastActive = [...statsById[c.id].events_per_day]
+                                      .reverse()
+                                      .find((d) => d.count > 0);
+                                    return lastActive ? `Last active ${timeAgo(lastActive.date)}` : "No activity";
+                                  })()}
+                                </div>
+                              </div>
+                              <MiniSparkline data={statsById[c.id].events_per_day.slice(-7)} />
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: 11, color: "var(--muted)" }}>—</span>
+                          )}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Empty state */}
         {!isLoading && !isError && contracts.length === 0 && (
