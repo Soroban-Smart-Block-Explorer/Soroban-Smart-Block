@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "./tracing.js";
 import { pathToFileURL } from "node:url";
 import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import config from "./config.js";
@@ -33,6 +34,7 @@ import { cacheInvalidate } from "./cacheLayer.js";
 import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics, dlqDepth } from "./metrics.js";
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
 import { startAuditPartitionCron, startAuditFlush } from "./audit/auditLogger.js";
+import { startUptimeRecorder } from "./uptimeRecorder.js";
 import { updateIndexerStatus, updateWorkerStatus, updateDlqDepth } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
@@ -346,6 +348,7 @@ async function run() {
   startRetentionCleanupCron(); // nightly usage data retention cleanup
   startAuditPartitionCron();   // monthly audit log partition management
   startAuditFlush();           // drain queued audit log entries every 500ms
+  startUptimeRecorder();       // sample /health every 5 minutes for the status page
 
   // Bootstrap vault indexer: initial ratio snapshot for all registered vaults
   refreshAllVaults().catch(() => {});

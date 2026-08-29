@@ -1,6 +1,7 @@
 import pg from "pg";
 import { runMigrations } from "./migrate.js";
 import { validateAndSanitizeDecodedEvent } from "./decoderValidator.js";
+import { withSpan } from "./tracing.js";
 
 // BIGINT/BIGSERIAL (OID 20) columns — seq, ledger — are returned as JS
 // strings by default to avoid silent precision loss above 2^53. Ledger and
@@ -9,6 +10,17 @@ import { validateAndSanitizeDecodedEvent } from "./decoderValidator.js";
 pg.types.setTypeParser(20, (val) => parseInt(val, 10));
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+
+// Wrap every query in an OTel span (issue #755) so a request's trace shows
+// DB timing alongside its RPC and cache hops. Only instruments the
+// promise-based call signature (pool.query(text, params)), which is the
+// only style used in this codebase.
+const _rawQuery = pool.query.bind(pool);
+pool.query = (text, params) =>
+  withSpan("db.query", () => _rawQuery(text, params), {
+    "db.system": "postgresql",
+    "db.statement": typeof text === "string" ? text.slice(0, 200) : undefined,
+  });
 
 /** Exported for pool metric collection — do not use for queries outside db.js. */
 export { pool };
