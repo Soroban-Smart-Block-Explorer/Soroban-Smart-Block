@@ -26,6 +26,8 @@
 import crypto from 'crypto';
 import cron from 'node-cron';
 import { pool } from '../db.js';
+import { logger } from '../logger.js';
+import { fireAlert, resolveAlert, ALERT_CONDITIONS } from '../alertManager.js';
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 500;
@@ -94,14 +96,14 @@ async function _flushQueue() {
       params,
     );
   } catch (err) {
-    console.error('[auditLogger] Batch INSERT failed:', err.message);
+    logger.error('[auditLogger] Batch INSERT failed:', err.message);
     // Re-queue the batch so it is retried on the next flush cycle, up to
     // MAX_FLUSH_ATTEMPTS. Prepend so ordering is roughly preserved.
     const retryable = [];
     for (const entry of batch) {
       const attempts = (entry._flushAttempts ?? 0) + 1;
       if (attempts > MAX_FLUSH_ATTEMPTS) {
-        console.error('[auditLogger] Dropping entry after', MAX_FLUSH_ATTEMPTS, 'failed attempts:', entry.endpoint);
+        logger.error('[auditLogger] Dropping entry after', MAX_FLUSH_ATTEMPTS, 'failed attempts:', entry.endpoint);
         continue;
       }
       entry._flushAttempts = attempts;
@@ -123,7 +125,7 @@ async function _flushQueue() {
 function startAuditFlush() {
   const interval = setInterval(() => {
     _flushQueue().catch((err) => {
-      console.error('[auditLogger] Flush interval error:', err.message);
+      logger.error('[auditLogger] Flush interval error:', err.message);
     });
   }, FLUSH_INTERVAL_MS);
   interval.unref();
@@ -178,7 +180,7 @@ function auditLoggerMiddleware(req, res, next) {
       });
     } catch (err) {
       // Never let audit logging affect the request lifecycle.
-      console.error('[auditLogger] Failed to enqueue entry:', err.message);
+      logger.error('[auditLogger] Failed to enqueue entry:', err.message);
     }
   });
 
@@ -206,9 +208,14 @@ async function _ensurePartitionFor(date) {
        PARTITION OF api_audit_log
        FOR VALUES FROM ('${fromStr}') TO ('${toStr}')`,
     );
-    console.log(`[auditLogger] Ensured partition ${partitionName} (${fromStr} – ${toStr})`);
+    logger.info(`[auditLogger] Ensured partition ${partitionName} (${fromStr} – ${toStr})`);
+    resolveAlert(ALERT_CONDITIONS.AUDIT_PARTITION_FAILURE);
   } catch (err) {
-    console.error(`[auditLogger] Failed to create partition ${partitionName}:`, err.message);
+    logger.error(`[auditLogger] Failed to create partition ${partitionName}:`, err.message);
+    await fireAlert(
+      ALERT_CONDITIONS.AUDIT_PARTITION_FAILURE,
+      `Failed to create partition ${partitionName}: ${err.message}`,
+    );
   }
 }
 
@@ -256,7 +263,7 @@ function getPendingAuditPartitionWork() {
  */
 function startAuditPartitionCron() {
   ensureAuditPartitions().catch((err) =>
-    console.error('[auditLogger] Startup partition check failed:', err.message),
+    logger.error('[auditLogger] Startup partition check failed:', err.message),
   );
 
   return cron.schedule('0 1 1 * *', async () => {
@@ -281,14 +288,18 @@ function startAuditPartitionCron() {
         if (partDate && partDate < cutoff) {
           try {
             await pool.query(`DROP TABLE IF EXISTS ${partition_name}`);
-            console.log(`[auditLogger] Dropped old partition ${partition_name}`);
+            logger.info(`[auditLogger] Dropped old partition ${partition_name}`);
           } catch (dropErr) {
-            console.error(`[auditLogger] Failed to drop partition ${partition_name}:`, dropErr.message);
+            logger.error(`[auditLogger] Failed to drop partition ${partition_name}:`, dropErr.message);
+            await fireAlert(
+              ALERT_CONDITIONS.AUDIT_PARTITION_FAILURE,
+              `Failed to drop partition ${partition_name}: ${dropErr.message}`,
+            );
           }
         }
       }
     } catch (err) {
-      console.error('[auditLogger] Partition cron error:', err.message);
+      logger.error('[auditLogger] Partition cron error:', err.message);
     }
   });
 }

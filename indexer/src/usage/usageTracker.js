@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Usage Tracker
  *
@@ -68,7 +69,7 @@ async function recordRequest(keyId, endpoint, responseBytes, isRateLimited) {
     pipeline.incr(`${base}:endpoint:${endpointGroup}`);
     await pipeline.exec();
   } catch (err) {
-    console.warn('[usageTracker] Failed to record request in Redis:', err.message);
+    logger.warn('[usageTracker] Failed to record request in Redis:', err.message);
   }
 }
 
@@ -162,12 +163,12 @@ function startUsageFlushCron() {
             await redis.del(keys);
           }
         } catch (dbErr) {
-          console.error(`[usageTracker] DB upsert failed for key ${keyId}/${date}:`, dbErr.message);
+          logger.error(`[usageTracker] DB upsert failed for key ${keyId}/${date}:`, dbErr.message);
           // Leave Redis keys intact so the next run can retry.
         }
       }
     } catch (err) {
-      console.error('[usageTracker] Flush cron error:', err.message);
+      logger.error('[usageTracker] Flush cron error:', err.message);
     }
   });
 }
@@ -208,14 +209,14 @@ function startRetentionCleanupCron() {
             [tier, days],
           );
           if (rowCount > 0) {
-            console.log(`[usageTracker] Retention cleanup: deleted ${rowCount} rows for tier=${tier} (>${days}d)`);
+            logger.info(`[usageTracker] Retention cleanup: deleted ${rowCount} rows for tier=${tier} (>${days}d)`);
           }
         } catch (tierErr) {
-          console.error(`[usageTracker] Retention cleanup failed for tier ${tier}:`, tierErr.message);
+          logger.error(`[usageTracker] Retention cleanup failed for tier ${tier}:`, tierErr.message);
         }
       }
     } catch (err) {
-      console.error('[usageTracker] Retention cron error:', err.message);
+      logger.error('[usageTracker] Retention cron error:', err.message);
     }
   });
 }

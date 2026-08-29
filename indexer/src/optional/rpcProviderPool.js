@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Issue #209 — Weighted RPC Provider Pool
  *
@@ -146,7 +147,7 @@ export async function call(method, ...args) {
       if (ledger) target.latestLedger = ledger;
       if (!target.healthy) {
         target.healthy = true;
-        console.log(`[rpcPool] provider ${target.url} recovered`);
+        logger.info(`[rpcPool] provider ${target.url} recovered`);
       }
       return result;
     } catch (err) {
@@ -154,9 +155,9 @@ export async function call(method, ...args) {
       target.recordOutcome(false, latency);
       if (target.errorRate >= 0.5) {
         target.healthy = false;
-        console.warn(`[rpcPool] provider ${target.url} marked unhealthy (error_rate=${target.errorRate.toFixed(2)})`);
+        logger.warn(`[rpcPool] provider ${target.url} marked unhealthy (error_rate=${target.errorRate.toFixed(2)})`);
       }
-      console.warn(`[rpcPool] provider ${target.url} failed (${err.message}), trying next`);
+      logger.warn(`[rpcPool] provider ${target.url} failed (${err.message}), trying next`);
     }
   }
 
@@ -189,7 +190,7 @@ setInterval(async () => {
         provider.latestLedger = res.sequence;
         provider.recordOutcome(true, Date.now() - start);
         provider.healthy = true;
-        console.log(`[rpcPool] provider ${provider.url} recovered`);
+        logger.info(`[rpcPool] provider ${provider.url} recovered`);
       } catch {
         provider.recordOutcome(false, Date.now() - start);
       }

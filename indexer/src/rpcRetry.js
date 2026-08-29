@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 export async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 100 } = {}) {
   let lastError;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -8,7 +9,7 @@ export async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 100 } = {})
       const isRetryable = isRetryableError(err);
       if (!isRetryable || attempt === maxAttempts) throw err;
       const delay = Math.pow(2, attempt) * baseDelayMs;
-      console.warn(`[rpc-retry] attempt ${attempt}/${maxAttempts} failed (${err.message}), retrying in ${delay}ms`);
+      logger.warn(`[rpc-retry] attempt ${attempt}/${maxAttempts} failed (${err.message}), retrying in ${delay}ms`);
       await new Promise((r) => setTimeout(r, delay));
     }
   }

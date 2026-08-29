@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Zero-downtime migration runner.
  *
@@ -71,7 +72,7 @@ export async function runMigrations(pool) {
           "INSERT INTO schema_migrations (version) VALUES ($1)",
           [file],
         );
-        console.log(`[migrations] applied ${file} (non-transactional)`);
+        logger.info(`[migrations] applied ${file} (non-transactional)`);
         ran++;
       } catch (err) {
         throw new Error(`Migration ${file} failed: ${err.message}`);
@@ -88,7 +89,7 @@ export async function runMigrations(pool) {
         [file],
       );
       await client.query("COMMIT");
-      console.log(`[migrations] applied ${file}`);
+      logger.info(`[migrations] applied ${file}`);
       ran++;
     } catch (err) {
       await client.query("ROLLBACK");
@@ -98,7 +99,7 @@ export async function runMigrations(pool) {
     }
   }
 
-  if (ran === 0) console.log("[migrations] schema up to date");
+  if (ran === 0) logger.info("[migrations] schema up to date");
   return ran;
 }
 
@@ -112,7 +113,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     await runMigrations(pool);
     process.exitCode = 0;
   } catch (err) {
-    console.error(`[migrations] ${err.message}`);
+    logger.error(`[migrations] ${err.message}`);
     process.exitCode = 1;
   } finally {
     await pool.end();

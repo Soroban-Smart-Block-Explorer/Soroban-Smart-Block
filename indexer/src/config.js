@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Environment Configuration Validation
  *
@@ -306,10 +307,10 @@ let config;
 
 try {
   config = configSchema.parse(process.env);
-  console.log("[config] ✓ Environment variables validated successfully");
+  logger.info("[config] ✓ Environment variables validated successfully");
 } catch (error) {
-  console.error("\n❌ Configuration Validation Error\n");
-  console.error("Invalid environment variables detected. Please fix the following issues:\n");
+  logger.error("\n❌ Configuration Validation Error\n");
+  logger.error("Invalid environment variables detected. Please fix the following issues:\n");
   
   if (error instanceof z.ZodError) {
     error.issues.forEach((err, index) => {
@@ -318,21 +319,21 @@ try {
       const message = err.message;
       const receivedValue = process.env[envVar];
       
-      console.error(`${index + 1}. ${envVar}`);
-      console.error(`   Error: ${message}`);
+      logger.error(`${index + 1}. ${envVar}`);
+      logger.error(`   Error: ${message}`);
       if (receivedValue !== undefined) {
-        console.error(`   Received: "${receivedValue}"`);
+        logger.error(`   Received: "${receivedValue}"`);
       } else {
-        console.error(`   Received: (not set)`);
+        logger.error(`   Received: (not set)`);
       }
-      console.error("");
+      logger.error("");
     });
   } else {
-    console.error(error);
+    logger.error(error);
   }
   
-  console.error("Please check your .env file or environment variables and try again.\n");
-  console.error("See .env.example for reference configuration.\n");
+  logger.error("Please check your .env file or environment variables and try again.\n");
+  logger.error("See .env.example for reference configuration.\n");
   
   process.exit(1);
 }

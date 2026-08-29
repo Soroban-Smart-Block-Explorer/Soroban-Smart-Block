@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 import { scValToNative } from "@stellar/stellar-sdk";
 import { db } from "./db.js";
 import { detectSac, detectSacAsset, sacLabel } from "./sac.js";
@@ -368,7 +369,7 @@ async function decodeEvent(ev, { currentAbi = false } = {}) {
       contract_id: contractId,
       ledger: ev.ledger,
       ...roleAssignment,
-    }).catch((err) => console.error("[roleTracker] upsertRole failed:", err.message));
+    }).catch((err) => logger.error("[roleTracker] upsertRole failed:", err.message));
   }
 
   return decoded;
@@ -439,7 +440,7 @@ async function classicAssetLabel(code, issuer, assetType) {
       name: resolved.name,
       domain: resolved.domain,
       decimals: resolved.decimals,
-    }).catch((err) => console.error("[assets] upsertAsset failed:", err.message));
+    }).catch((err) => logger.error("[assets] upsertAsset failed:", err.message));
   }
   return resolved?.name ? `${code} (${resolved.name})` : code;
 }
