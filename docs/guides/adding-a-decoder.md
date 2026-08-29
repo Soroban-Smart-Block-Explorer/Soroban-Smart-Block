@@ -6,6 +6,36 @@
 
 ---
 
+## Quick Start
+
+If you learn best by doing, skip straight to the
+[complete worked example](#6-complete-worked-example--lottery-draw-decoder)
+where we build a Lottery protocol decoder from scratch — config constant,
+description function, pipeline wiring, tests, ABI file, and PR — step by step.
+
+**What you'll build:** A decoder that turns raw on-chain events like
+`ticket_purchased(GAAAAA…AAAA, 100000000, [7, 14, 21])` into human-readable
+descriptions like *"GAAAAA…AAAA bought lottery ticket (numbers: 7, 14, 21) for
+ draw #12345 at ledger #98765"*.
+
+---
+
+## Prerequisites
+
+Before you start, make sure you have:
+
+- **Node.js 20+** installed (`node --version`)
+- The project cloned and dependencies installed (`npm install` at the repo root,
+  then `cd indexer && npm install`)
+- A basic understanding of JavaScript ES modules (`import`/`export`)
+- Familiarity with Stellar addresses (56-char `G...` strings) and Soroban
+  contract events (topics + data payload)
+
+You do **not** need to understand Rust, Soroban SDK internals, or XDR encoding.
+All event values are pre-decoded to plain JS values before your decoder runs.
+
+---
+
 ## Table of Contents
 
 1. [How `decoder.js` Processes Events](#1-how-decoderjs-processes-events)
@@ -14,6 +44,7 @@
 4. [Testing Your Decoder](#4-testing-your-decoder)
 5. [Submitting the ABI](#5-submitting-the-abi)
 6. [Complete Worked Example — Lottery Draw Decoder](#6-complete-worked-example--lottery-draw-decoder)
+7. [Troubleshooting](#7-troubleshooting)
 
 ---
 
@@ -815,3 +846,25 @@ gh pr create --repo Soroban-Smart-Block-Explorer/Soroban-Smart-Block \
 | `indexer/test/decoder.blend.test.js` | Test example: Blend lending decoder |
 | `indexer/test/decoder.allowance.test.js` | Test example: SEP-41 allowance + NFT decoders |
 | `indexer/tests/decoder.test.js` | Core decoder tests (ScVal types, edge cases) |
+
+---
+
+## 7. Troubleshooting
+
+### Common issues and fixes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `SyntaxError: Unexpected token` in decoder.js | Missing `//` before a comment line | Prefix all comment text with `//` — bare English in JS is a syntax error |
+| `Cannot find module` when importing your test | Import path typo | Check that `../src/decoder.js` is correct relative to `indexer/test/` |
+| Test says `missing verb in "..."` | Your description string doesn't contain the expected word | Check your `switch` case returns the right format |
+| `undefined` appears in the description | An argument is `undefined` (topics array too short, or data missing) | Use defensive defaults: `const val = args[0] ?? "?"` |
+| Description shows raw BigInt like `5000000000n` | You forgot to use `fmtXlm()` on a stroop amount | Wrap stroop values with `fmtXlm(amount)` for display-friendly output |
+| Decoder works in tests but not in production | Config key not set in `.env` | Add `MY_CONTRACT_ID=C...` to your `.env` file |
+| `null` returned for a function you expected to handle | The `fnName` string doesn't match your `case` labels | Add `console.log(fnName)` temporarily to see what's arriving, or check the event's topic[0] |
+
+### Getting help
+
+- Open a [GitHub Discussion](https://github.com/Soroban-Smart-Block-Explorer/Soroban-Smart-Block/discussions) with the `decoder` tag
+- Ask in the **#dev** channel on the project Discord
+- Tag `@maintainers` in your PR for a review
