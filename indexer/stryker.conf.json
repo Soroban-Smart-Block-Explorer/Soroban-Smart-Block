@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/api/schema/stryker-schema.json",
+  "packageManager": "npm",
+  "mutate": [
+    "src/decoder.js",
+    "src/admin/adminAuth.js",
+    "src/rateLimit/tokenBucket.js"
+  ],
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "npm test && npm run test:decoder"
+  },
+  "reporters": ["html", "clear-text", "progress"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/mutation.html"
+  },
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": 60
+  },
+  "timeoutMS": 30000
+}
