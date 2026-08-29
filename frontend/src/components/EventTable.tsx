@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
-import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
+import { useVirtualList } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
 import AssetLogo from "./AssetLogo";
 import CopyableAddress from "./CopyableAddress";
@@ -262,7 +262,14 @@ function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: Contr
         {ev.function === "transfer" &&
           (() => {
             const t = parseTransfer(ev.description);
-            return t ? <FiatValue amount={t.amount} symbol={t.symbol} /> : null;
+            if (!t) return null;
+            const asset = parseClassicAsset(ev);
+            return (
+              <>
+                {asset && <AssetLogo code={asset.code} issuer={asset.issuer} />}
+                <FiatValue amount={t.amount} symbol={t.symbol} />
+              </>
+            );
           })()}
         {ev.function === "swap" &&
           (() => {
