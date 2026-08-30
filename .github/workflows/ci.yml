@@ -246,13 +246,7 @@ jobs:
           fi
 
       - name: Indexer tests
-        run: npm test -- --coverage --coverageReporters=lcov
-        working-directory: indexer
-        env:
-          TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
-
-      - name: Indexer concurrent-write test (#587)
-        run: node --test test/concurrentWrite.test.js
+        run: npm run test:coverage
         working-directory: indexer
         env:
           TEST_DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
