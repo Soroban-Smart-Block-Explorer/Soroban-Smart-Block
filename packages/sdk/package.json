@@ -1,0 +1,48 @@
+{
+  "name": "@soroban-explorer/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK client for the Soroban Smart Block Explorer API",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "npm run generate-types && tsc",
+    "generate-types": "openapi-typescript ../../docs/api/openapi.yaml -o ./src/api.types.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "soroban",
+    "stellar",
+    "explorer",
+    "api",
+    "sdk",
+    "typescript"
+  ],
+  "author": "Soroban Smart Block Explorer contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "openapi-typescript": "^6.7.0",
+    "typescript": "^5.2.2",
+    "vitest": "^1.0.0",
+    "@types/node": "^20.0.0"
+  },
+  "dependencies": {
+    "type-fest": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
