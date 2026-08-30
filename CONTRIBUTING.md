@@ -94,7 +94,23 @@ Reference the issue your work closes in the PR description, for example
 
 ## Quality gates (run before pushing)
 
-CI runs the following. Reproduce them locally to avoid a red build:
+A `.husky/pre-push` hook automatically runs these checks on `git push`:
+- Rust contract build + tests (wasm32 target)
+- Indexer ESLint + formatting check
+- Frontend ESLint + formatting check
+
+If any check fails, the push is blocked. You have two options:
+
+1. **Fix the issue** (recommended): Address the linting or formatting error and try pushing again.
+2. **Skip the hook** (emergency only): `git push --no-verify` bypasses the checks, but CI will still run them and fail.
+
+For formatting issues, run:
+```bash
+cd frontend && npx prettier --write .
+cd indexer && npx prettier --write .
+```
+
+CI also runs these additional checks:
 
 ```bash
 # Rust workspace (run from repo root)

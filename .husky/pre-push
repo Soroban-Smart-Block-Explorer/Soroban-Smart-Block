@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Runs before every `git push`. Keeps broken contract code off the remote.
+# Runs before every `git push`. Keeps broken code off the remote.
 # To skip in an emergency: git push --no-verify
 
 set -e
@@ -12,5 +12,11 @@ cargo test -p soroban-explorer-contract
 
 echo "» pre-push: running ticket contract tests…"
 (cd contracts/ticket && cargo test --features testutils --release)
+
+echo "» pre-push: linting frontend…"
+(cd frontend && npx eslint . && npx prettier --check .)
+
+echo "» pre-push: linting indexer…"
+(cd indexer && npx eslint . && npx prettier --check .)
 
 echo "» pre-push: all checks passed ✓"
