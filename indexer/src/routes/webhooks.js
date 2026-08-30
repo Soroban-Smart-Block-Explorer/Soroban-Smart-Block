@@ -30,7 +30,7 @@ function statusForError(message) {
 
 router.post("/", async (req, res) => {
   try {
-    const { url, contract_id, function_filter } = req.body ?? {};
+    const { url, contract_id, function_filter, wallet_address } = req.body ?? {};
 
     if (!url || typeof url !== "string") {
       return res.status(400).json({ error: "url is required and must be a string" });
@@ -40,6 +40,14 @@ router.post("/", async (req, res) => {
     }
     if (function_filter !== undefined && function_filter !== null && typeof function_filter !== "string") {
       return res.status(400).json({ error: "function_filter must be a string" });
+    }
+    if (wallet_address !== undefined && wallet_address !== null && typeof wallet_address !== "string") {
+      return res.status(400).json({ error: "wallet_address must be a string" });
+    }
+
+    // Validate wallet address format if provided (Stellar account G...)
+    if (wallet_address && !/^G[A-Z2-7]{55}$/.test(wallet_address)) {
+      return res.status(400).json({ error: "wallet_address must be a valid Stellar account address (G...)" });
     }
 
     await assertSafeWebhookUrl(url);
@@ -55,6 +63,7 @@ router.post("/", async (req, res) => {
       url,
       contract_id: contract_id || null,
       function_filter: function_filter || null,
+      wallet_address: wallet_address || null,
       secret,
     });
 

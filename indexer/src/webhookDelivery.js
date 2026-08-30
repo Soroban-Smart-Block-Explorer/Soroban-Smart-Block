@@ -219,15 +219,54 @@ export async function sendTestEvent(sub) {
   });
 }
 
+/**
+ * Extract wallet addresses from an event's raw_topics. Looks for Stellar account
+ * addresses (G...) in the topics array.
+ */
+function extractWalletsFromTopics(rawTopics) {
+  const wallets = new Set();
+  if (!Array.isArray(rawTopics)) return wallets;
+
+  for (const topic of rawTopics) {
+    if (typeof topic === "string") {
+      // Match Stellar account addresses (G followed by 55 base32 chars)
+      const matches = topic.match(/\bG[A-Z2-7]{55}\b/g);
+      if (matches) {
+        matches.forEach((addr) => wallets.add(addr));
+      }
+    }
+  }
+  return wallets;
+}
+
+/**
+ * Check if an event matches a wallet address subscription.
+ * Wallets can appear in event topics or in the description.
+ */
+function eventMatchesWallet(decoded, walletAddress) {
+  if (!walletAddress) return true; // NULL wallet filter = match all
+
+  const eventWallets = extractWalletsFromTopics(decoded.raw_topics || []);
+  if (eventWallets.has(walletAddress)) return true;
+
+  // Also check description for wallet address mentions
+  if (decoded.description && decoded.description.includes(walletAddress)) return true;
+
+  return false;
+}
+
 /** Find active subscriptions matching a newly-indexed event and deliver to each (fire-and-forget). */
 export async function deliverWebhooksForEvent(decoded) {
-  const subs = await db.getMatchingWebhookSubscriptions(decoded.contract_id, decoded.function);
+  const subs = await db.getMatchingWebhookSubscriptions(decoded.contract_id, decoded.function, decoded.raw_topics);
   await Promise.all(
-    subs.map((sub) =>
-      deliverToSubscription(sub, decoded).catch((err) =>
+    subs.map((sub) => {
+      // Filter by wallet address if subscription specifies one
+      if (!eventMatchesWallet(decoded, sub.wallet_address)) return null;
+
+      return deliverToSubscription(sub, decoded).catch((err) =>
         console.error(`[webhookDelivery] subscription ${sub.id} failed:`, err.message),
-      ),
-    ),
+      );
+    }).filter(Boolean),
   );
 }
 

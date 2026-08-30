@@ -1956,12 +1956,12 @@ export const db = {
   /** Number of consecutive delivery failures after which a subscription is auto-disabled. */
   WEBHOOK_MAX_CONSECUTIVE_FAILURES: 5,
 
-  async createWebhookSubscription({ api_key_id, url, contract_id, function_filter, secret }) {
+  async createWebhookSubscription({ api_key_id, url, contract_id, function_filter, wallet_address, secret }) {
     const { rows } = await pool.query(
-      `INSERT INTO webhook_subscriptions (api_key_id, url, contract_id, function_filter, secret)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at`,
-      [api_key_id, url, contract_id ?? null, function_filter ?? null, secret],
+      `INSERT INTO webhook_subscriptions (api_key_id, url, contract_id, function_filter, wallet_address, secret)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, api_key_id, url, contract_id, function_filter, wallet_address, active, failure_count, created_at, last_triggered_at`,
+      [api_key_id, url, contract_id ?? null, function_filter ?? null, wallet_address ?? null, secret],
     );
     return rows[0];
   },
@@ -1969,7 +1969,7 @@ export const db = {
   /** List subscriptions for one API key, excluding the signing secret. */
   async listWebhookSubscriptions(apiKeyId) {
     const { rows } = await pool.query(
-      `SELECT id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at
+      `SELECT id, api_key_id, url, contract_id, function_filter, wallet_address, active, failure_count, created_at, last_triggered_at
        FROM webhook_subscriptions
        WHERE api_key_id = $1
        ORDER BY created_at DESC`,
@@ -1988,22 +1988,31 @@ export const db = {
     const { rows } = await pool.query(
       `UPDATE webhook_subscriptions SET active = FALSE
        WHERE id = $1 AND api_key_id = $2
-       RETURNING id, api_key_id, url, contract_id, function_filter, active, failure_count, created_at, last_triggered_at`,
+       RETURNING id, api_key_id, url, contract_id, function_filter, wallet_address, active, failure_count, created_at, last_triggered_at`,
       [id, apiKeyId],
     );
     return rows[0] ?? null;
   },
 
-  /** Active subscriptions whose contract/function filters match a newly-indexed event. */
-  async getMatchingWebhookSubscriptions(contractId, functionName) {
+  /** Active subscriptions whose contract/function/wallet filters match a newly-indexed event. */
+  async getMatchingWebhookSubscriptions(contractId, functionName, rawTopics) {
     const { rows } = await pool.query(
       `SELECT * FROM webhook_subscriptions
        WHERE active = TRUE
          AND (contract_id IS NULL OR contract_id = $1)
-         AND (function_filter IS NULL OR function_filter = $2)`,
+         AND (function_filter IS NULL OR function_filter = $2)
+         AND (wallet_address IS NULL)`,
       [contractId ?? null, functionName ?? null],
     );
-    return rows;
+
+    // Also get wallet-address subscriptions (wallet matching is done in webhookDelivery.js)
+    const { rows: walletRows } = await pool.query(
+      `SELECT * FROM webhook_subscriptions
+       WHERE active = TRUE
+         AND wallet_address IS NOT NULL`,
+    );
+
+    return [...rows, ...walletRows];
   },
 
   /**
