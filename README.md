@@ -127,6 +127,16 @@ make install
 make dev
 ```
 
+### Troubleshooting Local Development
+
+If your local database becomes out of sync with migrations or you need a clean slate:
+
+```bash
+make db-reset
+```
+
+This drops, recreates, and re-migrates the `soroban_explorer` database. Requires `DATABASE_URL` to be set (from `indexer/.env` or environment).
+
 ---
 
 ## Contract API
