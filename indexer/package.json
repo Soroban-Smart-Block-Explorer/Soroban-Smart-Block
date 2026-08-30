@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "admin": "node src/admin-cli.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand test/api/*.test.js test/reorgWorker.test.js",
     "test:decoder": "node --test tests/decoder.test.js test/decoder.stellarswap.test.js test/decoder.blend.test.js",
     "test:scval": "node --test tests/scval.test.js",

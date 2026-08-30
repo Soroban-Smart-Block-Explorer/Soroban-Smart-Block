@@ -184,6 +184,26 @@ Points are tallied from merged activity and can drive a leaderboard and badges
 > The rubric is the source of truth for scoring. Automated tallying and the public
 > leaderboard are tracked separately on the project board.
 
+## Admin CLI
+
+Operators can manage API keys and run integrity checks via the admin CLI instead of hand-crafting curl commands:
+
+```bash
+# List all API keys
+npm run admin -- keys list
+
+# Create a new API key
+npm run admin -- keys create my-app --tier pro --rate-limit 5000
+
+# Rotate an existing key (revokes old key, issues new one)
+npm run admin -- keys rotate <key-id>
+
+# Run database integrity checks
+npm run admin -- integrity-check
+```
+
+Set `ADMIN_SECRET` in `indexer/.env` before using these commands.
+
 ## Reporting issues
 
 Open issues on the
