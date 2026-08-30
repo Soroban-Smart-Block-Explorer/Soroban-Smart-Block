@@ -129,6 +129,8 @@ make dev
 
 ### Troubleshooting Local Development
 
+#### Clean Database Reset
+
 If your local database becomes out of sync with migrations or you need a clean slate:
 
 ```bash
@@ -136,6 +138,17 @@ make db-reset
 ```
 
 This drops, recreates, and re-migrates the `soroban_explorer` database. Requires `DATABASE_URL` to be set (from `indexer/.env` or environment).
+
+#### Seeding with Real Testnet Data
+
+After resetting the database, you can optionally seed it with real Stellar testnet data:
+
+```bash
+make db-reset
+make db-seed
+```
+
+The seed fixture is located in `seed-data/seed-data.fixture.json`. See [`seed-data/README.md`](seed-data/README.md) for instructions on populating the fixture with genuine data from Stellar testnet.
 
 ---
 
