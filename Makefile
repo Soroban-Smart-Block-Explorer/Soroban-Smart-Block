@@ -32,6 +32,58 @@ deploy: build optimize
 	  --source default \
 	  --network testnet
 
+# ── Environment & Setup ───────────────────────────────────────────────────────
+doctor:
+	@npm run doctor
+	@echo ""
+	@echo "🔍 Running additional environment checks..."
+	@echo ""
+	@sh -c '\
+		set +e; \
+		EXIT_CODE=0; \
+		\
+		if [ ! -f .env ]; then \
+			echo "  ✗ .env file not found"; \
+			echo "    Run: cp .env.example .env"; \
+			EXIT_CODE=1; \
+		else \
+			echo "  ✓ .env file exists"; \
+		fi; \
+		\
+		if [ ! -f indexer/.env ]; then \
+			echo "  ✗ indexer/.env file not found"; \
+			echo "    Run: cp indexer/.env.example indexer/.env"; \
+			EXIT_CODE=1; \
+		else \
+			echo "  ✓ indexer/.env file exists"; \
+		fi; \
+		\
+		if command -v redis-cli > /dev/null 2>&1; then \
+			if [ -n "$$REDIS_URL" ]; then \
+				if redis-cli -u "$$REDIS_URL" ping > /dev/null 2>&1; then \
+					echo "  ✓ Redis reachable at $$REDIS_URL"; \
+				else \
+					echo "  ⚠ Redis configured but unreachable at $$REDIS_URL (optional, non-blocking)"; \
+				fi; \
+			else \
+				echo "  ℹ Redis not configured (optional)"; \
+			fi; \
+		else \
+			if [ -n "$$REDIS_URL" ]; then \
+				echo "  ⚠ REDIS_URL set but redis-cli not found (cannot verify connectivity)"; \
+			fi; \
+		fi; \
+		\
+		echo ""; \
+		if [ $$EXIT_CODE -eq 0 ]; then \
+			echo "✨ All prerequisite checks passed."; \
+		else \
+			echo "❌ Fix the issues above before running the project."; \
+		fi; \
+		\
+		exit $$EXIT_CODE; \
+	'
+
 # ── Indexer ───────────────────────────────────────────────────────────────────
 indexer-install:
 	cd indexer && npm install
