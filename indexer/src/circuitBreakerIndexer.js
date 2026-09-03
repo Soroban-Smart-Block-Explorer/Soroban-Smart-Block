@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Circuit Breaker Indexer
  * Monitors contract events for pause/unpause operations and updates circuit breaker status.
@@ -27,7 +28,7 @@ export async function processCircuitBreakerEvent(decoded, meta) {
     // Update circuit breaker status in database
     await db
       .updateCircuitBreakerStatus(decoded.contract_id, isPaused, decoded.ledger, decoded.tx_hash ?? null)
-      .catch((err) => console.error("[circuitBreakerIndexer] Failed to update status:", err.message));
+      .catch((err) => logger.error("[circuitBreakerIndexer] Failed to update status:", err.message));
   }
 }
 
@@ -59,6 +60,6 @@ export async function refreshCircuitBreakerStatus(contractId, meta) {
     // Update database
     await db.updateCircuitBreakerStatus(contractId, status.isPaused, status.lastStatusChange, status.txHash ?? null);
   } catch (err) {
-    console.error("[circuitBreakerIndexer] Failed to refresh status:", err.message);
+    logger.error("[circuitBreakerIndexer] Failed to refresh status:", err.message);
   }
 }

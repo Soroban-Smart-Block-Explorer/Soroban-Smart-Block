@@ -32,6 +32,6 @@
     }
   },
 
-  "postCreateCommand": "cp -n .env.example .env 2>/dev/null || true && npm install && cd indexer && npm ci && cd ../frontend && npm ci && cd .. && cargo fetch",
+  "postCreateCommand": "cp -n .env.example .env 2>/dev/null || true && npm ci --prefer-offline 2>/dev/null || true && cd indexer && npm ci --prefer-offline && cd ../frontend && npm ci --prefer-offline && cd .. && cargo fetch 2>/dev/null || true",
   "postStartCommand": "echo '✅ Container ready. Run: make dev'"
 }

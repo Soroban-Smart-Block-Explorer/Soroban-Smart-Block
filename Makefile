@@ -1,5 +1,6 @@
 .PHONY: build test check deploy indexer frontend clean fmt fmt-check lint \
-	doctor docker-up docker-down docker-build docker-logs docker-test docker-staging docker-prod \
+	docker-up docker-down docker-build docker-logs docker-test docker-staging docker-prod \
+	db-reset db-seed \
 	e2e e2e-setup e2e-test e2e-api e2e-chaos e2e-property e2e-playwright e2e-k6 e2e-full
 
 # ── Contract ──────────────────────────────────────────────────────────────────
@@ -99,6 +100,28 @@ frontend:
 
 frontend-build:
 	cd frontend && npm run build
+
+# ── Database ───────────────────────────────────────────────────────────────────
+db-reset:
+	@if [ -z "$$DATABASE_URL" ]; then \
+		echo "ERROR: DATABASE_URL not set. Set it in indexer/.env or export it."; \
+		exit 1; \
+	fi
+	@DB_NAME=$$(echo $$DATABASE_URL | grep -oP '(?<=/)[^/]+$$' || echo "soroban_explorer"); \
+	echo "» Dropping database $$DB_NAME…"; \
+	dropdb --if-exists $$DB_NAME 2>/dev/null || true; \
+	echo "» Creating fresh database $$DB_NAME…"; \
+	createdb $$DB_NAME; \
+	echo "» Running migrations…"; \
+	cd indexer && node src/migrate.js; \
+	echo "» Database reset complete ✓"
+
+db-seed:
+	@if [ -z "$$DATABASE_URL" ]; then \
+		echo "ERROR: DATABASE_URL not set. Set it in indexer/.env or export it."; \
+		exit 1; \
+	fi
+	cd seed-data && node seed.js
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 # Start dev stack (hot-reload via docker-compose.override.yml)

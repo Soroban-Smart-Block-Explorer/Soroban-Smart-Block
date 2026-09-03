@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * GeoIP Rate Limiter Middleware
  *
@@ -41,7 +42,7 @@ async function getMaxmindReader() {
   if (!dbPath) return null;
 
   if (!existsSync(dbPath)) {
-    console.warn('[geoIpLimiter] GeoLite2 database file not found at:', dbPath);
+    logger.warn('[geoIpLimiter] GeoLite2 database file not found at:', dbPath);
     return null;
   }
 
@@ -50,9 +51,9 @@ async function getMaxmindReader() {
     const maxmind = await import('maxmind');
     const open = maxmind.default?.open ?? maxmind.open;
     _maxmindReader = await open(dbPath);
-    console.log('[geoIpLimiter] MaxMind GeoLite2-Country database loaded from:', dbPath);
+    logger.info('[geoIpLimiter] MaxMind GeoLite2-Country database loaded from:', dbPath);
   } catch (err) {
-    console.warn('[geoIpLimiter] Failed to load MaxMind database:', err.message);
+    logger.warn('[geoIpLimiter] Failed to load MaxMind database:', err.message);
     _maxmindReader = null;
   }
 
@@ -95,7 +96,7 @@ function getRateMultipliers() {
     }
     return result;
   } catch {
-    console.warn('[geoIpLimiter] Failed to parse GEO_RATE_MULTIPLIERS — using empty map');
+    logger.warn('[geoIpLimiter] Failed to parse GEO_RATE_MULTIPLIERS — using empty map');
     return {};
   }
 }
@@ -183,7 +184,7 @@ async function geoIpRateLimiter(req, res, next) {
 
     return next();
   } catch (err) {
-    console.error('[geoIpLimiter] Unexpected error:', err.message);
+    logger.error('[geoIpLimiter] Unexpected error:', err.message);
     // Fail open — do not block requests on unexpected errors.
     return next();
   }

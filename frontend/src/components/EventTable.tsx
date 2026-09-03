@@ -1,9 +1,9 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, memo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
-import { useVirtualList, ROW_HEIGHT } from "../hooks/useVirtualList";
+import { useVirtualList } from "../hooks/useVirtualList";
 import FiatValue from "./FiatValue";
 import AssetLogo from "./AssetLogo";
 import CopyableAddress from "./CopyableAddress";
@@ -19,7 +19,7 @@ const ADDRESS_RE = /\b([GCM][A-Z2-7]{55,})\b/g;
  * replaced by clickable <Link> elements with copy-to-clipboard functionality.
  * M... muxed addresses link to the base G... wallet page via addressRoute().
  */
-function LinkedDescription({ text }: { text: string }) {
+const LinkedDescription = memo(function LinkedDescription({ text }: { text: string }) {
   const parts: React.ReactNode[] = [];
   let last = 0;
   let match: RegExpExecArray | null;
@@ -44,7 +44,7 @@ function LinkedDescription({ text }: { text: string }) {
   }
   if (last < text.length) parts.push(text.slice(last));
   return <>{parts}</>;
-}
+});
 
 /** Parse a multi-hop swap path from a description or swap_path field. */
 function parseSwapPath(description: string): string[] | null {
@@ -82,7 +82,7 @@ interface Props {
   events: DecodedEvent[];
 }
 
-function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
+const FunctionBadge = memo(function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
   if (isClassic) {
     return (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -108,10 +108,10 @@ function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
     );
   }
   return <span className="badge">{fn}</span>;
-}
+});
 
 /** Badge for SAC implicit side-effects (auto-created account or trustline). */
-function SacSideEffectBadge({ kind }: { kind: NonNullable<DecodedEvent["sac_side_effect"]> }) {
+const SacSideEffectBadge = memo(function SacSideEffectBadge({ kind }: { kind: NonNullable<DecodedEvent["sac_side_effect"]> }) {
   const isAccountCreated = kind === "account_created";
   return (
     <span
@@ -138,10 +138,10 @@ function SacSideEffectBadge({ kind }: { kind: NonNullable<DecodedEvent["sac_side
       {isAccountCreated ? "⬡ SAC Auto-Created Account Entry" : "⬡ SAC Native Trustline Open"}
     </span>
   );
-}
+});
 
 /** Inline badge for Protocol 26 TTL extension events. */
-function TTLExtensionBadge({ ext }: { ext: NonNullable<DecodedEvent["ttl_extension"]> }) {
+const TTLExtensionBadge = memo(function TTLExtensionBadge({ ext }: { ext: NonNullable<DecodedEvent["ttl_extension"]> }) {
   return (
     <span
       style={{
@@ -168,10 +168,10 @@ function TTLExtensionBadge({ ext }: { ext: NonNullable<DecodedEvent["ttl_extensi
       {ext.extend_to != null && <span style={{ color: "var(--muted)" }}>→ {ext.extend_to}</span>}
     </span>
   );
-}
+});
 
 /** Inline badge for factory deployment events. */
-function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<DecodedEvent["factory_deployment"]> }) {
+const FactoryDeploymentBadge = memo(function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<DecodedEvent["factory_deployment"]> }) {
   return (
     <span
       style={{
@@ -194,10 +194,10 @@ function FactoryDeploymentBadge({ deployment }: { deployment: NonNullable<Decode
       ⬢ FACTORY DEPLOYMENT ({deployment.contracts.length} contracts)
     </span>
   );
-}
+});
 
 /** Contract name (linked) + protocol badge — shown for events from known contracts (issue #556). */
-function ContractCell({ contractId, meta }: { contractId: string; meta?: ContractMeta }) {
+const ContractCell = memo(function ContractCell({ contractId, meta }: { contractId: string; meta?: ContractMeta }) {
   if (!contractId) return <span style={{ color: "var(--muted)" }}>—</span>;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
@@ -207,10 +207,10 @@ function ContractCell({ contractId, meta }: { contractId: string; meta?: Contrac
       <ProtocolBadge type={meta?.protocol_type} />
     </span>
   );
-}
+});
 
 /** Render a single event row (extracted so it can be reused in both modes). */
-function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: ContractMeta }) {
+const EventRow = memo(function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: ContractMeta }) {
   return (
     <>
       <td style={td}>
@@ -262,7 +262,14 @@ function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: Contr
         {ev.function === "transfer" &&
           (() => {
             const t = parseTransfer(ev.description);
-            return t ? <FiatValue amount={t.amount} symbol={t.symbol} /> : null;
+            if (!t) return null;
+            const asset = parseClassicAsset(ev);
+            return (
+              <>
+                {asset && <AssetLogo code={asset.code} issuer={asset.issuer} />}
+                <FiatValue amount={t.amount} symbol={t.symbol} />
+              </>
+            );
           })()}
         {ev.function === "swap" &&
           (() => {
@@ -283,7 +290,7 @@ function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: Contr
       </td>
     </>
   );
-}
+});
 
 export default function EventTable({ events }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);

@@ -1,0 +1,5 @@
+{
+  "__INSTRUCTIONS__": "This fixture is intentionally EMPTY. It must be populated with REAL testnet data by a maintainer with access to Stellar testnet. DO NOT generate synthetic Stellar addresses, events, or contract data — this would violate the constraint against reintroducing fake-data generation. See README.md in this directory for detailed instructions on how to populate this fixture with genuine data.",
+  "contracts": [],
+  "events": []
+}

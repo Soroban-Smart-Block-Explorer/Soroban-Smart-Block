@@ -26,6 +26,13 @@ const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
   { key: "other", label: "Other" },
 ];
 
+const KNOWN_EVENT_TYPES = new Set(EVENT_TYPE_CHIPS.map((c) => c.key).filter((k) => k !== "other"));
+
+// Events whose function doesn't match a known chip key fall into "other".
+function eventTypeOf(fn: string): string {
+  return KNOWN_EVENT_TYPES.has(fn) ? fn : "other";
+}
+
 function Chip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
   return (
     <button
@@ -199,7 +206,12 @@ export default function WalletPage() {
     document.title = `Wallet ${truncateAddress(address)} — Soroban Explorer`;
   }
 
-  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
+  // ── Event-type filter (chips), persisted in the URL like the other filters ──
+  const typesParam = searchParams.get("types") ?? "";
+  const selectedTypes = useMemo(
+    () => new Set(typesParam ? typesParam.split(",").filter(Boolean) : []),
+    [typesParam],
+  );
 
   const walletQuery = useQuery({
     queryKey: ["walletHistory", address, fromDate, toDate],
@@ -210,11 +222,14 @@ export default function WalletPage() {
   const horizonAccount = walletQuery.data?.horizon_account ?? null;
   const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
 
-  // ── Client-side function-name filter (server only filters by date) ──────
-  const filtered = useMemo(
-    () => (fnFilter ? allEvents.filter((ev) => ev.function === fnFilter) : allEvents),
-    [allEvents, fnFilter],
-  );
+  // ── Client-side function-name + event-type filters (server only filters by date) ──
+  const filtered = useMemo(() => {
+    let result = fnFilter ? allEvents.filter((ev) => ev.function === fnFilter) : allEvents;
+    if (selectedTypes.size > 0) {
+      result = result.filter((ev) => selectedTypes.has(eventTypeOf(ev.function)));
+    }
+    return result;
+  }, [allEvents, fnFilter, selectedTypes]);
 
   const availableFunctions = useMemo(
     () => Array.from(new Set(allEvents.map((ev) => ev.function))).sort(),
@@ -271,9 +286,11 @@ export default function WalletPage() {
     setSearchParams(next, { replace: true });
   }
 
-  // ── Export CSV (#528) ────────────────────────────────────────────────────
-  function exportCsv() {
-    api.exportWalletCsv(address, { fn: fnFilter || undefined });
+  function toggleType(key: string) {
+    const next = new Set(selectedTypes);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    updateParam("types", Array.from(next).join(","));
   }
 
   // ── Share / copy link ─────────────────────────────────────────────────────
@@ -436,8 +453,21 @@ export default function WalletPage() {
           </select>
         </div>
 
+        {/* Event type filter */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ color: "var(--muted)", fontSize: 13 }}>Type:</label>
+          {EVENT_TYPE_CHIPS.map((chip) => (
+            <Chip
+              key={chip.key}
+              label={chip.label}
+              active={selectedTypes.has(chip.key)}
+              onClick={() => toggleType(chip.key)}
+            />
+          ))}
+        </div>
+
         {/* Clear filters */}
-        {(fromDate || toDate || fnFilter || groupBy !== "none") && (
+        {(fromDate || toDate || fnFilter || groupBy !== "none" || selectedTypes.size > 0) && (
           <button
             type="button"
             onClick={() => setSearchParams({}, { replace: true })}

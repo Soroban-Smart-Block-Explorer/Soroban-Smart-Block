@@ -13,7 +13,18 @@ export function useEventStream(onEvent: (ev: DecodedEvent) => void) {
     ws.onmessage = (msg) => {
       try {
         const payload = JSON.parse(msg.data);
-        if (payload.type === "event") onEvent(payload.data as DecodedEvent);
+        if (payload.type === "event") {
+          // Legacy: single event (for backwards compatibility)
+          onEvent(payload.data as DecodedEvent);
+        } else if (payload.type === "events_batch") {
+          // Batched events: array of events, unpack and dispatch each
+          const events = payload.data as DecodedEvent[];
+          if (Array.isArray(events)) {
+            for (const event of events) {
+              onEvent(event);
+            }
+          }
+        }
       } catch {
         /* ignore malformed frames */
       }

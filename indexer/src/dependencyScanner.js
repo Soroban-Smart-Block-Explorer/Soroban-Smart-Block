@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /* global fetch */
 const CRATES_API_BASE = "https://crates.io/api/v1/crates";
 
@@ -93,7 +94,7 @@ async function fetchLatestCrateVersion(crateName) {
       return latest;
     }
   } catch (err) {
-    console.warn(`Unable to fetch latest version for ${crateName}:`, err?.message ?? err);
+    logger.warn(`Unable to fetch latest version for ${crateName}:`, err?.message ?? err);
   }
 
   return null;

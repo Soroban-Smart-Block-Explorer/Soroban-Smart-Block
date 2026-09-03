@@ -1,0 +1,17 @@
+# Secret-scanning configuration for gitleaks (see .github/workflows/ci.yml).
+# Extends gitleaks' default rule set (AWS keys, private keys, generic
+# high-entropy secrets, provider-specific tokens, etc.) with repo-specific
+# allowlisting to avoid false positives on lockfiles and test fixtures.
+title = "soroban-smart-block gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files that legitimately contain high-entropy, non-secret strings"
+paths = [
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)Cargo\.lock$''',
+  '''(^|/)target/''',
+  '''(^|/)node_modules/''',
+]

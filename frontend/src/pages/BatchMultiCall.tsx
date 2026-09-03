@@ -53,8 +53,8 @@ export default function BatchMultiCall() {
         });
         const data = await response.json();
         setSimResult(data);
-      } catch (e: any) {
-        setSimResult({ success: false, error: e.message });
+      } catch (e) {
+        setSimResult({ success: false, error: e instanceof Error ? e.message : String(e) });
       } finally {
         setLoading(false);
       }
@@ -74,8 +74,8 @@ export default function BatchMultiCall() {
       });
       const data = await response.json();
       setSimResult({ success: true, totalGas: data.totalGas, estimates: data.estimates });
-    } catch (e: any) {
-      setSimResult({ success: false, error: e.message });
+    } catch (e) {
+      setSimResult({ success: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setLoading(false);
     }
@@ -93,8 +93,8 @@ export default function BatchMultiCall() {
       });
       const data = await response.json();
       setSimResult({ success: data.valid, conflicts: data.conflicts, errors: data.errors });
-    } catch (e: any) {
-      setSimResult({ success: false, error: e.message });
+    } catch (e) {
+      setSimResult({ success: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setLoading(false);
     }
@@ -112,8 +112,8 @@ export default function BatchMultiCall() {
       });
       const data = await response.json();
       setSimResult({ success: true, optimizedOrder: data.optimizedOrder });
-    } catch (e: any) {
-      setSimResult({ success: false, error: e.message });
+    } catch (e) {
+      setSimResult({ success: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setLoading(false);
     }

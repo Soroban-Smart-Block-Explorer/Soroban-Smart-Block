@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 import { rpc as SorobanRpc, xdr, StrKey } from "@stellar/stellar-sdk";
 import { withRetry } from "./rpcRetry.js";
 import { parseContractSpec } from "./wasmContractSpec.js";
@@ -67,7 +68,7 @@ export async function fetchContractSpecFull(contractId) {
     if (!wasm) return null;
     return parseContractSpec(wasm);
   } catch (err) {
-    console.error("Failed to fetch full contract spec:", err.message);
+    logger.error("Failed to fetch full contract spec:", err.message);
     return null;
   }
 }
@@ -91,7 +92,7 @@ export async function fetchContractSpec(contractId) {
       args: (fn.inputs ?? []).map((i) => ({ name: i.name, type: i.type })),
     }));
   } catch (err) {
-    console.error("Failed to fetch contract spec:", err.message);
+    logger.error("Failed to fetch contract spec:", err.message);
     return null;
   }
 }

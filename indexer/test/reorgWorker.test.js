@@ -69,6 +69,87 @@ describe("reorganization detection", () => {
     expect(indexSource).not.toContain("checkInterval: ledgersSinceReorgCheck");
     expect(resetAfterCheck).toBeGreaterThan(checkCall);
   });
+
+  it("detects and rolls back overlapping reorgs at different fork points", async () => {
+    const rpc = {
+      getLedger: jest.fn(async (ledger) => {
+        // Simulate network state where ledgers 98-103 have diverged
+        if (ledger >= 98 && ledger <= 103) return { hash: "network-fork-hash" };
+        return { hash: "stable-hash" };
+      }),
+    };
+    const rollbackFork = jest.fn().mockResolvedValue();
+    const alertReorg = jest.fn().mockResolvedValue();
+    const getStoredHashes = jest.fn().mockResolvedValue([
+      { ledger: "110", hash: "stable-hash" },
+      { ledger: "105", hash: "stable-hash" },
+      { ledger: "100", hash: "stored-fork-hash-1" },
+      { ledger: "99", hash: "stored-fork-hash-2" },
+      { ledger: "98", hash: "stored-fork-hash-3" },
+    ]);
+
+    const forkLedger = await checkForReorg(rpc, {
+      getStoredHashes,
+      rollbackFork,
+      alertReorg,
+    });
+
+    // Should detect the earliest fork point across all mismatched ledgers
+    expect(forkLedger).toBe(98);
+    expect(rollbackFork).toHaveBeenCalledTimes(1);
+    expect(rollbackFork).toHaveBeenCalledWith(98);
+    expect(alertReorg).toHaveBeenCalledTimes(1);
+    expect(alertReorg).toHaveBeenCalledWith(98);
+  });
+
+  it("handles multiple reorg checks in rapid succession with consistent state", async () => {
+    const getStoredHashesCall1 = [
+      { ledger: "110", hash: "stable-hash" },
+      { ledger: "105", hash: "stored-fork-hash-1" },
+      { ledger: "100", hash: "stored-fork-hash-2" },
+    ];
+    const getStoredHashesCall2 = [
+      { ledger: "110", hash: "stable-hash" },
+      { ledger: "105", hash: "stored-fork-hash-1" },
+      // After first rollback from ledger 100, ledger 100 is removed from stored hashes
+    ];
+
+    const rollbackFork = jest.fn().mockResolvedValue();
+    const alertReorg = jest.fn().mockResolvedValue();
+    const getStoredHashes = jest
+      .fn()
+      .mockResolvedValueOnce(getStoredHashesCall1)
+      .mockResolvedValueOnce(getStoredHashesCall2);
+
+    const rpc = {
+      getLedger: jest.fn(async (ledger) => {
+        if (ledger === 105) return { hash: "network-fork-hash" };
+        if (ledger === 100) return { hash: "network-fork-hash" };
+        return { hash: "stable-hash" };
+      }),
+    };
+
+    // First reorg check detects fork at ledger 100
+    const fork1 = await checkForReorg(rpc, {
+      getStoredHashes,
+      rollbackFork,
+      alertReorg,
+    });
+    expect(fork1).toBe(100);
+    expect(rollbackFork).toHaveBeenCalledWith(100);
+
+    // Second reorg check after first rollback
+    const fork2 = await checkForReorg(rpc, {
+      getStoredHashes,
+      rollbackFork,
+      alertReorg,
+    });
+
+    // Second check detects fork at ledger 105 (since 100 was already rolled back)
+    expect(fork2).toBe(105);
+    expect(rollbackFork).toHaveBeenCalledWith(105);
+    expect(rollbackFork).toHaveBeenCalledTimes(2);
+  });
 });
 
 const describeWithDatabase = TEST_DATABASE_URL ? describe : describe.skip;

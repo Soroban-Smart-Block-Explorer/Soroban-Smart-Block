@@ -1,0 +1,53 @@
+name: Publish SDK
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: |
+          cd packages/sdk
+          npm ci
+
+      - name: Generate TypeScript types from OpenAPI
+        run: |
+          cd packages/sdk
+          npm run generate-types
+
+      - name: Build SDK package
+        run: |
+          cd packages/sdk
+          npm run build
+
+      - name: Run type checking
+        run: |
+          cd packages/sdk
+          npm run typecheck
+
+      - name: Run tests
+        run: |
+          cd packages/sdk
+          npm test
+
+      - name: Publish to npm
+        run: |
+          cd packages/sdk
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

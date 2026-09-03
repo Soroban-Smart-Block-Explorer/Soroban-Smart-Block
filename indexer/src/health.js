@@ -14,6 +14,13 @@
 import { db, pool } from "./db.js";
 import { getActiveAlerts } from "./alertManager.js";
 
+// ── Configurable thresholds ───────────────────────────────────────────────────
+// INDEXER_LAG_THRESHOLD_SECONDS: Threshold above which indexer is marked unhealthy
+// Default: 120 seconds (2 minutes). When sync lag exceeds this, indexer status
+// becomes "unhealthy", which downgrades overall health and readiness status.
+const INDEXER_LAG_THRESHOLD_SECONDS =
+  Number.parseInt(process.env.INDEXER_LAG_THRESHOLD_SECONDS ?? "120", 10) || 120;
+
 // ── Health check state ────────────────────────────────────────────────────────
 let _indexerStatus = { healthy: true, lastLedger: 0, lastSync: Date.now(), lagSeconds: 0, ledgerLag: 0 };
 let _workerStatus = { healthy: true, errors: 0, lastRun: Date.now() };
@@ -67,7 +74,7 @@ export function setRedisClient(client) {
  */
 export function updateIndexerStatus(ledger, lagSeconds, ledgerLag = 0) {
   _indexerStatus = {
-    healthy: lagSeconds < 120, // unhealthy if >2 minutes behind
+    healthy: lagSeconds < INDEXER_LAG_THRESHOLD_SECONDS, // unhealthy if lag exceeds threshold
     lastLedger: ledger,
     lastSync: Date.now(),
     lagSeconds,

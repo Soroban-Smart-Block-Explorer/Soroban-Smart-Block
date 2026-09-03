@@ -91,5 +91,30 @@ services:
       indexer:
         condition: service_started
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: soroban-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml
+    depends_on:
+      indexer:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: soroban-grafana
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:

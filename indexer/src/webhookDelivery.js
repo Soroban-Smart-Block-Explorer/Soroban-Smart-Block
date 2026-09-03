@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Webhook delivery — outbound POSTs to user-registered subscription URLs.
  *
@@ -259,14 +260,11 @@ function eventMatchesWallet(decoded, walletAddress) {
 export async function deliverWebhooksForEvent(decoded) {
   const subs = await db.getMatchingWebhookSubscriptions(decoded.contract_id, decoded.function, decoded.raw_topics);
   await Promise.all(
-    subs.map((sub) => {
-      // Filter by wallet address if subscription specifies one
-      if (!eventMatchesWallet(decoded, sub.wallet_address)) return null;
-
-      return deliverToSubscription(sub, decoded).catch((err) =>
-        console.error(`[webhookDelivery] subscription ${sub.id} failed:`, err.message),
-      );
-    }).filter(Boolean),
+    subs.map((sub) =>
+      deliverToSubscription(sub, decoded).catch((err) =>
+        logger.error(`[webhookDelivery] subscription ${sub.id} failed:`, err.message),
+      ),
+    ),
   );
 }
 
