@@ -17,12 +17,14 @@ import { logger } from "./logger.js";
 
 import crypto from "crypto";
 import config from "./config.js";
+import { withSpan } from "./tracing.js";
 
 // ── TTL configuration by cache type ──────────────────────────────────────────
 // l1/l2 in seconds; l3 is the Cache-Control header string for CDN/browser.
 const TTL_CONFIG = {
   events_list: { l1: 5, l2: 30, l3: "public, max-age=30, stale-while-revalidate=300" },
   events_single: { l1: 10, l2: 60, l3: "private, max-age=60" },
+  contract_events: { l1: 5, l2: 30, l3: "public, max-age=30, stale-while-revalidate=300" },
   contracts_list: { l1: 30, l2: 300, l3: "public, max-age=300, stale-if-error=86400" },
   contracts_single: { l1: 60, l2: 900, l3: "public, max-age=300, stale-if-error=86400" },
   contract_stats: { l1: 60, l2: 300, l3: "public, max-age=300" },
@@ -226,6 +228,10 @@ function _ratePerMin(events) {
 // ── Internal: get with full metadata ─────────────────────────────────────────
 
 async function _getWithMeta(key, cacheType) {
+  return withSpan("cache.get", () => _getWithMetaImpl(key, cacheType), { "cache.key": key, "cache.type": cacheType });
+}
+
+async function _getWithMetaImpl(key, cacheType) {
   // L1 check
   const l1Entry = _l1.get(key);
   if (l1Entry) {
@@ -289,6 +295,10 @@ export async function cacheGet(key, cacheType) {
  * @param {number} [computeMs]         time taken to compute (enables XFetch)
  */
 export async function cacheSet(key, value, ttlOrType = "default", computeMs = 0) {
+  return withSpan("cache.set", () => _cacheSetImpl(key, value, ttlOrType, computeMs), { "cache.key": key });
+}
+
+async function _cacheSetImpl(key, value, ttlOrType, computeMs) {
   let l1Ttl, l2Ttl, type;
   if (typeof ttlOrType === "number") {
     // Backwards-compat: treat as seconds for both layers

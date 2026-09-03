@@ -3,7 +3,7 @@ export async function withRetry(fn, { maxAttempts = 5, baseDelayMs = 100 } = {})
   let lastError;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await fn();
+      return await withSpan("rpc.call", fn, { "rpc.attempt": attempt });
     } catch (err) {
       lastError = err;
       const isRetryable = isRetryableError(err);
