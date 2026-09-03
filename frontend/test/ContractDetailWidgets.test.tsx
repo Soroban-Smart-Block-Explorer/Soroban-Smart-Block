@@ -16,11 +16,11 @@ function renderWithProviders(children: React.ReactNode) {
 }
 
 function mockFetchOnce(data: unknown, ok = true, status = 200) {
-  (global as any).fetch = vi.fn().mockResolvedValue({
+  global.fetch = vi.fn().mockResolvedValue({
     ok,
     status,
     json: async () => data,
-  });
+  }) as unknown as typeof fetch;
 }
 
 afterEach(() => {
@@ -31,7 +31,7 @@ describe("CircuitBreakerStatus (#539)", () => {
   it("renders nothing when the contract has no circuit breaker metadata", async () => {
     mockFetchOnce({ has_circuit_breaker: false, is_paused: false, status: "CLOSED" });
     const { container } = renderWithProviders(<CircuitBreakerStatus contractId="C1" />);
-    await waitFor(() => expect(global.fetch as any).toHaveBeenCalled());
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
     await waitFor(() => expect(container.textContent).toBe(""));
   });
 
