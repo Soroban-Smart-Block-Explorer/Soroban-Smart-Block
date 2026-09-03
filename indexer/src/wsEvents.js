@@ -74,9 +74,42 @@ export function attachWebSocketServer(httpServer) {
   wss.on("connection", (ws, _req) => {
     logger.info("[ws] Client connected");
 
-    const handler = (event) => {
+    // Event batching: accumulate events by ledger, flush on a timer
+    const BATCH_TIMEOUT_MS = 50;
+    const pendingEventsByLedger = new Map(); // ledger -> array of events
+    let flushTimeoutId = null;
+
+    const flushBatch = () => {
+      if (pendingEventsByLedger.size === 0) {
+        flushTimeoutId = null;
+        return;
+      }
+
       if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({ type: "event", data: event }));
+        // Collect all pending events in order by ledger sequence
+        const allEvents = [];
+        const ledgers = Array.from(pendingEventsByLedger.keys()).sort((a, b) => a - b);
+        for (const ledger of ledgers) {
+          allEvents.push(...pendingEventsByLedger.get(ledger));
+        }
+        ws.send(JSON.stringify({ type: "events_batch", data: allEvents }));
+      }
+      pendingEventsByLedger.clear();
+      flushTimeoutId = null;
+    };
+
+    const handler = (event) => {
+      if (ws.readyState !== ws.OPEN) return;
+
+      const ledger = event.ledger;
+      if (!pendingEventsByLedger.has(ledger)) {
+        pendingEventsByLedger.set(ledger, []);
+      }
+      pendingEventsByLedger.get(ledger).push(event);
+
+      // Schedule a flush if one isn't already pending
+      if (flushTimeoutId === null) {
+        flushTimeoutId = setTimeout(flushBatch, BATCH_TIMEOUT_MS);
       }
     };
 
@@ -97,6 +130,9 @@ export function attachWebSocketServer(httpServer) {
     bus.on("contract_link", linkHandler);
 
     ws.on("close", () => {
+      if (flushTimeoutId !== null) {
+        clearTimeout(flushTimeoutId);
+      }
       bus.off("event", handler);
       bus.off("vault_ratio", vaultHandler);
       bus.off("contract_link", linkHandler);

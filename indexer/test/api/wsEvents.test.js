@@ -78,12 +78,60 @@ describe("wsEvents — broadcast to connected clients", () => {
     await new Promise((resolve) => httpServer.close(resolve));
   });
 
-  it("both clients receive a published event within 1 second", async () => {
-    const decoded = {
+  it("events within the same ledger are batched into a single message", async () => {
+    // Publish three events for the same ledger in quick succession
+    const event1 = {
       seq: 1,
       contract_id: "CTEST123",
       function: "transfer",
       ledger: 42,
+      description: "Transfer 1",
+      raw_topics: ["transfer"],
+      raw_data: "100",
+    };
+    const event2 = {
+      seq: 2,
+      contract_id: "CTEST123",
+      function: "transfer",
+      ledger: 42,
+      description: "Transfer 2",
+      raw_topics: ["transfer"],
+      raw_data: "200",
+    };
+    const event3 = {
+      seq: 3,
+      contract_id: "CTEST123",
+      function: "transfer",
+      ledger: 42,
+      description: "Transfer 3",
+      raw_topics: ["transfer"],
+      raw_data: "300",
+    };
+
+    const msgA = await Promise.all([
+      nextMessage(clientA, 500), // Wait a bit longer for batch to accumulate
+      Promise.resolve().then(() => {
+        publish(event1);
+        publish(event2);
+        publish(event3);
+      }),
+    ]).then(([msg]) => msg);
+
+    // Message should be a batch containing all three events
+    expect(msgA.type).toBe("events_batch");
+    expect(Array.isArray(msgA.data)).toBe(true);
+    expect(msgA.data.length).toBe(3);
+    expect(msgA.data[0].seq).toBe(1);
+    expect(msgA.data[1].seq).toBe(2);
+    expect(msgA.data[2].seq).toBe(3);
+  });
+
+  it("both clients receive a published event within 1 second", async () => {
+    const decoded = {
+      seq: 100,
+      contract_id: "CTEST123",
+      function: "transfer",
+      ledger: 43,
       description: "Address GA… transferred 100 USDC to GB… on TestContract",
       raw_topics: ["transfer", "GA123", "GB456"],
       raw_data: "100",
@@ -92,25 +140,25 @@ describe("wsEvents — broadcast to connected clients", () => {
     // Register next-message listeners before publishing so neither client
     // can miss the frame.
     const [msgA, msgB] = await Promise.all([
-      nextMessage(clientA),
-      nextMessage(clientB),
+      nextMessage(clientA, 500),
+      nextMessage(clientB, 500),
       // Publish after listeners are registered (Promise.all starts them first)
       Promise.resolve().then(() => publish(decoded)),
     ]);
 
-    // Both frames must be well-formed event envelopes
-    expect(msgA.type).toBe("event");
-    expect(msgA.data.contract_id).toBe("CTEST123");
-    expect(msgA.data.description).toBe(decoded.description);
+    // Both frames must be batches (batching is enabled)
+    expect(msgA.type).toBe("events_batch");
+    expect(msgB.type).toBe("events_batch");
+    expect(msgA.data[0].contract_id).toBe("CTEST123");
+    expect(msgA.data[0].description).toBe(decoded.description);
 
-    expect(msgB.type).toBe("event");
-    expect(msgB.data.contract_id).toBe("CTEST123");
-    expect(msgB.data.description).toBe(decoded.description);
+    expect(msgB.data[0].contract_id).toBe("CTEST123");
+    expect(msgB.data[0].description).toBe(decoded.description);
   });
 
   it("both clients receive the same event payload", async () => {
     const decoded = {
-      seq: 2,
+      seq: 101,
       contract_id: "CSWAP999",
       function: "swap",
       ledger: 99,
@@ -120,21 +168,22 @@ describe("wsEvents — broadcast to connected clients", () => {
     };
 
     const [msgA, msgB] = await Promise.all([
-      nextMessage(clientA),
-      nextMessage(clientB),
+      nextMessage(clientA, 500),
+      nextMessage(clientB, 500),
       Promise.resolve().then(() => publish(decoded)),
     ]);
 
-    // Payloads must be identical
+    // Payloads must be identical (batches)
     expect(msgA).toEqual(msgB);
-    expect(msgA.data.function).toBe("swap");
-    expect(msgA.data.ledger).toBe(99);
+    expect(msgA.type).toBe("events_batch");
+    expect(msgA.data[0].function).toBe("swap");
+    expect(msgA.data[0].ledger).toBe(99);
   });
 
   it("late-connecting third client does not receive previously published events", async () => {
     // publish an event before the third client connects
     publish({
-      seq: 3,
+      seq: 102,
       contract_id: "CBEFORE",
       function: "mint",
       ledger: 1,
@@ -147,7 +196,7 @@ describe("wsEvents — broadcast to connected clients", () => {
 
     // Now publish a new event that clientC should receive
     const liveEvent = {
-      seq: 4,
+      seq: 103,
       contract_id: "CAFTER",
       function: "burn",
       ledger: 2,
@@ -157,12 +206,12 @@ describe("wsEvents — broadcast to connected clients", () => {
     };
 
     const msgC = await Promise.all([
-      nextMessage(clientC),
+      nextMessage(clientC, 500),
       Promise.resolve().then(() => publish(liveEvent)),
     ]).then(([msg]) => msg);
 
-    expect(msgC.type).toBe("event");
-    expect(msgC.data.contract_id).toBe("CAFTER");
+    expect(msgC.type).toBe("events_batch");
+    expect(msgC.data[0].contract_id).toBe("CAFTER");
 
     clientC.terminate();
   });
@@ -178,7 +227,7 @@ describe("wsEvents — broadcast to connected clients", () => {
     // still connected and will also receive this broadcast — drain it from
     // both so it doesn't leak into the next test's nextMessage() calls.
     const cleanupEvent = {
-      seq: 5,
+      seq: 104,
       contract_id: "CCLEAN",
       function: "transfer",
       ledger: 3,
@@ -187,8 +236,8 @@ describe("wsEvents — broadcast to connected clients", () => {
       raw_data: "",
     };
     await Promise.all([
-      nextMessage(clientA),
-      nextMessage(clientB),
+      nextMessage(clientA, 500),
+      nextMessage(clientB, 500),
       Promise.resolve().then(() => {
         expect(() => publish(cleanupEvent)).not.toThrow();
       }),
@@ -208,7 +257,7 @@ describe("wsEvents — broadcast to connected clients", () => {
     });
 
     const liveEvent = {
-      seq: 6,
+      seq: 105,
       contract_id: "CPOST_TX",
       function: "transfer",
       ledger: 10,
@@ -218,13 +267,65 @@ describe("wsEvents — broadcast to connected clients", () => {
     };
 
     const [msgA, msgB] = await Promise.all([
-      nextMessage(clientA),
-      nextMessage(clientB),
+      nextMessage(clientA, 500),
+      nextMessage(clientB, 500),
       Promise.resolve().then(() => publish(liveEvent)),
     ]);
 
-    expect(msgA.type).toBe("event");
-    expect(msgB.type).toBe("event");
-    expect(msgA.data.seq).toBe(6);
+    expect(msgA.type).toBe("events_batch");
+    expect(msgB.type).toBe("events_batch");
+    expect(msgA.data[0].seq).toBe(105);
+  });
+
+  it("events from different ledgers are batched together and sent in ledger order", async () => {
+    // Publish events from multiple ledgers in non-sequential order
+    const eventLedger2 = {
+      seq: 200,
+      contract_id: "CTEST",
+      function: "transfer",
+      ledger: 2,
+      description: "Ledger 2 event",
+      raw_topics: [],
+      raw_data: "",
+    };
+    const eventLedger1 = {
+      seq: 201,
+      contract_id: "CTEST",
+      function: "transfer",
+      ledger: 1,
+      description: "Ledger 1 event",
+      raw_topics: [],
+      raw_data: "",
+    };
+    const eventLedger2b = {
+      seq: 202,
+      contract_id: "CTEST",
+      function: "transfer",
+      ledger: 2,
+      description: "Another Ledger 2 event",
+      raw_topics: [],
+      raw_data: "",
+    };
+
+    const msg = await Promise.all([
+      nextMessage(clientA, 500),
+      Promise.resolve().then(() => {
+        // Publish in order: ledger 2, ledger 1, ledger 2 again
+        publish(eventLedger2);
+        publish(eventLedger1);
+        publish(eventLedger2b);
+      }),
+    ]).then(([m]) => m);
+
+    // All events should be in one batch, ordered by ledger then by sequence
+    expect(msg.type).toBe("events_batch");
+    expect(msg.data.length).toBe(3);
+    // Events should be sorted by ledger first: ledger 1, then ledger 2 (with both ledger 2 events)
+    expect(msg.data[0].ledger).toBe(1);
+    expect(msg.data[0].seq).toBe(201);
+    expect(msg.data[1].ledger).toBe(2);
+    expect(msg.data[1].seq).toBe(200);
+    expect(msg.data[2].ledger).toBe(2);
+    expect(msg.data[2].seq).toBe(202);
   });
 });
