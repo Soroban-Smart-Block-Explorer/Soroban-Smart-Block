@@ -270,6 +270,173 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+  # ── Visual Regression ─────────────────────────────────────────────────────
+  # Closes #767 — screenshot-based visual regression for the highest-traffic
+  # frontend pages. Fails the PR if a covered page renders differently than
+  # its committed baseline; Playwright attaches the diff image to the report.
+  visual-regression:
+    name: Visual Regression (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: soroban
+          POSTGRES_PASSWORD: soroban_secret
+          POSTGRES_DB: soroban_explorer
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache e2e + frontend + indexer node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            e2e/node_modules
+            frontend/node_modules
+            indexer/node_modules
+          key: visual-regression-20-${{ hashFiles('e2e/package-lock.json', 'frontend/package-lock.json', 'indexer/package-lock.json') }}
+          restore-keys: visual-regression-20-
+
+      - name: Install dependencies
+        run: |
+          cd e2e && npm ci
+          cd ../frontend && npm ci
+          cd ../indexer && npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: e2e
+
+      - name: Run visual regression tests
+        run: npm run test:visual-regression
+        working-directory: e2e
+        env:
+          DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
+          NODE_ENV: test
+
+      - name: Upload visual diff report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression-report
+          path: |
+            e2e/test-results/
+            e2e/playwright-report/
+          retention-days: 14
+
+  # ── k6 PR Baseline Load Gate ─────────────────────────────────────────────
+  # Closes #768 — a lightweight k6 load check on PRs touching the indexer API
+  # or hot-path DB queries, so latency regressions are caught before merge.
+  detect-hotpath-changes:
+    name: Detect hot-path API changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      hotpath: ${{ steps.filter.outputs.hotpath }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            hotpath:
+              - 'indexer/src/api.js'
+              - 'indexer/src/db.js'
+              - 'indexer/src/queries/**'
+
+  k6-pr-baseline:
+    name: k6 PR Baseline Load Test
+    runs-on: ubuntu-latest
+    needs: detect-hotpath-changes
+    if: needs.detect-hotpath-changes.outputs.hotpath == 'true'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: soroban
+          POSTGRES_PASSWORD: soroban_secret
+          POSTGRES_DB: soroban_explorer
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install k6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Start indexer
+        run: |
+          npm install
+          npm start > indexer.log 2>&1 &
+          sleep 10
+          curl -f http://localhost:3001/health
+        working-directory: indexer
+        env:
+          DATABASE_URL: postgres://soroban:soroban_secret@localhost:5432/soroban_explorer
+          NODE_ENV: test
+
+      - name: Run lightweight k6 baseline load test
+        run: k6 run test/load/pr-baseline.js
+        working-directory: e2e
+        env:
+          INDEXER_URL: http://localhost:3001
+
+  # ── Mutation Testing ──────────────────────────────────────────────────────
+  # Closes #769 — Stryker mutation testing on the decoder, admin auth, and
+  # rate-limiting modules, to catch tests that pass regardless of whether the
+  # underlying logic is correct. Runs on the weekly schedule (mutation runs
+  # are too slow for every PR); the mutation-kill-score target (60%, see
+  # indexer/stryker.conf.json) fails the job when not met, and the HTML
+  # report is uploaded as an artifact.
+  mutation-testing:
+    name: Mutation Testing (Stryker)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install indexer deps
+        run: npm ci
+        working-directory: indexer
+
+      - name: Run mutation testing
+        run: npm run test:mutation
+        working-directory: indexer
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: indexer/reports/mutation/
+          retention-days: 30
+
   # ── Testnet Smoke Tests ──────────────────────────────────────────────────────
   # Gated on main branch only. Tests health, events, and WebSocket connectivity
   # against the running testnet indexer.

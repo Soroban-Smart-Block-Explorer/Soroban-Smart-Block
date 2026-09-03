@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Stripe Webhook Handler
  *
@@ -42,7 +43,7 @@ stripeWebhookRouter.post(
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
     if (!webhookSecret) {
-      console.error('[stripeWebhook] STRIPE_WEBHOOK_SECRET is not set');
+      logger.error('[stripeWebhook] STRIPE_WEBHOOK_SECRET is not set');
       return res.status(500).json({ error: 'Webhook secret not configured' });
     }
 
@@ -56,7 +57,7 @@ stripeWebhookRouter.post(
     try {
       event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
     } catch (err) {
-      console.warn('[stripeWebhook] Signature verification failed:', err.message);
+      logger.warn('[stripeWebhook] Signature verification failed:', err.message);
       return res.status(400).json({ error: 'Invalid signature' });
     }
 
@@ -64,7 +65,7 @@ stripeWebhookRouter.post(
       await _handleEvent(event);
       return res.status(200).json({ received: true });
     } catch (err) {
-      console.error('[stripeWebhook] Event handling error:', err.message);
+      logger.error('[stripeWebhook] Event handling error:', err.message);
       // Return 200 to prevent Stripe retrying an event we cannot process.
       // The error is logged for investigation.
       return res.status(200).json({ received: true, warning: err.message });
@@ -91,7 +92,7 @@ async function _handleEvent(event) {
 
     default:
       // Silently ignore unhandled event types.
-      console.log(`[stripeWebhook] Unhandled event type: ${event.type}`);
+      logger.info(`[stripeWebhook] Unhandled event type: ${event.type}`);
   }
 }
 
@@ -112,7 +113,7 @@ async function _handleSubscriptionUpdated(subscription) {
   const apiKeyId = subscription.metadata?.api_key_id;
 
   if (!apiKeyId) {
-    console.warn('[stripeWebhook] subscription.updated: no api_key_id in metadata, skipping');
+    logger.warn('[stripeWebhook] subscription.updated: no api_key_id in metadata, skipping');
     return;
   }
 
@@ -120,7 +121,7 @@ async function _handleSubscriptionUpdated(subscription) {
   const tier = _extractTierFromSubscription(subscription);
 
   if (!tier) {
-    console.warn('[stripeWebhook] subscription.updated: could not determine tier from product metadata');
+    logger.warn('[stripeWebhook] subscription.updated: could not determine tier from product metadata');
     return;
   }
 
@@ -129,7 +130,7 @@ async function _handleSubscriptionUpdated(subscription) {
     [tier, apiKeyId],
   );
 
-  console.log(`[stripeWebhook] Updated api_keys.tier → ${tier} for key ${apiKeyId}`);
+  logger.info(`[stripeWebhook] Updated api_keys.tier → ${tier} for key ${apiKeyId}`);
 }
 
 // ── customer.subscription.deleted ─────────────────────────────────────────────
@@ -143,7 +144,7 @@ async function _handleSubscriptionDeleted(subscription) {
   const apiKeyId = subscription.metadata?.api_key_id;
 
   if (!apiKeyId) {
-    console.warn('[stripeWebhook] subscription.deleted: no api_key_id in metadata, skipping');
+    logger.warn('[stripeWebhook] subscription.deleted: no api_key_id in metadata, skipping');
     return;
   }
 
@@ -152,7 +153,7 @@ async function _handleSubscriptionDeleted(subscription) {
     [apiKeyId],
   );
 
-  console.log(`[stripeWebhook] Downgraded api_keys.tier → free for key ${apiKeyId}`);
+  logger.info(`[stripeWebhook] Downgraded api_keys.tier → free for key ${apiKeyId}`);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

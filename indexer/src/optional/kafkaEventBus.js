@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Issue #209 — Kafka-Compatible Event Bus (Redis-backed)
  *
@@ -22,7 +23,7 @@ const DEDUP_TTL_S = config.KAFKA_BUS_DEDUP_TTL_S;
 const EVENT_TTL_S = config.KAFKA_BUS_EVENT_TTL_S;
 
 if (process.env.KAFKA_BROKERS) {
-  console.log(
+  logger.info(
     "[kafkaEventBus] KAFKA_BROKERS detected — configure kafkajs consumer to replace Redis transport for production throughput",
   );
 }
@@ -42,7 +43,7 @@ const _subClients = new Map();
 async function getPubClient() {
   if (!_pubClient) {
     _pubClient = createClient({ url: REDIS_URL });
-    _pubClient.on("error", (err) => console.error("[kafkaEventBus] pub Redis error:", err.message));
+    _pubClient.on("error", (err) => logger.error("[kafkaEventBus] pub Redis error:", err.message));
     await _pubClient.connect();
   }
   return _pubClient;
@@ -51,7 +52,7 @@ async function getPubClient() {
 async function getSubClient(key) {
   if (!_subClients.has(key)) {
     const client = createClient({ url: REDIS_URL });
-    client.on("error", (err) => console.error(`[kafkaEventBus] sub Redis error (${key}):`, err.message));
+    client.on("error", (err) => logger.error(`[kafkaEventBus] sub Redis error (${key}):`, err.message));
     await client.connect();
     _subClients.set(key, client);
   }
@@ -115,7 +116,7 @@ export async function createIdempotentConsumer(topic, groupId, handler) {
       await handler(payload, messageId);
     } catch (err) {
       await pubClient.sRem(dedupKey, messageId).catch(() => {});
-      console.error(`[kafkaEventBus] handler error (${groupId}/${messageId}): ${err.message}`);
+      logger.error(`[kafkaEventBus] handler error (${groupId}/${messageId}): ${err.message}`);
     }
   });
 
@@ -157,7 +158,7 @@ export async function replayStream(topic, groupId, handler) {
       await handler(payload, messageId);
     } catch (err) {
       await client.sRem(dedupKey, messageId).catch(() => {});
-      console.error(`[kafkaEventBus] replay error (${groupId}/${messageId}): ${err.message}`);
+      logger.error(`[kafkaEventBus] replay error (${groupId}/${messageId}): ${err.message}`);
     }
   }
 }

@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 import express from "express";
 import http from "http";
 import path from "path";
@@ -46,6 +47,7 @@ import {
 } from "./cacheLayer.js";
 import { recordAccess, schedulePrefetch } from "./prefetchEngine.js";
 import { attachGraphQL } from "./graphql.js";
+import { requestContext } from "./logger.js";
 import { runAllChecks } from "./doctor-lib.js";
 import { registry } from "./metrics.js";
 import pg from "pg";
@@ -119,7 +121,10 @@ function requestIdMiddleware(req, _res, next) {
   // Preserve incoming traceparent header if present
   const tp = req.headers["traceparent"];
   if (tp) _res.setHeader && _res.setHeader("traceparent", tp);
-  next();
+  // Run the rest of the request inside an AsyncLocalStorage context so every
+  // logger.* call made while handling it — including deep in other modules —
+  // automatically carries this request's ID (#756).
+  requestContext.run({ requestId: req.id }, next);
 }
 
 // Root span per request (issue #755) — child spans created by db.query,
@@ -146,10 +151,10 @@ function createHttpLogger(logDestination) {
         if (logDestination && typeof logDestination.write === "function") {
           logDestination.write(line);
         } else {
-          console.log(line.trim());
+          logger.info(line.trim());
         }
       } catch (e) {
-        console.log(line.trim());
+        logger.info(line.trim());
       }
     });
     next();
@@ -345,7 +350,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // the 500ms flush loop's first tick, even when createApi() is invoked
   // directly (tests) rather than via index.js's startAuditPartitionCron().
   ensureAuditPartitions().catch((err) =>
-    console.error("[api] Startup audit partition check failed:", err.message),
+    logger.error("[api] Startup audit partition check failed:", err.message),
   );
   app.use(auditLoggerMiddleware);
   app.use(apiKeyAuthenticator);
@@ -961,7 +966,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
           });
         }
 
-        console.log(`ABI verified for contract ${id}:`, {
+        logger.info(`ABI verified for contract ${id}:`, {
           functionsVerified: functions.length,
           missing: verification.missingFunctions.length,
           mismatches: verification.argMismatch.length,
@@ -1295,7 +1300,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // GET /api/assets?after=&limit=  — paginated list of all assets seen in
   // indexed events, cursor-based (keyset) navigation via `next_cursor`.
-  app.get("/api/assets", async (req, res) => {
+  app.get(
+    "/api/assets",
+    makeCache("default", (req) => `assets:list:${req.query.after ?? 0}:${req.query.limit ?? 25}`),
+    async (req, res) => {
     try {
       if (req.query.limit !== undefined) {
         const parsedLimit = Number(req.query.limit);
@@ -1697,7 +1705,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
         verified: rows[0].verified
       });
     } catch (e) {
-      console.error('[POST /api/keys] Error:', e);
+      logger.error('[POST /api/keys] Error:', e);
       if (e.message.includes('duplicate key') || e.message.includes('unique constraint')) {
         return res.status(409).json({ error: 'An API key for this email already exists and is pending verification.' });
       }
@@ -1776,7 +1784,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
         tier: keyRecord.tier
       });
     } catch (e) {
-      console.error('[GET /api/keys/verify] Error:', e);
+      logger.error('[GET /api/keys/verify] Error:', e);
       res.status(500).json({ error: e.message });
     }
   });
@@ -2362,7 +2370,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   const server = http.createServer(app);
   if (!runningUnderTest) attachWebSocketServer(server);
 
-  server.on("close", () => console.log("[api] server closed"));
+  server.on("close", () => logger.info("[api] server closed"));
 
   // During test runs we avoid calling `listen()` to prevent port conflicts
   // and background handles that outlive the Jest environment. Tests will
@@ -2371,7 +2379,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     return app;
   }
 
-  server.listen(PORT, () => console.log(`API listening on :${PORT}`));
+  server.listen(PORT, () => logger.info(`API listening on :${PORT}`));
   return server;
 }
 

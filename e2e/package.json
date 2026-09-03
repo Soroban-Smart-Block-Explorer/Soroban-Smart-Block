@@ -12,6 +12,7 @@
     "test:k6": "k6 run test/load/baseline.js && k6 run test/load/spike.js && k6 run test/load/soak.js",
     "test:synthetic": "node test/synthetic/producer.js",
     "test:visual": "percy exec -- playwright test test/visual/percy.spec.ts",
+    "test:visual-regression": "playwright test test/visual/visual-regression.spec.ts --project=chromium",
     "test:e2e": "npm run test:api && npm run test:chaos && npm run test:property && npm run test:playwright",
     "test:full": "npm run test:e2e && npm run test:synthetic && npm run test:visual && npm run test:k6"
   },

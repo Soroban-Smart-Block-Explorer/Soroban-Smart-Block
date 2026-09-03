@@ -9,15 +9,11 @@
     "test:decoder": "node --test tests/decoder.test.js test/decoder.stellarswap.test.js test/decoder.blend.test.js",
     "test:scval": "node --test tests/scval.test.js",
     "test:classic": "node --test tests/decoderClassic.test.js tests/horizonClient.test.js",
-    "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/decoder.test.js tests/scval.test.js tests/decoderClassic.test.js tests/horizonClient.test.js"
+    "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/decoder.test.js tests/scval.test.js tests/decoderClassic.test.js tests/horizonClient.test.js",
+    "test:mutation": "stryker run"
   },
   "dependencies": {
-    "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
-    "@opentelemetry/resources": "^2.10.0",
-    "@opentelemetry/sdk-trace-base": "^2.10.0",
-    "@opentelemetry/sdk-trace-node": "^2.10.0",
-    "@opentelemetry/semantic-conventions": "^1.43.0",
+    "@sentry/node": "^10.72.0",
     "@stellar/stellar-sdk": "^14.6.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
@@ -42,6 +38,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@stryker-mutator/core": "^8.7.1",
+    "@stryker-mutator/command-runner": "^8.7.1",
     "@types/jest": "^29.5.0",
     "ajv": "^8.16.0",
     "ajv-formats": "^2.1.1",

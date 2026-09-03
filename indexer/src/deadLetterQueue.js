@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Issue #209 — Dead Letter Queue (DLQ)
  *
@@ -75,7 +76,7 @@ export async function enqueue(rawEvent, error) {
   );
 
   const id = rows[0].id;
-  console.warn(`[dlq] enqueued entry id=${id} transient=${transient} error="${error.message}"`);
+  logger.warn(`[dlq] enqueued entry id=${id} transient=${transient} error="${error.message}"`);
   return id;
 }
 
@@ -106,7 +107,7 @@ export async function processRetries(handler) {
       await handler(entry.raw_event);
       await db.query(`UPDATE dead_letter_queue SET resolved = TRUE, updated_at = NOW() WHERE id = $1`, [entry.id]);
       resolved++;
-      console.log(`[dlq] entry id=${entry.id} resolved on retry ${entry.retry_count + 1}`);
+      logger.info(`[dlq] entry id=${entry.id} resolved on retry ${entry.retry_count + 1}`);
     } catch (err) {
       const newCount = entry.retry_count + 1;
       const exhausted = newCount >= entry.max_retries;
@@ -118,7 +119,7 @@ export async function processRetries(handler) {
         [newCount, nextRetry, err.message, entry.id],
       );
       failed++;
-      console.warn(
+      logger.warn(
         `[dlq] entry id=${entry.id} retry ${newCount} failed: ${err.message}${exhausted ? " (retries exhausted)" : ""}`,
       );
     }
@@ -168,7 +169,7 @@ export async function getDlqDepth() {
  */
 export async function resolve(id) {
   await db.query(`UPDATE dead_letter_queue SET resolved = TRUE, updated_at = NOW() WHERE id = $1`, [id]);
-  console.log(`[dlq] entry id=${id} manually resolved`);
+  logger.info(`[dlq] entry id=${id} manually resolved`);
 }
 
 /**
@@ -185,7 +186,7 @@ export async function replay(id, handler) {
   try {
     await handler(entry.raw_event);
     await db.query(`UPDATE dead_letter_queue SET resolved = TRUE, updated_at = NOW() WHERE id = $1`, [id]);
-    console.log(`[dlq] entry id=${id} replayed successfully`);
+    logger.info(`[dlq] entry id=${id} replayed successfully`);
   } catch (err) {
     await db.query(
       `UPDATE dead_letter_queue

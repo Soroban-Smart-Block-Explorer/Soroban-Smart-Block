@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Cache Warming — pre-populate Redis with hot data on deploy.
  *
@@ -12,7 +13,7 @@ import { cacheSet } from "./cacheLayer.js";
 import { db } from "./db.js";
 
 export async function warmCache() {
-  console.log("[cache:warm] starting...");
+  logger.info("[cache:warm] starting...");
   const results = { warmed: 0, failed: 0 };
 
   // Warm the first 3 keyset pages of the events list (cursor chain, #490).
@@ -27,7 +28,7 @@ export async function warmCache() {
       if (result.next_cursor === null) break;
       after = result.next_cursor;
     } catch (e) {
-      console.warn(`[cache:warm] events page ${page} failed:`, e.message);
+      logger.warn(`[cache:warm] events page ${page} failed:`, e.message);
       results.failed++;
       break;
     }
@@ -48,9 +49,9 @@ export async function warmCache() {
       }
     }
   } catch (e) {
-    console.warn("[cache:warm] top contracts failed:", e.message);
+    logger.warn("[cache:warm] top contracts failed:", e.message);
     results.failed++;
   }
 
-  console.log(`[cache:warm] complete — warmed ${results.warmed}, failed ${results.failed}`);
+  logger.info(`[cache:warm] complete — warmed ${results.warmed}, failed ${results.failed}`);
 }

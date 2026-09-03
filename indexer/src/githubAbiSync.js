@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * githubAbiSync.js
  *
@@ -39,7 +40,7 @@ async function ghFetch(url) {
   if (res.status === 403 || res.status === 429) {
     const reset = res.headers.get("x-ratelimit-reset");
     const waitMs = reset ? Number(reset) * 1000 - Date.now() : 60_000;
-    console.warn(`[abi-sync] GitHub rate-limited. Retrying after ${Math.ceil(waitMs / 1000)}s`);
+    logger.warn(`[abi-sync] GitHub rate-limited. Retrying after ${Math.ceil(waitMs / 1000)}s`);
     await new Promise((r) => setTimeout(r, Math.max(waitMs, 0)));
     return ghFetch(url);
   }
@@ -56,7 +57,7 @@ async function syncAbis() {
   try {
     entries = await ghFetch(dirUrl);
   } catch (err) {
-    console.error("[abi-sync] Failed to list ABI directory:", err.message);
+    logger.error("[abi-sync] Failed to list ABI directory:", err.message);
     return;
   }
 
@@ -72,7 +73,7 @@ async function syncAbis() {
       const meta = typeof raw === "string" ? JSON.parse(raw) : raw;
 
       if (!meta.id || !meta.name) {
-        console.warn(`[abi-sync] Skipping ${file.name}: missing id or name`);
+        logger.warn(`[abi-sync] Skipping ${file.name}: missing id or name`);
         continue;
       }
 
@@ -87,16 +88,16 @@ async function syncAbis() {
 
       existing ? updated++ : added++;
     } catch (err) {
-      console.error(`[abi-sync] Error processing ${file.name}:`, err.message);
+      logger.error(`[abi-sync] Error processing ${file.name}:`, err.message);
       errors++;
     }
   }
 
-  console.log(`[abi-sync] Sync complete — added: ${added}, updated: ${updated}, errors: ${errors}`);
+  logger.info(`[abi-sync] Sync complete — added: ${added}, updated: ${updated}, errors: ${errors}`);
 }
 
 export function startAbiSync() {
-  console.log(`[abi-sync] Scheduling ABI sync (${SYNC_CRON}) from ${ABI_REPO}/${ABI_PATH}`);
+  logger.info(`[abi-sync] Scheduling ABI sync (${SYNC_CRON}) from ${ABI_REPO}/${ABI_PATH}`);
   // Run once immediately on startup, then on schedule
   syncAbis();
   cron.schedule(SYNC_CRON, syncAbis);

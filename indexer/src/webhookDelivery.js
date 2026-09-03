@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Webhook delivery — outbound POSTs to user-registered subscription URLs.
  *
@@ -225,7 +226,7 @@ export async function deliverWebhooksForEvent(decoded) {
   await Promise.all(
     subs.map((sub) =>
       deliverToSubscription(sub, decoded).catch((err) =>
-        console.error(`[webhookDelivery] subscription ${sub.id} failed:`, err.message),
+        logger.error(`[webhookDelivery] subscription ${sub.id} failed:`, err.message),
       ),
     ),
   );
