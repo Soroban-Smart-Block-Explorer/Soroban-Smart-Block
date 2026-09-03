@@ -2,6 +2,10 @@
  * Admin Authentication Middleware
  *
  * Checks the `Authorization: Bearer <token>` header against `ADMIN_SECRET`.
+ * `ADMIN_SECRET` may hold a comma-separated list of secrets so an operator
+ * can rotate it without downtime: deploy both the old and new secret
+ * together, then remove the old one once the grace window has passed —
+ * mirroring the rotation_grace_until pattern used for API keys.
  * Uses crypto.timingSafeEqual to prevent timing-based secret enumeration.
  *
  * When `ADMIN_TOTP_SECRET` is set (non-empty), also requires a valid TOTP code
@@ -25,12 +29,14 @@ import { verifyTotp } from './totp.js';
  * @type {import('express').RequestHandler}
  */
 function adminAuthMiddleware(req, res, next) {
-  const adminSecret = process.env.ADMIN_SECRET;
+  const adminSecretsRaw = process.env.ADMIN_SECRET;
 
   // If ADMIN_SECRET is not configured, block all admin access.
-  if (!adminSecret) {
+  if (!adminSecretsRaw) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+
+  const validSecrets = adminSecretsRaw.split(',').map((s) => s.trim()).filter(Boolean);
 
   // Optional IP allowlist: if set, enforce it BEFORE checking the token so
   // that disallowed IPs receive 403 even without a valid auth header.
@@ -51,19 +57,18 @@ function adminAuthMiddleware(req, res, next) {
 
   const token = authHeader.slice('Bearer '.length);
 
-  // Use timingSafeEqual to avoid timing attacks.
-  // Both buffers must be the same byte length for the comparison to work.
+  // Use timingSafeEqual to avoid timing attacks. Check the token against
+  // every currently-valid secret (old + new during a rotation window) —
+  // both buffers must be the same byte length for the comparison to work.
   try {
     const tokenBuf = Buffer.from(token);
-    const secretBuf = Buffer.from(adminSecret);
 
-    // If lengths differ the key is clearly wrong, but we still do the
-    // comparison on equal-length buffers to avoid early exit leaking info.
-    if (tokenBuf.length !== secretBuf.length) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    const match = validSecrets.some((secret) => {
+      const secretBuf = Buffer.from(secret);
+      if (tokenBuf.length !== secretBuf.length) return false;
+      return crypto.timingSafeEqual(tokenBuf, secretBuf);
+    });
 
-    const match = crypto.timingSafeEqual(tokenBuf, secretBuf);
     if (!match) {
       return res.status(401).json({ error: 'Unauthorized' });
     }

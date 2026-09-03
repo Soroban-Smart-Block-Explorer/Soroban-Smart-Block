@@ -23,6 +23,46 @@ function RevealedKey({ label, value, onDismiss }: { label: string; value: string
   );
 }
 
+function AllowlistEditor({ apiKeyId, allowedIps }: { apiKeyId: string; allowedIps: string[] | null }) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState((allowedIps ?? []).join(", "));
+
+  const mutation = useMutation({
+    mutationFn: (ips: string[]) => dashboardApi.updateAllowedIps(apiKeyId, ips),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dashboard", "api-keys"] }),
+  });
+
+  return (
+    <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      <label style={{ fontSize: 12, color: "var(--muted)" }}>IP allowlist (CIDR, comma-separated):</label>
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="e.g. 203.0.113.0/24, 198.51.100.7"
+        style={{ flex: 1, minWidth: 200, fontSize: 12 }}
+      />
+      <button
+        type="button"
+        disabled={mutation.isPending}
+        onClick={() => {
+          const ips = value
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          mutation.mutate(ips);
+        }}
+      >
+        {mutation.isPending ? "Saving…" : "Save allowlist"}
+      </button>
+      {mutation.isError && (
+        <span style={{ color: "#e5484d", fontSize: 12 }} role="alert">
+          {(mutation.error as Error).message}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function UsageRow({ apiKeyId }: { apiKeyId: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard", "api-key-usage", apiKeyId],
@@ -131,6 +171,7 @@ export default function ApiKeysPanel() {
               <div style={{ marginTop: 4 }}>
                 <UsageRow apiKeyId={key.id} />
               </div>
+              <AllowlistEditor apiKeyId={key.id} allowedIps={key.allowed_ips} />
             </div>
             <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
               <button type="button" disabled={key.revoked} onClick={() => rotateMutation.mutate(key.id)}>

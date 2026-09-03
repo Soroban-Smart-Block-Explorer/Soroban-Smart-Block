@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Abuse Detector Middleware
  *
@@ -147,11 +148,11 @@ async function recordAuthFailure(ip, redis) {
     if (count > AUTH_FAIL_THRESHOLD) {
       const blockKey = `${ABUSE_BLOCK_PREFIX}:${ip}`;
       await redis.set(blockKey, '1', { EX: IP_BLOCK_TTL });
-      console.warn('[abuseDetector] IP blocked for auth brute-force:', ip);
+      logger.warn('[abuseDetector] IP blocked for auth brute-force:', ip);
     }
   } catch (err) {
     // Redis unavailable — log and continue.
-    console.warn('[abuseDetector] recordAuthFailure Redis error:', err.message);
+    logger.warn('[abuseDetector] recordAuthFailure Redis error:', err.message);
   }
 }
 
@@ -173,7 +174,7 @@ async function recordRateLimitBreach(clientId, redis) {
     }
 
     if (count > BREACH_THRESHOLD) {
-      console.warn(
+      logger.warn(
         JSON.stringify({
           level: 'warn',
           event: 'repeat_offender',
@@ -185,7 +186,7 @@ async function recordRateLimitBreach(clientId, redis) {
       );
     }
   } catch (err) {
-    console.warn('[abuseDetector] recordRateLimitBreach Redis error:', err.message);
+    logger.warn('[abuseDetector] recordRateLimitBreach Redis error:', err.message);
   }
 }
 
@@ -270,7 +271,7 @@ async function checkScrapingPattern(clientId, path, originalLimit, redis) {
       const penaltyKey = `${ABUSE_PENALTY_PREFIX}:${clientId}:*`;
       await redis.set(penaltyKey, '1', { EX: SCRAPE_PENALTY_TTL });
 
-      console.warn(
+      logger.warn(
         JSON.stringify({
           level: 'warn',
           event: 'scraping_detected',
@@ -374,7 +375,7 @@ function notifyCloudflare(endpoint, distinctIps) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }).catch((err) => {
-    console.warn('[abuseDetector] Cloudflare webhook notification failed:', err.message);
+    logger.warn('[abuseDetector] Cloudflare webhook notification failed:', err.message);
   });
 }
 
@@ -481,7 +482,7 @@ async function abuseDetector(req, res, next) {
           const ddosKey = `${ABUSE_DDOS_PREFIX}:${endpoint}:${window}`;
           const distinctIps = await r.pfCount(ddosKey).catch(() => 0);
 
-          console.warn(
+          logger.warn(
             JSON.stringify({
               level: 'warn',
               event: 'ddos_detected',

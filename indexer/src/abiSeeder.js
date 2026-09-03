@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * abiSeeder.js
  *
@@ -51,9 +52,9 @@ export async function seedBuiltinAbis() {
       });
 
       seeded++;
-      console.log(`[abi-seed] registered ${meta.name} (${contractId})`);
+      logger.info(`[abi-seed] registered ${meta.name} (${contractId})`);
     } catch (err) {
-      console.error(`[abi-seed] failed to seed ${file}:`, err.message);
+      logger.error(`[abi-seed] failed to seed ${file}:`, err.message);
     }
   }
   return { seeded, skipped };

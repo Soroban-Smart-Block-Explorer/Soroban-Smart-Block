@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Token Bucket Rate Limiter Middleware
  *
@@ -58,15 +59,15 @@ async function getRedisClient() {
   try {
     const client = createClient({ url });
     client.on('error', (err) => {
-      console.warn('[tokenBucket] Redis error:', err.message);
+      logger.warn('[tokenBucket] Redis error:', err.message);
       _redis = null;
       _redisConnecting = false;
     });
     await client.connect();
     _redis = client;
-    console.log('[tokenBucket] Redis connected:', url);
+    logger.info('[tokenBucket] Redis connected:', url);
   } catch (err) {
-    console.warn('[tokenBucket] Redis unavailable, using in-process fallback:', err.message);
+    logger.warn('[tokenBucket] Redis unavailable, using in-process fallback:', err.message);
     _redis = null;
   } finally {
     _redisConnecting = false;
@@ -212,7 +213,7 @@ async function tokenBucketMiddleware(req, res, next) {
         usedFallback = true;
       }
     } catch (redisErr) {
-      console.warn('[tokenBucket] Redis CL.THROTTLE failed, using in-process fallback:', redisErr.message);
+      logger.warn('[tokenBucket] Redis CL.THROTTLE failed, using in-process fallback:', redisErr.message);
       usedFallback = true;
     }
 
@@ -243,7 +244,7 @@ async function tokenBucketMiddleware(req, res, next) {
 
     return next();
   } catch (err) {
-    console.error('[tokenBucket] Unexpected error:', err);
+    logger.error('[tokenBucket] Unexpected error:', err);
     // Fail open — do not block the request on an unexpected internal error.
     return next();
   }

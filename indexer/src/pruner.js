@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Automated Data Pruning Task for Temporary Storage Logs
  *
@@ -33,13 +34,13 @@ async function getCurrentLedger() {
 }
 
 async function pruneExpiredTemporaryData() {
-  console.log("[pruner] starting pruning run…");
+  logger.info("[pruner] starting pruning run…");
 
   const currentLedger = await getCurrentLedger();
   const expiryLedger = currentLedger - MAX_TEMP_TTL_LEDGERS - PRUNE_LEDGER_BUFFER;
 
   if (expiryLedger <= 0) {
-    console.log("[pruner] not enough ledger history yet, skipping");
+    logger.info("[pruner] not enough ledger history yet, skipping");
     return;
   }
 
@@ -64,19 +65,19 @@ async function pruneExpiredTemporaryData() {
   );
 
   const deleted = result.rowCount ?? 0;
-  console.log(`[pruner] deleted ${deleted} expired temporary-storage events (ledger < ${expiryLedger})`);
+  logger.info(`[pruner] deleted ${deleted} expired temporary-storage events (ledger < ${expiryLedger})`);
 
   // Also vacuum the table to reclaim space (non-blocking)
   await db.query("VACUUM ANALYZE events").catch(() => {});
-  console.log("[pruner] VACUUM ANALYZE complete");
+  logger.info("[pruner] VACUUM ANALYZE complete");
 
   return deleted;
 }
 
 export function startPruner() {
-  console.log(`[pruner] scheduled — cron: "${PRUNE_CRON}"`);
+  logger.info(`[pruner] scheduled — cron: "${PRUNE_CRON}"`);
   cron.schedule(PRUNE_CRON, () => {
-    pruneExpiredTemporaryData().catch((err) => console.error("[pruner] error:", err.message));
+    pruneExpiredTemporaryData().catch((err) => logger.error("[pruner] error:", err.message));
   });
 }
 
@@ -87,7 +88,7 @@ if (process.argv.includes("--run-now")) {
     await pruneExpiredTemporaryData();
     process.exit(0);
   })().catch((err) => {
-    console.error("[pruner] fatal:", err);
+    logger.error("[pruner] fatal:", err);
     process.exit(1);
   });
 }

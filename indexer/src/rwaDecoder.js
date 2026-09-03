@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * RWA Token Activity Decoder
  * Decodes Franklin Templeton Benji and other RWA token actions.
@@ -352,7 +353,7 @@ export function decodeRwaEvent(event, meta) {
 
     return decoder(event.function, args, _data);
   } catch (err) {
-    console.error("[RWA Decoder] Error decoding event:", err);
+    logger.error("[RWA Decoder] Error decoding event:", err);
     return null;
   }
 }

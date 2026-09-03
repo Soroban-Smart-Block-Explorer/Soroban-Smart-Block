@@ -3,6 +3,7 @@
 // Nodes = contracts (sized by call frequency, coloured by type).
 // Edges = invocations between contracts.
 import { useEffect, useRef } from "react";
+import type { Core } from "cytoscape";
 import type { SubInvocationExtended } from "../api";
 
 interface Props {
@@ -23,7 +24,7 @@ function short(id: string) {
 
 export default function SubInvocationGraph({ invocations }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const cyRef = useRef<any>(null);
+  const cyRef = useRef<Core | null>(null);
 
   useEffect(() => {
     if (!containerRef.current || invocations.length === 0) return;
@@ -89,8 +90,8 @@ export default function SubInvocationGraph({ invocations }: Props) {
               "font-size": 10,
               "text-valign": "bottom",
               "text-margin-y": 4,
-              width: "mapData(count, 1, 20, 28, 72)" as any,
-              height: "mapData(count, 1, 20, 28, 72)" as any,
+              width: "mapData(count, 1, 20, 28, 72)",
+              height: "mapData(count, 1, 20, 28, 72)",
             },
           },
           ...Object.entries(CONTRACT_TYPE_COLORS).map(([type, color]) => ({
@@ -100,7 +101,7 @@ export default function SubInvocationGraph({ invocations }: Props) {
           {
             selector: "edge",
             style: {
-              width: "mapData(weight, 1, 10, 1, 5)" as any,
+              width: "mapData(weight, 1, 10, 1, 5)",
               "line-color": "#4b5563",
               "target-arrow-color": "#4b5563",
               "target-arrow-shape": "triangle",
@@ -108,7 +109,7 @@ export default function SubInvocationGraph({ invocations }: Props) {
             },
           },
         ],
-        layout: { name: "cose", padding: 32, animate: false } as any,
+        layout: { name: "cose", padding: 32, animate: false },
         userZoomingEnabled: true,
         userPanningEnabled: true,
       });

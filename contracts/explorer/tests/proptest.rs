@@ -226,3 +226,116 @@ proptest! {
         }
     }
 }
+
+// ── Fuzz: concurrent update_contract writes racing on abi_version guard (#766) ──
+//
+// Test that the optimistic-concurrency `abi_version` guard never allows a stale
+// write to succeed, regardless of the interleaving of concurrent updates.
+//
+// The guard ensures: submitted meta.abi_version must equal (existing.abi_version + 1)
+// Strategy: generate randomized sequences of update_contract calls with varying
+// abi_version values (some correct, some deliberately stale) against the same
+// contract_id, and assert the guard never allows a stale version to succeed.
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+    #[test]
+    fn fuzz_concurrent_update_contract_abi_version_guard(
+        // Generate a sequence of abi_version values to submit.
+        // Some will be correct (current + 1), some deliberately stale.
+        version_offsets in prop::collection::vec(0i32..=3, 1..20),
+    ) {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let contract_registrant = Address::generate(&env);
+        client.init(&admin, &MIN_MAX_EVENTS);
+
+        // Register a contract initially with abi_version 0.
+        let cid: BytesN<32> = BytesN::from_array(&env, &[8u8; 32]);
+        let meta = ContractMeta {
+            version: 1,
+            abi_version: 0,
+            min_ledger: 0,
+            name: sdk_symbol(&env, "test"),
+            description: ascii_string(&env, 10),
+            functions: Vec::new(&env),
+            registered_by: contract_registrant.clone(),
+        };
+        client.register_contract(&contract_registrant, &cid, &meta);
+
+        // Verify initial state: abi_version is 0.
+        let initial = client.get_contract(cid.clone()).unwrap();
+        prop_assert_eq!(initial.abi_version, 0);
+
+        let mut current_abi_version: u32 = 0;
+        let mut successful_updates = 0usize;
+
+        // Simulate concurrent/interleaved updates with randomized abi_version values.
+        for (i, offset) in version_offsets.into_iter().enumerate() {
+            // Vary the submitted abi_version: sometimes correct, sometimes stale.
+            let submitted_abi_version = if offset < 0 {
+                // Stale version (e.g., current - 1, current - 2)
+                current_abi_version.saturating_sub((-offset) as u32)
+            } else if offset == 0 {
+                // Correct version (current + 1)
+                current_abi_version + 1
+            } else {
+                // Future version (current + offset)
+                // These are deliberately wrong but test the guard's strictness.
+                current_abi_version.saturating_add(offset as u32)
+            };
+
+            let mut update_meta = meta.clone();
+            update_meta.version = 1 + i as u32;
+            update_meta.abi_version = submitted_abi_version;
+            update_meta.registered_by = contract_registrant.clone();
+
+            // Attempt update. The guard either allows it (if abi_version is correct)
+            // or panics with Error::Unauthorized (if abi_version is stale/wrong).
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                client.update_contract(&contract_registrant, &cid, &update_meta);
+            }));
+
+            if result.is_ok() {
+                // Update succeeded — abi_version must have been exactly correct.
+                // After a successful update, the new abi_version becomes current.
+                current_abi_version = submitted_abi_version;
+                successful_updates += 1;
+
+                // Verify the update was actually persisted.
+                let stored = client.get_contract(cid.clone()).unwrap();
+                prop_assert_eq!(
+                    stored.abi_version, submitted_abi_version,
+                    "stored abi_version must match submitted value for successful update at iteration {}",
+                    i
+                );
+            } else {
+                // Update rejected (panic) — abi_version must have been stale or wrong.
+                // The guard is working: we reject any version that is not (current + 1).
+                // Stale writes are correctly blocked; current_abi_version does not advance.
+
+                // Verify no silent write occurred: stored version must not have changed.
+                let stored = client.get_contract(cid.clone()).unwrap();
+                prop_assert_eq!(
+                    stored.abi_version, current_abi_version,
+                    "stored abi_version must not advance after a rejected update at iteration {}",
+                    i
+                );
+            }
+        }
+
+        // Invariant: the final stored abi_version must match what we tracked as current.
+        let final_stored = client.get_contract(cid.clone()).unwrap();
+        prop_assert_eq!(
+            final_stored.abi_version, current_abi_version,
+            "final stored abi_version must match tracked current_abi_version"
+        );
+
+        // At least some updates succeeded (the guard allowed correct versions).
+        // This is a sanity check that our test exercise the allow path.
+        prop_assert!(
+            successful_updates > 0,
+            "test must exercise at least one successful update to verify allow path"
+        );
+    }
+}

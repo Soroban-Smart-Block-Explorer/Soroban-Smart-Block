@@ -1,7 +1,11 @@
 import "dotenv/config";
+import "./tracing.js";
 import { pathToFileURL } from "node:url";
 import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
+import { initSentry } from "./sentry.js";
 import config from "./config.js";
+
+initSentry();
 import { startApi } from "./api.js";
 import { db, pool } from "./db.js";
 import { decode, getDecodeStats } from "./decoder.js";
@@ -30,9 +34,17 @@ import { checkForReorg, recordLedgerHash } from "./reorgWorker.js";
 import { startReDecodeWorker } from "./reDecodeWorker.js";
 import { warmCache } from "./cacheWarming.js";
 import { cacheInvalidate } from "./cacheLayer.js";
-import { eventsIngested, decodeLatency, rpcErrors, updateDbPoolMetrics, dlqDepth } from "./metrics.js";
+import {
+  eventsIngested,
+  decodeLatency,
+  rpcErrors,
+  updateDbPoolMetrics,
+  dlqDepth,
+  indexerLagLedgers,
+} from "./metrics.js";
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
 import { startAuditPartitionCron, startAuditFlush } from "./audit/auditLogger.js";
+import { startUptimeRecorder } from "./uptimeRecorder.js";
 import { updateIndexerStatus, updateWorkerStatus, updateDlqDepth } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
@@ -99,13 +111,13 @@ async function indexWasmUploads(txHashes, ledger) {
         const wasmBytes = hf.wasm();
         const meta = extractBuildMetadata(wasmBytes);
         await db.upsertWasmBuildMetadata({ ...meta, ledger, tx_hash: txHash });
-        console.log(
+        logger.info(
           `[${ledger}] WASM upload indexed: ${meta.wasm_hash.slice(0, 16)}… compiler=${meta.compiler ?? "unknown"}`,
         );
       }
     } catch (err) {
       // Non-fatal: log and continue
-      console.error(`[wasmUpload] tx ${txHash}: ${err.message}`);
+      logger.error(`[wasmUpload] tx ${txHash}: ${err.message}`);
     }
   }
 }
@@ -186,7 +198,7 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
 
   const upgrade = detectUpgrade(rawSorobanEvent);
   if (upgrade) {
-    console.log(
+    logger.info(
       `[${rawSorobanEvent.ledger}] CONTRACT UPGRADE ${rawSorobanEvent.contractId}: ${upgrade.oldHash} → ${upgrade.newHash}`,
     );
     decoded.upgrade = upgrade;
@@ -203,7 +215,7 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   cacheInvalidate("wallet:events:*").catch(() => {});
   // Notify matching webhook subscriptions (non-blocking; failures retry via the DLQ).
   deliverWebhooksForEvent(decoded).catch((err) =>
-    console.error("[webhookDelivery] dispatch failed:", err.message),
+    logger.error("[webhookDelivery] dispatch failed:", err.message),
   );
 
   // Persist per-key state diffs for the timeline.
@@ -215,8 +227,8 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   if (evictions.length) {
     await db
       .insertArchivalEvictions(evictions)
-      .catch((err) => console.error("[archivalEviction] insert failed:", err.message));
-    console.log(
+      .catch((err) => logger.error("[archivalEviction] insert failed:", err.message));
+    logger.info(
       `[${rawSorobanEvent.ledger}] EVICTED ${evictions.length} key(s) in tx ${rawSorobanEvent.txHash}`,
     );
   }
@@ -227,11 +239,11 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined) {
   // Process circuit breaker events.
   if (contractMeta) {
     processCircuitBreakerEvent(decoded, contractMeta).catch((err) =>
-      console.error("[circuitBreakerIndexer] Error:", err.message),
+      logger.error("[circuitBreakerIndexer] Error:", err.message),
     );
   }
 
-  console.log(`[${rawSorobanEvent.ledger}] ${decoded.function}: ${decoded.description}`);
+  logger.info(`[${rawSorobanEvent.ledger}] ${decoded.function}: ${decoded.description}`);
   return decoded;
 }
 
@@ -291,7 +303,7 @@ async function indexLedger(ledger) {
     }
 
     // Scan transactions for UploadContractWasm operations (non-blocking)
-    indexWasmUploads(uniqueTxHashes, ledger).catch((err) => console.error("[wasmUpload] batch error:", err.message));
+    indexWasmUploads(uniqueTxHashes, ledger).catch((err) => logger.error("[wasmUpload] batch error:", err.message));
 
     // record the latest ledger hash for re-org detection
     if (res.latestLedger && res.latestLedgerHash) {
@@ -346,6 +358,7 @@ async function run() {
   startRetentionCleanupCron(); // nightly usage data retention cleanup
   startAuditPartitionCron();   // monthly audit log partition management
   startAuditFlush();           // drain queued audit log entries every 500ms
+  startUptimeRecorder();       // sample /health every 5 minutes for the status page
 
   // Bootstrap vault indexer: initial ratio snapshot for all registered vaults
   refreshAllVaults().catch(() => {});
@@ -378,7 +391,7 @@ async function run() {
       // ── drain gap queue first ──────────────────────────────────────
       while (_gapQueue.length > 0 && !shutdown) {
         const gap = _gapQueue[0];
-        console.log(`[gap] re-indexing ledgers ${gap.from} → ${gap.to} (attempt ${gap.retries + 1}/${MAX_GAP_RETRIES})`);
+        logger.info(`[gap] re-indexing ledgers ${gap.from} → ${gap.to} (attempt ${gap.retries + 1}/${MAX_GAP_RETRIES})`);
         let gapOk = true;
         for (let ledger = gap.from; ledger <= gap.to; ledger++) {
           if (shutdown) break;
@@ -415,7 +428,7 @@ async function run() {
       }
 
       // ── normal forward indexing ────────────────────────────────────
-      console.log(`[daemon] polling from ledger ${_cursor}`);
+      logger.info(`[daemon] polling from ledger ${_cursor}`);
       const polledFrom = _cursor;
       const latest = await indexLedger(polledFrom);
       const latestLedger = latest.latestLedger ?? polledFrom;
@@ -425,6 +438,7 @@ async function run() {
       const lagSeconds = Math.floor((Date.now() - (polledFrom * 5000)) / 1000); // approximate lag
       const ledgerLag = Math.max(0, latestLedger - polledFrom);
       updateIndexerStatus(polledFrom, lagSeconds, ledgerLag);
+      indexerLagLedgers.set(ledgerLag);
 
       const immediateForkLedger = await checkForReorg(latestLedger, latestLedgerHash).catch((err) => {
         logger.error({ err: err.message, ledger: latestLedger }, "reorg fast-path check failed");

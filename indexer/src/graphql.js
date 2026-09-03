@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * GraphQL Interface for Contract Events
  *
@@ -537,10 +538,10 @@ export function attachGraphQL(app) {
     }
   });
 
-  console.log("[graphql] Endpoint mounted at /graphql with security limits:");
-  console.log(`[graphql]   Max depth: ${config.MAX_GRAPHQL_DEPTH}`);
-  console.log(`[graphql]   Max complexity: ${config.MAX_GRAPHQL_COMPLEXITY}`);
-  console.log(`[graphql]   Introspection: ${process.env.NODE_ENV !== 'production' ? 'enabled' : 'auth required'}`);
+  logger.info("[graphql] Endpoint mounted at /graphql with security limits:");
+  logger.info(`[graphql]   Max depth: ${config.MAX_GRAPHQL_DEPTH}`);
+  logger.info(`[graphql]   Max complexity: ${config.MAX_GRAPHQL_COMPLEXITY}`);
+  logger.info(`[graphql]   Introspection: ${process.env.NODE_ENV !== 'production' ? 'enabled' : 'auth required'}`);
 }
 
 // Export helper functions for testing
