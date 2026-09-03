@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * contractVerifier.js
  *
@@ -103,7 +104,7 @@ async function runVerificationBatch() {
         await db.setContractVerified(contract.id, isVerified, isVerified ? onChain.ledger : null);
         processed++;
       } catch (err) {
-        console.error(`[verifier] Error verifying ${contract.id}:`, err.message);
+        logger.error(`[verifier] Error verifying ${contract.id}:`, err.message);
       }
     }
 
@@ -112,20 +113,20 @@ async function runVerificationBatch() {
   }
 
   if (processed > 0) {
-    console.log(`[verifier] Verified ${processed} contracts`);
+    logger.info(`[verifier] Verified ${processed} contracts`);
   }
 }
 
 /** Start the background verification cron job. */
 export function startContractVerifier() {
-  console.log(`[verifier] Scheduling ABI verification (${VERIFY_CRON})`);
+  logger.info(`[verifier] Scheduling ABI verification (${VERIFY_CRON})`);
   // Run once on startup
   runVerificationBatch().catch((err) =>
-    console.error('[verifier] Initial verification batch failed:', err.message),
+    logger.error('[verifier] Initial verification batch failed:', err.message),
   );
   cron.schedule(VERIFY_CRON, () => {
     runVerificationBatch().catch((err) =>
-      console.error('[verifier] Verification batch failed:', err.message),
+      logger.error('[verifier] Verification batch failed:', err.message),
     );
   });
 }

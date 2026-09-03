@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * RPC Node Performance Metrics
  *
@@ -64,7 +65,7 @@ export function startMetricsCollector() {
   RPC_URLS.forEach(probe);
 
   setInterval(() => RPC_URLS.forEach(probe), PROBE_INTERVAL_MS);
-  console.log(`[rpc-metrics] probing ${RPC_URLS.length} node(s) every ${PROBE_INTERVAL_MS}ms`);
+  logger.info(`[rpc-metrics] probing ${RPC_URLS.length} node(s) every ${PROBE_INTERVAL_MS}ms`);
 }
 
 export function getMetrics() {

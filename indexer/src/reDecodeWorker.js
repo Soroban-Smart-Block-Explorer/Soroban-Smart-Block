@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 import { db } from "./db.js";
 import { decode } from "./decoder.js";
 
@@ -49,7 +50,7 @@ export async function runReDecodeBatch({ dbModule = db, decodeFn = decode, batch
       await dbModule.updateRedecodedEvent(row.seq, decoded, Number(meta.abi_version));
       processed++;
     } catch (error) {
-      console.error(`[redecode] event ${row.seq} failed: ${error.message}`);
+      logger.error(`[redecode] event ${row.seq} failed: ${error.message}`);
     }
   }
   return processed;
@@ -76,8 +77,8 @@ export function startReDecodeWorker({
     }
   };
 
-  const timer = setInterval(() => tick().catch((error) => console.error("[redecode] worker failed:", error.message)), intervalMs);
+  const timer = setInterval(() => tick().catch((error) => logger.error("[redecode] worker failed:", error.message)), intervalMs);
   timer.unref?.();
-  tick().catch((error) => console.error("[redecode] initial run failed:", error.message));
+  tick().catch((error) => logger.error("[redecode] initial run failed:", error.message));
   return () => clearInterval(timer);
 }

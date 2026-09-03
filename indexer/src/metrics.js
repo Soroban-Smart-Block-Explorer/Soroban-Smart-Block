@@ -98,6 +98,13 @@ export const cacheMissTotal = new Counter({
   registers: [registry],
 });
 
+/** Current indexer lag behind chain tip, in ledgers. Backs the indexer-lag SLO. */
+export const indexerLagLedgers = new Gauge({
+  name: "soroban_indexer_lag_ledgers",
+  help: "Number of ledgers the indexer is behind the chain tip",
+  registers: [registry],
+});
+
 /** Histogram of HTTP request durations in seconds with labels. */
 export const apiRequestDuration = new Histogram({
   name: "api_request_duration_seconds",

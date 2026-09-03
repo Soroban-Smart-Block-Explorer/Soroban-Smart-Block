@@ -1,0 +1,22 @@
+groups:
+  - name: soroban-indexer-slo
+    rules:
+      # SLO: p99 API latency < 500ms
+      - alert: ApiLatencyP99SLOBreach
+        expr: histogram_quantile(0.99, sum(rate(api_request_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API p99 latency SLO breach"
+          description: "p99 API request latency has exceeded 500ms for 5 minutes (current: {{ $value }}s)."
+
+      # SLO: indexer lag behind chain tip < 20 ledgers
+      - alert: IndexerLagSLOBreach
+        expr: soroban_indexer_lag_ledgers > 20
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Indexer lag SLO breach"
+          description: "Indexer is {{ $value }} ledgers behind the chain tip for 5 minutes (threshold: 20)."

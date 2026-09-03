@@ -1395,6 +1395,38 @@ mod tests {
         client.register_contract(&admin, &cid, &meta);
     }
 
+    // MAX_PARAM_NAME_LEN / MAX_PARAM_KIND_LEN = 32 ────────────────────────────
+    // ParamDef.name/.kind are Soroban `Symbol`s, which the SDK itself refuses
+    // to construct above 32 characters, so the reject path is enforced at
+    // construction time rather than in `validate_meta`. These tests confirm
+    // the accept path holds exactly at the limit.
+
+    #[test]
+    fn test_param_name_and_kind_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[71u8; 32]);
+        let long_symbol = Symbol::new(&env, "abcdefghijklmnopqrstuvwxyz012345");
+        let mut params: Vec<ParamDef> = Vec::new(&env);
+        params.push_back(ParamDef {
+            name: long_symbol.clone(),
+            kind: long_symbol,
+        });
+        let mut fns: Vec<FunctionAbi> = Vec::new(&env);
+        fns.push_back(FunctionAbi {
+            name: symbol_short!("fn"),
+            description: String::from_str(&env, "d"),
+            params,
+        });
+        let meta = ContractMeta {
+            functions: fns,
+            ..make_meta(&env, "ParamNameKindLimit", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
     // Event description limit ─────────────────────────────────────────────────
 
     #[test]

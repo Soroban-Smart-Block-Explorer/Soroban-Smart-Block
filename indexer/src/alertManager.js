@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /* global fetch */
 
 /**
@@ -40,6 +41,7 @@ export const ALERT_CONDITIONS = {
   DLQ_THRESHOLD: "DLQ_THRESHOLD",
   REORG_DETECTED: "REORG_DETECTED",
   DECODE_RATE_LOW: "DECODE_RATE_LOW",
+  AUDIT_PARTITION_FAILURE: "AUDIT_PARTITION_FAILURE",
 };
 
 const SEVERITY = {
@@ -52,6 +54,7 @@ const SEVERITY = {
   [ALERT_CONDITIONS.DLQ_THRESHOLD]: "warning",
   [ALERT_CONDITIONS.REORG_DETECTED]: "critical",
   [ALERT_CONDITIONS.DECODE_RATE_LOW]: "warning",
+  [ALERT_CONDITIONS.AUDIT_PARTITION_FAILURE]: "critical",
 };
 
 // Active alert state — maps condition → timestamp when first fired
@@ -72,7 +75,7 @@ async function sendSlack(condition, message) {
       body: JSON.stringify({ text: `${emoji} *[${condition}]* ${message}` }),
     });
   } catch (err) {
-    console.error(`[alertManager] Slack webhook failed: ${err.message}`);
+    logger.error(`[alertManager] Slack webhook failed: ${err.message}`);
   }
 }
 
@@ -94,7 +97,7 @@ async function sendPagerDuty(condition, message) {
       }),
     });
   } catch (err) {
-    console.error(`[alertManager] PagerDuty API failed: ${err.message}`);
+    logger.error(`[alertManager] PagerDuty API failed: ${err.message}`);
   }
 }
 
@@ -110,7 +113,7 @@ async function sendPagerDuty(condition, message) {
 export async function fireAlert(condition, message) {
   if (_active.has(condition)) return;
   _active.set(condition, Date.now());
-  console.warn(`[alertManager] ALERT ${condition}: ${message}`);
+  logger.warn(`[alertManager] ALERT ${condition}: ${message}`);
   await Promise.all([sendSlack(condition, message), sendPagerDuty(condition, message)]);
 }
 
@@ -122,7 +125,7 @@ export async function fireAlert(condition, message) {
 export function resolveAlert(condition) {
   if (_active.has(condition)) {
     _active.delete(condition);
-    console.log(`[alertManager] RESOLVED ${condition}`);
+    logger.info(`[alertManager] RESOLVED ${condition}`);
   }
 }
 

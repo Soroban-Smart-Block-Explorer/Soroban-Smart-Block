@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 import express from "express";
 import http from "http";
 import path from "path";
@@ -16,6 +17,9 @@ import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration } from "./metrics.js";
+import { tracer } from "./tracing.js";
+import { context, propagation } from "@opentelemetry/api";
+import { getUptimeHistory } from "./uptimeRecorder.js";
 import { getDecodeStats } from "./decoder.js";
 // ── Auth & Rate Limiting ──────────────────────────────────────────────────────
 import { apiKeyAuthenticator } from "./auth/apiKeyAuth.js";
@@ -43,6 +47,7 @@ import {
 } from "./cacheLayer.js";
 import { recordAccess, schedulePrefetch } from "./prefetchEngine.js";
 import { attachGraphQL } from "./graphql.js";
+import { requestContext } from "./logger.js";
 import { runAllChecks } from "./doctor-lib.js";
 import { registry } from "./metrics.js";
 import pg from "pg";
@@ -116,7 +121,26 @@ function requestIdMiddleware(req, _res, next) {
   // Preserve incoming traceparent header if present
   const tp = req.headers["traceparent"];
   if (tp) _res.setHeader && _res.setHeader("traceparent", tp);
-  next();
+  // Run the rest of the request inside an AsyncLocalStorage context so every
+  // logger.* call made while handling it — including deep in other modules —
+  // automatically carries this request's ID (#756).
+  requestContext.run({ requestId: req.id }, next);
+}
+
+// Root span per request (issue #755) — child spans created by db.query,
+// cacheGet/cacheSet, and RPC calls nest under this via the AsyncHooksContextManager
+// registered in tracing.js, so a full API → cache → DB trace shows up as one trace.
+function tracingMiddleware(req, res, next) {
+  const parentCtx = propagation.extract(context.active(), req.headers);
+  context.with(parentCtx, () => {
+    tracer.startActiveSpan(`${req.method} ${req.path}`, { attributes: { "http.method": req.method, "http.target": req.originalUrl } }, (span) => {
+      res.on("finish", () => {
+        span.setAttribute("http.status_code", res.statusCode);
+        span.end();
+      });
+      next();
+    });
+  });
 }
 
 function createHttpLogger(logDestination) {
@@ -127,10 +151,10 @@ function createHttpLogger(logDestination) {
         if (logDestination && typeof logDestination.write === "function") {
           logDestination.write(line);
         } else {
-          console.log(line.trim());
+          logger.info(line.trim());
         }
       } catch (e) {
-        console.log(line.trim());
+        logger.info(line.trim());
       }
     });
     next();
@@ -313,6 +337,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   app.use(express.json());
   app.use(requestIdMiddleware);
+  app.use(tracingMiddleware);
   app.use(createHttpLogger(logDestination));
   app.use(metricsMiddleware);
 
@@ -348,7 +373,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // the 500ms flush loop's first tick, even when createApi() is invoked
   // directly (tests) rather than via index.js's startAuditPartitionCron().
   ensureAuditPartitions().catch((err) =>
-    console.error("[api] Startup audit partition check failed:", err.message),
+    logger.error("[api] Startup audit partition check failed:", err.message),
   );
   app.use(auditLoggerMiddleware);
   app.use(apiKeyAuthenticator);
@@ -427,6 +452,18 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   app.get("/health", healthHandler);
   app.get("/api/health", healthHandler);
+
+  // Public status page data (issue #758): current health + rolling uptime
+  // history, backed by the periodic samples uptimeRecorder.js writes.
+  app.get("/api/status/history", async (req, res) => {
+    try {
+      const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 90);
+      const history = await getUptimeHistory(days);
+      res.json({ days, history });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   // Public snapshot of the process-local alert manager.
   app.get("/api/alerts", (_req, res) => {
@@ -807,7 +844,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
 
   // GET /api/contracts/:id/events?page=&limit=  — events for a specific contract
-  app.get("/api/contracts/:id/events", async (req, res) => {
+  app.get(
+    "/api/contracts/:id/events",
+    makeCache("contract_events", (req) => `contracts:events:${req.params.id}:${req.query.page ?? 1}:${req.query.limit ?? 25}`),
+    async (req, res) => {
     try {
       const page = Number(req.query.page) || 1;
       const limit = Math.min(Number(req.query.limit) || 25, 100);
@@ -828,7 +868,8 @@ export function createApi({ logDestination, dbOverride } = {}) {
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
-  });
+  },
+  );
 
   // GET /api/contracts/:id
   app.get(
@@ -948,7 +989,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
           });
         }
 
-        console.log(`ABI verified for contract ${id}:`, {
+        logger.info(`ABI verified for contract ${id}:`, {
           functionsVerified: functions.length,
           missing: verification.missingFunctions.length,
           mismatches: verification.argMismatch.length,
@@ -1245,7 +1286,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // GET /api/wallet/:address/balances — classic XLM + SEP-41/classic asset
   // balances sourced from Horizon (issue #530). Cached for 30s per address.
-  app.get("/api/wallet/:address/balances", async (req, res) => {
+  app.get(
+    "/api/wallet/:address/balances",
+    makeCache("wallet_balances", (req) => `wallet:balances:${req.params.address}`),
+    async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
@@ -1259,7 +1303,8 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
       res.status(502).json({ error: e.message });
     }
-  });
+  },
+  );
 
   // ── Token metadata registry (#550) ──────────────────────────────────────
   // Backed by the `assets` table, populated as classic asset transfers are
@@ -1278,7 +1323,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // GET /api/assets?after=&limit=  — paginated list of all assets seen in
   // indexed events, cursor-based (keyset) navigation via `next_cursor`.
-  app.get("/api/assets", async (req, res) => {
+  app.get(
+    "/api/assets",
+    makeCache("default", (req) => `assets:list:${req.query.after ?? 0}:${req.query.limit ?? 25}`),
+    async (req, res) => {
     try {
       if (req.query.limit !== undefined) {
         const parsedLimit = Number(req.query.limit);
@@ -1680,7 +1728,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
         verified: rows[0].verified
       });
     } catch (e) {
-      console.error('[POST /api/keys] Error:', e);
+      logger.error('[POST /api/keys] Error:', e);
       if (e.message.includes('duplicate key') || e.message.includes('unique constraint')) {
         return res.status(409).json({ error: 'An API key for this email already exists and is pending verification.' });
       }
@@ -1759,7 +1807,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
         tier: keyRecord.tier
       });
     } catch (e) {
-      console.error('[GET /api/keys/verify] Error:', e);
+      logger.error('[GET /api/keys/verify] Error:', e);
       res.status(500).json({ error: e.message });
     }
   });
@@ -2345,7 +2393,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   const server = http.createServer(app);
   if (!runningUnderTest) attachWebSocketServer(server);
 
-  server.on("close", () => console.log("[api] server closed"));
+  server.on("close", () => logger.info("[api] server closed"));
 
   // During test runs we avoid calling `listen()` to prevent port conflicts
   // and background handles that outlive the Jest environment. Tests will
@@ -2354,7 +2402,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
     return app;
   }
 
-  server.listen(PORT, () => console.log(`API listening on :${PORT}`));
+  server.listen(PORT, () => logger.info(`API listening on :${PORT}`));
   return server;
 }
 
