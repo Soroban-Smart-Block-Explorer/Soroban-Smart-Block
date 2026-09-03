@@ -5,7 +5,10 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { NetworkProvider } from "./contexts/NetworkContext";
 import { initCsrf } from "./hooks/useCsrf";
+import { initSentry } from "./sentry";
 import "./index.css";
+
+initSentry();
 
 const qc = new QueryClient();
 

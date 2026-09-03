@@ -44,6 +44,7 @@ import {
 } from "./cacheLayer.js";
 import { recordAccess, schedulePrefetch } from "./prefetchEngine.js";
 import { attachGraphQL } from "./graphql.js";
+import { requestContext } from "./logger.js";
 import { runAllChecks } from "./doctor-lib.js";
 import { registry } from "./metrics.js";
 import pg from "pg";
@@ -117,7 +118,10 @@ function requestIdMiddleware(req, _res, next) {
   // Preserve incoming traceparent header if present
   const tp = req.headers["traceparent"];
   if (tp) _res.setHeader && _res.setHeader("traceparent", tp);
-  next();
+  // Run the rest of the request inside an AsyncLocalStorage context so every
+  // logger.* call made while handling it — including deep in other modules —
+  // automatically carries this request's ID (#756).
+  requestContext.run({ requestId: req.id }, next);
 }
 
 function createHttpLogger(logDestination) {
@@ -1223,7 +1227,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // GET /api/wallet/:address/balances — classic XLM + SEP-41/classic asset
   // balances sourced from Horizon (issue #530). Cached for 30s per address.
-  app.get("/api/wallet/:address/balances", async (req, res) => {
+  app.get(
+    "/api/wallet/:address/balances",
+    makeCache("wallet_balances", (req) => `wallet:balances:${req.params.address}`),
+    async (req, res) => {
     try {
       const address = req.params.address;
       if (!/^G[A-Z2-7]{55}$/.test(address)) {
@@ -1256,7 +1263,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // GET /api/assets?after=&limit=  — paginated list of all assets seen in
   // indexed events, cursor-based (keyset) navigation via `next_cursor`.
-  app.get("/api/assets", async (req, res) => {
+  app.get(
+    "/api/assets",
+    makeCache("default", (req) => `assets:list:${req.query.after ?? 0}:${req.query.limit ?? 25}`),
+    async (req, res) => {
     try {
       if (req.query.limit !== undefined) {
         const parsedLimit = Number(req.query.limit);
