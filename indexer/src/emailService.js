@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Email Service
  *
@@ -76,7 +77,7 @@ async function sendEmail({ to, subject, html, text }) {
       });
     }
   } catch (error) {
-    console.error('[EmailService] Failed to send email:', error);
+    logger.error('[EmailService] Failed to send email:', error);
     throw new Error(`Failed to send email: ${error.message}`);
   }
 }

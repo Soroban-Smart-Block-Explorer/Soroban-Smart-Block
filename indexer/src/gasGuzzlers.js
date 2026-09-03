@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Daily Gas Consumption Leaderboard
  *
@@ -51,9 +52,9 @@ async function refresh() {
     );
     _cache = rows;
     _lastUpdated = new Date().toISOString();
-    console.log(`[gasGuzzlers] leaderboard refreshed — ${rows.length} contracts ranked`);
+    logger.info(`[gasGuzzlers] leaderboard refreshed — ${rows.length} contracts ranked`);
   } catch (err) {
-    console.error("[gasGuzzlers] refresh failed:", err.message);
+    logger.error("[gasGuzzlers] refresh failed:", err.message);
   }
 }
 

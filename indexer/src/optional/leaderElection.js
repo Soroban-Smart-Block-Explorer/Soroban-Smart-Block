@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * Issue #209 — Redis-Based Leader Election
  *
@@ -40,7 +41,7 @@ export function getInstanceId() {
 async function getClient() {
   if (!_client) {
     _client = createClient({ url: REDIS_URL });
-    _client.on("error", (err) => console.error("[leaderElection] Redis error:", err.message));
+    _client.on("error", (err) => logger.error("[leaderElection] Redis error:", err.message));
     await _client.connect();
   }
   return _client;
@@ -57,7 +58,7 @@ export async function tryAcquireLock() {
   const result = await client.set(LEADER_KEY, id, { NX: true, EX: LEASE_TTL_S });
   if (result === "OK") {
     _isLeader = true;
-    console.log(`[leaderElection] instance ${id} acquired leadership`);
+    logger.info(`[leaderElection] instance ${id} acquired leadership`);
     return true;
   }
   return false;
@@ -76,7 +77,7 @@ export async function renewLock() {
   const current = await client.get(LEADER_KEY);
   if (current !== id) {
     _isLeader = false;
-    console.warn(`[leaderElection] lost leadership — current leader is ${current}`);
+    logger.warn(`[leaderElection] lost leadership — current leader is ${current}`);
     return false;
   }
   await client.expire(LEADER_KEY, LEASE_TTL_S);
@@ -93,7 +94,7 @@ export async function releaseLock() {
   const current = await client.get(LEADER_KEY);
   if (current === id) {
     await client.del(LEADER_KEY);
-    console.log(`[leaderElection] instance ${id} released leadership`);
+    logger.info(`[leaderElection] instance ${id} released leadership`);
   }
   _isLeader = false;
 }
@@ -115,7 +116,7 @@ export function start({ onBecomeLeader, onLoseLeadership } = {}) {
   _renewTimer = setInterval(async () => {
     if (!_isLeader) return;
     const renewed = await renewLock().catch((err) => {
-      console.error("[leaderElection] renew error:", err.message);
+      logger.error("[leaderElection] renew error:", err.message);
       return false;
     });
     if (!renewed && _isLeader) {
@@ -127,7 +128,7 @@ export function start({ onBecomeLeader, onLoseLeadership } = {}) {
   _electionTimer = setInterval(async () => {
     if (_isLeader) return;
     const won = await tryAcquireLock().catch((err) => {
-      console.error("[leaderElection] election poll error:", err.message);
+      logger.error("[leaderElection] election poll error:", err.message);
       return false;
     });
     if (won) onBecomeLeader?.();

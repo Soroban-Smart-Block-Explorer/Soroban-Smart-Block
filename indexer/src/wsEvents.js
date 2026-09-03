@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Live Event Streaming via WebSockets 
  *
@@ -71,7 +72,7 @@ export function attachWebSocketServer(httpServer) {
   });
 
   wss.on("connection", (ws, _req) => {
-    console.log("[ws] Client connected");
+    logger.info("[ws] Client connected");
 
     const handler = (event) => {
       if (ws.readyState === ws.OPEN) {
@@ -99,11 +100,11 @@ export function attachWebSocketServer(httpServer) {
       bus.off("event", handler);
       bus.off("vault_ratio", vaultHandler);
       bus.off("contract_link", linkHandler);
-      console.log("[ws] Client disconnected");
+      logger.info("[ws] Client disconnected");
     });
 
     ws.on("error", (err) => {
-      console.error("[ws] Socket error:", err.message);
+      logger.error("[ws] Socket error:", err.message);
       bus.off("event", handler);
       bus.off("vault_ratio", vaultHandler);
       bus.off("contract_link", linkHandler);
@@ -117,6 +118,6 @@ export function attachWebSocketServer(httpServer) {
     );
   });
 
-  console.log("[ws] WebSocket server attached");
+  logger.info("[ws] WebSocket server attached");
   return wss;
 }

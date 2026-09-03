@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Multi-Node RPC Validation Client
  *
@@ -85,7 +86,7 @@ async function callWithFailover(method, ...args) {
       // Check if this node is lagging behind the best known ledger
       const bestLedger = Math.max(...nodes.map((n) => n.latestLedger));
       if (bestLedger - node.latestLedger > LAG_THRESHOLD) {
-        console.warn(`[rpc-multi] node ${node.url} is ${bestLedger - node.latestLedger} ledgers behind, switching`);
+        logger.warn(`[rpc-multi] node ${node.url} is ${bestLedger - node.latestLedger} ledgers behind, switching`);
         node.healthy = false;
         primaryIndex = nextHealthy(idx);
         idx = primaryIndex;
@@ -94,14 +95,14 @@ async function callWithFailover(method, ...args) {
 
       // Promote to primary if we had to fail over
       if (idx !== primaryIndex) {
-        console.log(`[rpc-multi] promoting ${node.url} to primary`);
+        logger.info(`[rpc-multi] promoting ${node.url} to primary`);
         primaryIndex = idx;
       }
 
       return result;
     } catch (err) {
       recordOutcome(node, false, Date.now() - start);
-      console.warn(`[rpc-multi] node ${node.url} failed (${err.message}), trying next`);
+      logger.warn(`[rpc-multi] node ${node.url} failed (${err.message}), trying next`);
       node.healthy = false;
       idx = nextHealthy(idx);
     }
@@ -115,23 +116,23 @@ async function callWithFailover(method, ...args) {
 // (e.g. in tests) must not have the side effect of scheduling network calls.
 // unref() defensively, so even a direct call from a test can't keep the
 // process alive on its own.
+async function checkNodeRecovery(node) {
+  const start = Date.now();
+  try {
+    const res = await withTimeout(node.server.getLatestLedger(), CALL_TIMEOUT_MS);
+    recordOutcome(node, true, Date.now() - start);
+    node.latestLedger = res.sequence;
+    node.healthy = true;
+    logger.info(`[rpc-multi] node ${node.url} recovered`);
+  } catch {
+    recordOutcome(node, false, Date.now() - start);
+    // still down
+  }
+}
+
 export function startNodeRecoveryPoll() {
   const interval = setInterval(async () => {
-    for (const node of nodes) {
-      if (!node.healthy) {
-        const start = Date.now();
-        try {
-          const res = await withTimeout(node.server.getLatestLedger(), CALL_TIMEOUT_MS);
-          recordOutcome(node, true, Date.now() - start);
-          node.latestLedger = res.sequence;
-          node.healthy = true;
-          console.log(`[rpc-multi] node ${node.url} recovered`);
-        } catch {
-          recordOutcome(node, false, Date.now() - start);
-          // still down
-        }
-      }
-    }
+    await Promise.all(nodes.filter((node) => !node.healthy).map(checkNodeRecovery));
   }, config.RPC_RECOVERY_INTERVAL_MS);
   interval.unref();
 }

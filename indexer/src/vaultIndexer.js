@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Vault / Treasury Indexer
  *
@@ -175,12 +176,12 @@ export async function refreshVaultRatio(contractId, ledger) {
     await db.upsertVaultSnapshot(snapshot);
     publishVaultRatio(snapshot);
 
-    console.log(
+    logger.info(
       `[vault] ${contractId.slice(0, 8)}… ratio=${ratio != null ? ratio.toFixed(6) : "N/A"} ` +
         `assets=${totalAssets} supply=${totalSupply} @ ledger=${ledger}`,
     );
   } catch (err) {
-    console.error(`[vault] Failed to refresh ratio for ${contractId}: ${err.message}`);
+    logger.error(`[vault] Failed to refresh ratio for ${contractId}: ${err.message}`);
   }
 }
 
@@ -204,7 +205,7 @@ export async function bootstrapVault(contractId) {
 
     await refreshVaultRatio(contractId, seq);
   } catch (err) {
-    console.error(`[vault] Failed to bootstrap ${contractId}: ${err.message}`);
+    logger.error(`[vault] Failed to bootstrap ${contractId}: ${err.message}`);
   }
 }
 
@@ -221,6 +222,6 @@ export async function refreshAllVaults() {
 
     await Promise.allSettled(ids.map((id) => refreshVaultRatio(id, seq)));
   } catch (err) {
-    console.error(`[vault] refreshAllVaults error: ${err.message}`);
+    logger.error(`[vault] refreshAllVaults error: ${err.message}`);
   }
 }
