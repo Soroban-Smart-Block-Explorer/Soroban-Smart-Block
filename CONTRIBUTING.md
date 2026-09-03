@@ -95,7 +95,23 @@ Reference the issue your work closes in the PR description, for example
 
 ## Quality gates (run before pushing)
 
-CI runs the following. Reproduce them locally to avoid a red build:
+A `.husky/pre-push` hook automatically runs these checks on `git push`:
+- Rust contract build + tests (wasm32 target)
+- Indexer ESLint + formatting check
+- Frontend ESLint + formatting check
+
+If any check fails, the push is blocked. You have two options:
+
+1. **Fix the issue** (recommended): Address the linting or formatting error and try pushing again.
+2. **Skip the hook** (emergency only): `git push --no-verify` bypasses the checks, but CI will still run them and fail.
+
+For formatting issues, run:
+```bash
+cd frontend && npx prettier --write .
+cd indexer && npx prettier --write .
+```
+
+CI also runs these additional checks:
 
 ```bash
 # Rust workspace (run from repo root)
@@ -168,6 +184,26 @@ Points are tallied from merged activity and can drive a leaderboard and badges
 
 > The rubric is the source of truth for scoring. Automated tallying and the public
 > leaderboard are tracked separately on the project board.
+
+## Admin CLI
+
+Operators can manage API keys and run integrity checks via the admin CLI instead of hand-crafting curl commands:
+
+```bash
+# List all API keys
+npm run admin -- keys list
+
+# Create a new API key
+npm run admin -- keys create my-app --tier pro --rate-limit 5000
+
+# Rotate an existing key (revokes old key, issues new one)
+npm run admin -- keys rotate <key-id>
+
+# Run database integrity checks
+npm run admin -- integrity-check
+```
+
+Set `ADMIN_SECRET` in `indexer/.env` before using these commands.
 
 ## Reporting issues
 
