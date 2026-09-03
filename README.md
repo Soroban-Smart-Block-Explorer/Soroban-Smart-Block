@@ -58,9 +58,10 @@ Soroban Smart Block Explorer decodes contract calls on the fly using an ABI-like
 
 ---
 
-### Architecture Decision Records
+### Architecture
 
-- [ADR index](docs/adr/README.md) for the six core design choices behind the explorer.
+- [System Architecture](docs/architecture.md) — detailed data flow, component topology, and middleware stack.
+- [Architecture Decision Records](docs/adr/README.md) — the six core design choices behind the explorer.
 
 ## Quick Start
 
