@@ -6,6 +6,7 @@ workflow, conventions, and quality gates enforced by CI.
 For background, read the [developer documentation](docs/site/index.html) and the
 [architecture deep dive](docs/guides/architecture-deep-dive.md). If you're registering
 a contract's ABI, see the [ABI registration guide](docs/guides/register-abi.md).
+For database performance work, see the [database indexes and performance guide](docs/guides/database-indexes-and-performance.md).
 
 ## Getting set up
 

@@ -1,3 +1,4 @@
+import { logger } from "../logger.js";
 /**
  * API Key Authenticator Middleware
  *
@@ -282,7 +283,7 @@ async function apiKeyAuthenticator(req, res, next) {
 
     return next();
   } catch (err) {
-    console.error("[apiKeyAuth] Unexpected error:", err);
+    logger.error("[apiKeyAuth] Unexpected error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 }

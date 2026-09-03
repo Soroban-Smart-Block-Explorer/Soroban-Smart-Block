@@ -17,7 +17,7 @@ describe("SearchPage", () => {
       }),
     });
 
-    (global as any).fetch = fetchMock;
+    global.fetch = fetchMock as unknown as typeof fetch;
     const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const queryClient = new QueryClient({

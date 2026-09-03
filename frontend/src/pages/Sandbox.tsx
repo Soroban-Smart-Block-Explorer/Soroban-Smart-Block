@@ -1,6 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, Suspense, lazy } from "react";
 import "../styles/Sandbox.css";
-import Editor from "../components/Editor";
 import FileExplorer from "../components/FileExplorer";
 import Terminal from "../components/Terminal";
 import Preview from "../components/Preview";
@@ -12,6 +11,8 @@ import { generateSandboxId } from "../services/export";
 import { saveSandbox } from "../services/sandbox-api";
 import { createAutoSaver } from "../services/session";
 import { WebContainer } from "@webcontainer/api";
+
+const Editor = lazy(() => import("../components/Editor"));
 
 const Sandbox: React.FC = () => {
   const [files, setFiles] = useState<Map<string, SandboxFile>>(new Map());
@@ -147,7 +148,9 @@ const Sandbox: React.FC = () => {
 
         <div className="editor-section">
           {currentFile ? (
-            <Editor file={currentFile} onChange={handleFileChange} />
+            <Suspense fallback={<div className="placeholder">Loading editor...</div>}>
+              <Editor file={currentFile} onChange={handleFileChange} />
+            </Suspense>
           ) : (
             <div className="placeholder">Select a file to edit</div>
           )}

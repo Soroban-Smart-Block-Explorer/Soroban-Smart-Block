@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Multi-Tier Cache Layer
  *
@@ -16,12 +17,14 @@
 
 import crypto from "crypto";
 import config from "./config.js";
+import { withSpan } from "./tracing.js";
 
 // ── TTL configuration by cache type ──────────────────────────────────────────
 // l1/l2 in seconds; l3 is the Cache-Control header string for CDN/browser.
 const TTL_CONFIG = {
   events_list: { l1: 5, l2: 30, l3: "public, max-age=30, stale-while-revalidate=300" },
   events_single: { l1: 10, l2: 60, l3: "private, max-age=60" },
+  contract_events: { l1: 5, l2: 30, l3: "public, max-age=30, stale-while-revalidate=300" },
   contracts_list: { l1: 30, l2: 300, l3: "public, max-age=300, stale-if-error=86400" },
   contracts_single: { l1: 60, l2: 900, l3: "public, max-age=300, stale-if-error=86400" },
   contract_stats: { l1: 60, l2: 300, l3: "public, max-age=300" },
@@ -131,10 +134,10 @@ async function _getRedis() {
   try {
     const { createClient } = await import("redis");
     _redis = createClient({ url });
-    _redis.on("error", (err) => console.warn("[cache:l2] error:", err.message));
+    _redis.on("error", (err) => logger.warn("[cache:l2] error:", err.message));
     await _redis.connect();
-    console.log("[cache:l2] connected:", url);
-    _setupPubSub(url).catch((e) => console.warn("[cache:pubsub] setup failed:", e.message));
+    logger.info("[cache:l2] connected:", url);
+    _setupPubSub(url).catch((e) => logger.warn("[cache:pubsub] setup failed:", e.message));
     
     // Register Redis client for health checks
     try {
@@ -144,7 +147,7 @@ async function _getRedis() {
       // Health module may not be available yet
     }
   } catch (err) {
-    console.warn("[cache:l2] unavailable, using L1 only:", err.message);
+    logger.warn("[cache:l2] unavailable, using L1 only:", err.message);
     _redis = null;
   }
   return _redis;
@@ -153,7 +156,7 @@ async function _getRedis() {
 async function _setupPubSub(url) {
   const { createClient } = await import("redis");
   _redisSub = createClient({ url });
-  _redisSub.on("error", (err) => console.warn("[cache:pubsub] error:", err.message));
+  _redisSub.on("error", (err) => logger.warn("[cache:pubsub] error:", err.message));
   await _redisSub.connect();
   await _redisSub.subscribe(INVALIDATION_CHANNEL, (message) => {
     try {
@@ -173,7 +176,7 @@ async function _setupPubSub(url) {
       /* malformed invalidation message — ignore */
     }
   });
-  console.log("[cache:pubsub] subscribed to", INVALIDATION_CHANNEL);
+  logger.info("[cache:pubsub] subscribed to", INVALIDATION_CHANNEL);
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
@@ -225,6 +228,10 @@ function _ratePerMin(events) {
 // ── Internal: get with full metadata ─────────────────────────────────────────
 
 async function _getWithMeta(key, cacheType) {
+  return withSpan("cache.get", () => _getWithMetaImpl(key, cacheType), { "cache.key": key, "cache.type": cacheType });
+}
+
+async function _getWithMetaImpl(key, cacheType) {
   // L1 check
   const l1Entry = _l1.get(key);
   if (l1Entry) {
@@ -261,7 +268,7 @@ async function _getWithMeta(key, cacheType) {
         return { value, layer: "l2", xfetch: false };
       }
     } catch (err) {
-      console.warn("[cache:l2] get error:", err.message);
+      logger.warn("[cache:l2] get error:", err.message);
     }
   }
   _recordMiss("l2", cacheType);
@@ -288,6 +295,10 @@ export async function cacheGet(key, cacheType) {
  * @param {number} [computeMs]         time taken to compute (enables XFetch)
  */
 export async function cacheSet(key, value, ttlOrType = "default", computeMs = 0) {
+  return withSpan("cache.set", () => _cacheSetImpl(key, value, ttlOrType, computeMs), { "cache.key": key });
+}
+
+async function _cacheSetImpl(key, value, ttlOrType, computeMs) {
   let l1Ttl, l2Ttl, type;
   if (typeof ttlOrType === "number") {
     // Backwards-compat: treat as seconds for both layers
@@ -311,7 +322,7 @@ export async function cacheSet(key, value, ttlOrType = "default", computeMs = 0)
       const wrapped = { __v: value, __computeMs: computeMs, __type: type };
       await redis.set(key, JSON.stringify(wrapped), { EX: l2Ttl });
     } catch (err) {
-      console.warn("[cache:l2] set error:", err.message);
+      logger.warn("[cache:l2] set error:", err.message);
     }
   }
 }
@@ -370,7 +381,7 @@ export async function cacheInvalidate(keyOrPattern) {
         }),
       );
     } catch (err) {
-      console.warn("[cache:invalidate] error:", err.message);
+      logger.warn("[cache:invalidate] error:", err.message);
     }
   }
 
