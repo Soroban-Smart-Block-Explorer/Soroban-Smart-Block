@@ -5,8 +5,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # BuildKit is required for RUN --mount=type=cache in the Dockerfile.
+      # Codespaces and modern Docker Desktop enable it by default.
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
     volumes:
       - ..:/workspaces/Soroban-Smart-Block:cached
+      # Persist npm and Cargo caches across container rebuilds so that
+      # postCreateCommand is near-instant after the first run.
+      - npm-cache:/root/.npm
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
     # Keep the container alive for VS Code / Codespaces to attach to
     command: sleep infinity
     environment:
@@ -35,3 +44,6 @@ services:
 
 volumes:
   pgdata:
+  npm-cache:
+  cargo-registry:
+  cargo-git:

@@ -145,7 +145,21 @@ export default function RegistrationSuccessPage() {
         </span>
         <div>
           <h1 style={{ fontSize: 20, margin: 0, color: "#1a7f37" }}>
-            Contract registered successfully!
+            Contract registered successfully!{" "}
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                textTransform: "capitalize",
+                color: "var(--muted)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: "2px 6px",
+                verticalAlign: "middle",
+              }}
+            >
+              {network}
+            </span>
           </h1>
           <p style={{ margin: "4px 0 0", fontSize: 14, color: "var(--muted)" }}>
             {contractName && contractName !== contractId ? (

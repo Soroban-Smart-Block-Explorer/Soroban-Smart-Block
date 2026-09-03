@@ -9,9 +9,11 @@
     "test:decoder": "node --test tests/decoder.test.js test/decoder.stellarswap.test.js test/decoder.blend.test.js",
     "test:scval": "node --test tests/scval.test.js",
     "test:classic": "node --test tests/decoderClassic.test.js tests/horizonClient.test.js",
-    "test:coverage": "c8 --reporter=text --reporter=lcov npm run test"
+    "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/decoder.test.js tests/scval.test.js tests/decoderClassic.test.js tests/horizonClient.test.js",
+    "test:mutation": "stryker run"
   },
   "dependencies": {
+    "@sentry/node": "^10.72.0",
     "@stellar/stellar-sdk": "^14.6.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
@@ -23,7 +25,7 @@
     "lru-cache": "^10.4.3",
     "maxmind": "^4.3.22",
     "node-cron": "^3.0.3",
-    "nodemailer": "^6.9.13",
+    "nodemailer": "^9.0.6",
     "pg": "8.12.0",
     "prom-client": "15.1.3",
     "redis": "^4.7.0",
@@ -36,6 +38,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@stryker-mutator/core": "^8.7.1",
+    "@stryker-mutator/command-runner": "^8.7.1",
     "@types/jest": "^29.5.0",
     "ajv": "^8.16.0",
     "ajv-formats": "^2.1.1",

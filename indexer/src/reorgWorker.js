@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * Ledger Re-org Detection & Rollback Worker 
  *
@@ -26,7 +27,7 @@ async function getRecentLedgerHashes(limit = config.REORG_CHECK_INTERVAL + confi
 /** Delete orphaned rows and atomically persist the rewind cursor. */
 export async function rollback(forkLedger) {
   await db.rollbackFromLedger(forkLedger);
-  console.warn(`[reorg] Rolled back ledger ${forkLedger}+`);
+  logger.warn(`[reorg] Rolled back ledger ${forkLedger}+`);
 }
 
 // ── Core check ────────────────────────────────────────────────────────────────
@@ -90,12 +91,12 @@ export async function checkForReorg(latestLedgerOrRpc, latestLedgerHashOrDepende
     const latestEntry = stored.find((row) => Number(row.ledger) === latestLedger);
     if (!latestEntry) return null;
     if (latestEntry.hash !== latestLedgerHash) {
-      console.warn(`[reorg] Mismatch at ledger ${latestLedger}: stored=${latestEntry.hash} network=${latestLedgerHash}`);
+      logger.warn(`[reorg] Mismatch at ledger ${latestLedger}: stored=${latestEntry.hash} network=${latestLedgerHash}`);
       await rollbackFork(latestLedger);
       try {
         await alertReorg(latestLedger);
       } catch (err) {
-        console.error(`[reorg] Alert failed at ledger ${latestLedger}: ${err.message}`);
+        logger.error(`[reorg] Alert failed at ledger ${latestLedger}: ${err.message}`);
       }
       return latestLedger;
     }
@@ -115,7 +116,7 @@ export async function checkForReorg(latestLedgerOrRpc, latestLedgerHashOrDepende
     }
 
     if (networkHash && networkHash !== hash) {
-      console.warn(`[reorg] Mismatch at ledger ${ledgerNumber}: stored=${hash} network=${networkHash}`);
+      logger.warn(`[reorg] Mismatch at ledger ${ledgerNumber}: stored=${hash} network=${networkHash}`);
       earliestFork = earliestFork === null ? ledgerNumber : Math.min(earliestFork, ledgerNumber);
     }
   }
@@ -126,7 +127,7 @@ export async function checkForReorg(latestLedgerOrRpc, latestLedgerHashOrDepende
   try {
     await alertReorg(earliestFork);
   } catch (err) {
-    console.error(`[reorg] Alert failed at ledger ${earliestFork}: ${err.message}`);
+    logger.error(`[reorg] Alert failed at ledger ${earliestFork}: ${err.message}`);
   }
   return earliestFork;
 }
@@ -149,7 +150,7 @@ export function startReorgWorker(rpc, cursorRef, intervalMs = 30_000) {
   let running = true;
 
   (async () => {
-    console.log("[reorg] Worker started");
+    logger.info("[reorg] Worker started");
 
     while (running) {
       await new Promise((r) => setTimeout(r, intervalMs));
@@ -159,10 +160,10 @@ export function startReorgWorker(rpc, cursorRef, intervalMs = 30_000) {
         const forkLedger = await checkForReorg(rpc);
         if (forkLedger !== null) {
           cursorRef.setCursor(forkLedger); // rewind main loop
-          console.log(`[reorg] Cursor rewound to ${forkLedger}`);
+          logger.info(`[reorg] Cursor rewound to ${forkLedger}`);
         }
       } catch (err) {
-        console.error("[reorg] Check failed:", err.message);
+        logger.error("[reorg] Check failed:", err.message);
       }
     }
   })();

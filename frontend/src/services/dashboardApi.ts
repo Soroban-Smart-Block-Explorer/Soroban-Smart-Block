@@ -72,6 +72,7 @@ export interface ApiKeyRecord {
   rate_limit: number | null;
   daily_limit: number | null;
   expires_at: string | null;
+  allowed_ips: string[] | null;
   revoked: boolean;
   last_used_at: string | null;
   usage_count: number;
@@ -132,6 +133,12 @@ export const dashboardApi = {
   revokeApiKey: (id: string) => request<void>(`/dashboard/api-keys/${id}`, { method: "DELETE" }),
 
   apiKeyUsage: (id: string) => request<UsageStats>(`/dashboard/api-keys/${id}/usage`),
+
+  updateAllowedIps: (id: string, allowed_ips: string[]) =>
+    request<ApiKeyRecord>(`/dashboard/api-keys/${id}/allowed-ips`, {
+      method: "PUT",
+      body: JSON.stringify({ allowed_ips }),
+    }),
 
   listWebhooks: () => request<{ data: WebhookSubscription[] }>("/webhooks").then((r) => r.data),
 

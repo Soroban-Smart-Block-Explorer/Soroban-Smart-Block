@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 /**
  * burnDetector.js
  *
@@ -102,7 +103,7 @@ export async function runBurnDetection() {
       if (!newAlerts.has(contractId)) alerts.delete(contractId);
     }
   } catch (err) {
-    console.error("[burnDetector] error:", err.message);
+    logger.error("[burnDetector] error:", err.message);
   }
 }
 
@@ -130,5 +131,5 @@ export function getBurnAlerts(contractId) {
 export function startBurnDetector() {
   runBurnDetection();
   setInterval(runBurnDetection, POLL_INTERVAL_MS);
-  console.log("[burnDetector] started, polling every", POLL_INTERVAL_MS / 1000, "s");
+  logger.info("[burnDetector] started, polling every", POLL_INTERVAL_MS / 1000, "s");
 }

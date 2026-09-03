@@ -461,6 +461,40 @@ impl ExplorerContract {
         );
     }
 
+    /// Permissionlessly extends the TTL of a registered contract's persistent
+    /// storage entry (and its current ABI version entry) so long-lived,
+    /// rarely-updated registry entries can stay alive without an admin or
+    /// registrant write via `update_contract`.
+    ///
+    /// This only *extends* TTLs already funded by `register_contract` /
+    /// `update_contract` — it writes no new data and requires no auth, so it
+    /// cannot be used to grief the registry's storage costs; each caller pays
+    /// their own transaction's resource fee for the extension.
+    pub fn bump_contract_ttl(env: Env, contract_id: BytesN<32>) {
+        Self::bump_instance_ttl(&env);
+        let key = DataKey::Contract(contract_id.clone());
+        let existing: ContractMeta = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotFound));
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
+
+        let vkey = DataKey::ContractVersion(VersionKey {
+            contract_id,
+            abi_version: existing.abi_version,
+        });
+        env.storage().persistent().extend_ttl(
+            &vkey,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
+    }
+
     pub fn get_contract(env: Env, contract_id: BytesN<32>) -> Result<ContractMeta, Error> {
         env.storage()
             .persistent()
@@ -1058,6 +1092,34 @@ mod tests {
     }
 
     #[test]
+    fn test_bump_contract_ttl_extends_existing_entry() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[40u8; 32]);
+        let meta = make_meta(&env, "Test", &admin);
+        client.register_contract(&admin, &cid, &meta);
+
+        // Permissionless: no auth mock needed beyond the registration above.
+        client.bump_contract_ttl(&cid);
+
+        let fetched = client.get_contract(&cid);
+        assert_eq!(fetched.name, String::from_str(&env, "Test"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_bump_contract_ttl_missing_contract_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[41u8; 32]);
+        client.bump_contract_ttl(&cid);
+    }
+
+    #[test]
     fn test_get_latest_contract_returns_none_for_missing() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -1391,6 +1453,38 @@ mod tests {
         let meta = ContractMeta {
             functions: fns,
             ..make_meta(&env, "ParamOver", &admin)
+        };
+        client.register_contract(&admin, &cid, &meta);
+    }
+
+    // MAX_PARAM_NAME_LEN / MAX_PARAM_KIND_LEN = 32 ────────────────────────────
+    // ParamDef.name/.kind are Soroban `Symbol`s, which the SDK itself refuses
+    // to construct above 32 characters, so the reject path is enforced at
+    // construction time rather than in `validate_meta`. These tests confirm
+    // the accept path holds exactly at the limit.
+
+    #[test]
+    fn test_param_name_and_kind_at_limit_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.init(&admin, &0u32);
+
+        let cid: BytesN<32> = BytesN::from_array(&env, &[71u8; 32]);
+        let long_symbol = Symbol::new(&env, "abcdefghijklmnopqrstuvwxyz012345");
+        let mut params: Vec<ParamDef> = Vec::new(&env);
+        params.push_back(ParamDef {
+            name: long_symbol.clone(),
+            kind: long_symbol,
+        });
+        let mut fns: Vec<FunctionAbi> = Vec::new(&env);
+        fns.push_back(FunctionAbi {
+            name: symbol_short!("fn"),
+            description: String::from_str(&env, "d"),
+            params,
+        });
+        let meta = ContractMeta {
+            functions: fns,
+            ..make_meta(&env, "ParamNameKindLimit", &admin)
         };
         client.register_contract(&admin, &cid, &meta);
     }

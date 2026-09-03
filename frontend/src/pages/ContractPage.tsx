@@ -292,7 +292,7 @@ export default function ContractPage() {
               }}
               aria-label="View ABI version history"
             >
-              📜 ABI History
+              📜 ABI History{abiHistoryData && abiHistoryData.length > 0 ? ` (${abiHistoryData.length})` : ""}
             </button>
             <Link
               to={`/contract/${id}/workspace`}

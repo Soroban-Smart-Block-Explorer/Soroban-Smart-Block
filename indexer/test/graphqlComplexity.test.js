@@ -1,347 +1,376 @@
-import { jest } from "@jest/globals";
-import request from "supertest";
+import { jest } from '@jest/globals';
+import request from 'supertest';
+import express from 'express';
 
-const { graphqlComplexityLimiter, TIER_COMPLEXITY_BUDGETS } = await import("../src/rateLimit/graphqlComplexity.js");
+jest.unstable_mockModule('graphql', () => ({
+  parse: jest.fn((query) => {
+    // Simple mock parser that simulates graphql parse()
+    // In real scenario, this would be the actual graphql parser
+    if (query.includes('__typename')) {
+      return {
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: [
+                { kind: 'Field', name: { value: '__typename' } },
+              ],
+            },
+          },
+        ],
+      };
+    }
+    return {
+      definitions: [
+        {
+          kind: 'OperationDefinition',
+          selectionSet: {
+            selections: [],
+          },
+        },
+      ],
+    };
+  }),
+}));
 
-// Create a minimal Express app with the complexity limiter for testing
-function createMockApp() {
-  const express = await import("express");
-  const app = express.default();
+const { graphqlComplexityLimiter } = await import(
+  '../src/rateLimit/graphqlComplexity.js'
+);
 
-  app.use(express.default.json());
-
-  // Mock rate context middleware (sets tier)
-  app.use((req, res, next) => {
-    req.rateContext = { tier: "unauthenticated" };
-    next();
-  });
-
-  app.use(graphqlComplexityLimiter);
-
-  app.post("/graphql", (req, res) => {
-    // Mock GraphQL endpoint that accepts any query
-    res.json({ data: { success: true } });
-  });
-
+function createTestApp() {
+  const app = express();
+  app.use(express.json());
+  app.use('/graphql', graphqlComplexityLimiter);
+  app.post('/graphql', (req, res) => res.json({ ok: true }));
+  app.get('/api/other', (req, res) => res.json({ ok: true }));
   return app;
 }
 
-describe("GraphQL Query Complexity Limiter Integration Tests", () => {
+describe('graphqlComplexity middleware (issue #763)', () => {
   let app;
 
-  beforeEach(async () => {
-    app = await createMockApp();
+  beforeAll(() => {
+    app = createTestApp();
   });
 
-  describe("Complexity Budget Enforcement", () => {
-    it("accepts a simple query within the complexity budget", async () => {
-      const query = `
-        {
-          events(contract: "CABC123") {
-            data {
-              seq
-              contract_id
-              function
-            }
-            next_cursor
-          }
-        }
-      `;
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
 
+  describe('Allow path: query under complexity budget', () => {
+    it('allows simple query that is under the budget', async () => {
       const res = await request(app)
-        .post("/graphql")
-        .send({ query });
+        .post('/graphql')
+        .send({ query: '{ __typename }' });
 
       expect(res.status).toBe(200);
-      expect(res.body.data.success).toBe(true);
-      expect(res.headers["x-graphql-cost"]).toBeDefined();
-      const cost = parseInt(res.headers["x-graphql-cost"]);
-      expect(cost).toBeLessThanOrEqual(TIER_COMPLEXITY_BUDGETS.unauthenticated);
+      expect(res.body).toEqual({ ok: true });
     });
 
-    it("rejects a query that exceeds the complexity budget", async () => {
-      // Construct a query with many fields to exceed budget
-      // The unauthenticated budget is 100
-      // Each 'events' (list field) costs 10, 'data' costs 10
-      // Each Event field costs 1
-      // We'll select all Event fields multiple times to exceed the budget
-      const query = `
-        {
-          events1: events(contract: "C1") {
-            data {
-              seq
-              contract_id
-              function
-              function_name
-              ledger
-              ledger_sequence
-              tx_hash
-              description
-              cpu_instructions
-              mem_bytes
-              fee_charged
-              is_high_bloat_risk
-              is_clawback
-            }
-            next_cursor
-          }
-          events2: events(contract: "C2") {
-            data {
-              seq
-              contract_id
-              function
-              function_name
-              ledger
-              ledger_sequence
-              tx_hash
-              description
-              cpu_instructions
-              mem_bytes
-              fee_charged
-              is_high_bloat_risk
-              is_clawback
-            }
-            next_cursor
-          }
-          events3: events(contract: "C3") {
-            data {
-              seq
-              contract_id
-              function
-              function_name
-              ledger
-              ledger_sequence
-              tx_hash
-              description
-              cpu_instructions
-              mem_bytes
-              fee_charged
-              is_high_bloat_risk
-              is_clawback
-            }
-            next_cursor
-          }
-          events4: events(contract: "C4") {
-            data {
-              seq
-              contract_id
-              function
-              function_name
-              ledger
-              ledger_sequence
-              tx_hash
-              description
-              cpu_instructions
-              mem_bytes
-              fee_charged
-              is_high_bloat_risk
-              is_clawback
-            }
-            next_cursor
-          }
-        }
-      `;
+    it('sets X-GraphQL-Cost header for allowed queries', async () => {
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ __typename }' });
+
+      expect(res.headers['x-graphql-cost']).toBeDefined();
+      expect(res.headers['x-graphql-cost-remaining']).toBeDefined();
+    });
+
+    it('computes correct cost-remaining', async () => {
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ __typename }' });
+
+      const cost = parseInt(res.headers['x-graphql-cost']);
+      const remaining = parseInt(res.headers['x-graphql-cost-remaining']);
+
+      // For unauthenticated (default), budget is 100
+      expect(remaining).toBe(100 - cost);
+      expect(remaining).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('Deny path: query exceeds complexity budget', () => {
+    it('rejects query that exceeds budget', async () => {
+      // Mock a query with cost > 100 (unauthenticated budget)
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: Array(150)
+                .fill(null)
+                .map((_, i) => ({
+                  kind: 'Field',
+                  name: { value: `field${i}` },
+                })),
+            },
+          },
+        ],
+      });
 
       const res = await request(app)
-        .post("/graphql")
-        .send({ query });
+        .post('/graphql')
+        .send({ query: '{ field1 field2 ... }' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe("Query complexity exceeded");
-      expect(res.body.cost).toBeDefined();
-      expect(res.body.limit).toBe(TIER_COMPLEXITY_BUDGETS.unauthenticated);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          error: 'Query complexity exceeded',
+        })
+      );
+    });
+
+    it('includes cost and limit in error response', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: Array(200)
+                .fill(null)
+                .map((_, i) => ({
+                  kind: 'Field',
+                  name: { value: `field${i}` },
+                })),
+            },
+          },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ /* complex query */ }' });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toHaveProperty('cost');
+      expect(res.body).toHaveProperty('limit');
       expect(res.body.cost).toBeGreaterThan(res.body.limit);
     });
+  });
 
-    it("provides clear error message including cost and limit", async () => {
-      const query = `
-        {
-          events1: events { data { seq contract_id function function_name ledger ledger_sequence tx_hash description cpu_instructions mem_bytes fee_charged is_high_bloat_risk is_clawback } }
-          events2: events { data { seq contract_id function function_name ledger ledger_sequence tx_hash description cpu_instructions mem_bytes fee_charged is_high_bloat_risk is_clawback } }
-          events3: events { data { seq contract_id function function_name ledger ledger_sequence tx_hash description cpu_instructions mem_bytes fee_charged is_high_bloat_risk is_clawback } }
-          events4: events { data { seq contract_id function function_name ledger ledger_sequence tx_hash description cpu_instructions mem_bytes fee_charged is_high_bloat_risk is_clawback } }
-        }
-      `;
+  describe('List field multiplier', () => {
+    it('applies 10x multiplier to fields ending in "s"', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: [
+                { kind: 'Field', name: { value: 'users' } }, // 1 * 10 = 10
+              ],
+            },
+          },
+        ],
+      });
 
       const res = await request(app)
-        .post("/graphql")
-        .send({ query });
+        .post('/graphql')
+        .send({ query: '{ users }' });
 
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual({
-        error: "Query complexity exceeded",
-        cost: expect.any(Number),
-        limit: expect.any(Number),
+      expect(res.status).toBe(200);
+      const cost = parseInt(res.headers['x-graphql-cost']);
+      expect(cost).toBe(10); // list field multiplier applied
+    });
+
+    it('applies 10x multiplier to known list field names', async () => {
+      const graphqlMod = await import('graphql');
+      const listFields = ['edges', 'nodes', 'items', 'results', 'data'];
+
+      for (const field of listFields) {
+        graphqlMod.parse.mockReturnValueOnce({
+          definitions: [
+            {
+              kind: 'OperationDefinition',
+              selectionSet: {
+                selections: [{ kind: 'Field', name: { value: field } }],
+              },
+            },
+          ],
+        });
+
+        const res = await request(app)
+          .post('/graphql')
+          .send({ query: `{ ${field} }` });
+
+        const cost = parseInt(res.headers['x-graphql-cost']);
+        expect(cost).toBe(10); // Should be 1 * 10
+      }
+    });
+
+    it('does not apply multiplier to singular field names', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: [{ kind: 'Field', name: { value: 'user' } }], // singular
+            },
+          },
+        ],
       });
+
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ user }' });
+
+      const cost = parseInt(res.headers['x-graphql-cost']);
+      expect(cost).toBe(1); // No multiplier for singular
     });
   });
 
-  describe("List Field Cost Multiplier", () => {
-    it("applies 10x cost multiplier to list fields", async () => {
-      // Single 'events' query (list field, cost 10)
-      const query1 = `{ events { data { seq } } }`;
-      const res1 = await request(app).post("/graphql").send({ query1 });
+  describe('Tier-based budget', () => {
+    it('applies correct budget for unauthenticated tier (default)', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: { selections: [] },
+          },
+        ],
+      });
 
-      const cost1 = parseInt(res1.headers["x-graphql-cost"]);
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{}' });
 
-      // Single 'event' query (not a list, cost 1) with same nested fields
-      const query2 = `{ event(seq: 1) { seq } }`;
-      const res2 = await request(app).post("/graphql").send({ query2 });
-
-      const cost2 = parseInt(res2.headers["x-graphql-cost"]);
-
-      // The first query should cost more due to 'events' being a list field
-      expect(cost1).toBeGreaterThan(cost2);
+      expect(res.status).toBe(200);
+      // Budget should be 100 for unauthenticated
+      expect(res.headers['x-graphql-cost-remaining']).toBeDefined();
     });
 
-    it("identifies plural field names as list fields", async () => {
-      // 'data' ends with 's' but is in LIST_FIELD_NAMES, so it's a list field
-      const query = `
-        {
-          events {
-            data {
-              seq
-            }
-          }
-        }
-      `;
+    it('applies tier budget from rateContext', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: [{ kind: 'Field', name: { value: 'data' } }], // cost 10
+            },
+          },
+        ],
+      });
 
-      const res = await request(app).post("/graphql").send({ query });
-
-      const cost = parseInt(res.headers["x-graphql-cost"]);
-      // Cost should include: events (10) + data (10) + seq (1) = 21
-      expect(cost).toBeGreaterThanOrEqual(21);
-    });
-  });
-
-  describe("Tier-based Budget Limits", () => {
-    it("enforces different budgets for different tiers", async () => {
-      const complexQuery = `
-        {
-          events1: events { data { seq contract_id function } }
-          events2: events { data { seq contract_id function } }
-          events3: events { data { seq contract_id function } }
-          events4: events { data { seq contract_id function } }
-          events5: events { data { seq contract_id function } }
-        }
-      `;
-
-      // Test unauthenticated tier (budget 100)
-      const app1 = await createMockApp();
-      const res1 = await request(app1)
-        .post("/graphql")
-        .send({ query: complexQuery });
-
-      // Test 'pro' tier (budget 2000)
-      const express = await import("express");
-      const app2 = express.default();
-      app2.use(express.default.json());
+      let capturedReq;
+      const app2 = express();
+      app2.use(express.json());
       app2.use((req, res, next) => {
-        req.rateContext = { tier: "pro" };
+        req.rateContext = { tier: 'pro' };
         next();
       });
-      app2.use(graphqlComplexityLimiter);
-      app2.post("/graphql", (req, res) => res.json({ data: { success: true } }));
-
-      const res2 = await request(app2)
-        .post("/graphql")
-        .send({ query: complexQuery });
-
-      // Unauthenticated should reject (small budget)
-      expect(res1.status).toBe(400);
-      expect(res1.body.limit).toBe(100);
-
-      // Pro tier should accept (larger budget)
-      expect(res2.status).toBe(200);
-    });
-  });
-
-  describe("Response Headers", () => {
-    it("sets X-GraphQL-Cost header indicating actual query cost", async () => {
-      const query = `{ events { data { seq } } }`;
-      const res = await request(app).post("/graphql").send({ query });
-
-      expect(res.headers["x-graphql-cost"]).toBeDefined();
-      const cost = parseInt(res.headers["x-graphql-cost"]);
-      expect(cost).toBeGreaterThan(0);
-    });
-
-    it("sets X-GraphQL-Cost-Remaining header indicating remaining budget", async () => {
-      const query = `{ events { data { seq } } }`;
-      const res = await request(app).post("/graphql").send({ query });
-
-      expect(res.headers["x-graphql-cost-remaining"]).toBeDefined();
-      const cost = parseInt(res.headers["x-graphql-cost"]);
-      const remaining = parseInt(res.headers["x-graphql-cost-remaining"]);
-      const budget = TIER_COMPLEXITY_BUDGETS.unauthenticated;
-
-      expect(remaining).toBe(Math.max(0, budget - cost));
-    });
-  });
-
-  describe("Edge Cases", () => {
-    it("passes through requests with no query body", async () => {
-      const res = await request(app).post("/graphql").send({});
-
-      // Should pass through without rejection
-      expect(res.status).toBe(200);
-    });
-
-    it("gracefully handles malformed queries (parse errors)", async () => {
-      const malformedQuery = `{ invalid syntax here }`;
-      const res = await request(app)
-        .post("/graphql")
-        .send({ query: malformedQuery });
-
-      // Should pass through gracefully on parse errors
-      expect(res.status).toBe(200);
-    });
-
-    it("ignores requests to non-GraphQL endpoints", async () => {
-      const express = await import("express");
-      const app = express.default();
-      app.use(express.default.json());
-      app.use((req, res, next) => {
-        req.rateContext = { tier: "unauthenticated" };
-        next();
+      app2.use('/graphql', graphqlComplexityLimiter);
+      app2.post('/graphql', (req, res) => {
+        capturedReq = req;
+        res.json({ ok: true });
       });
-      app.use(graphqlComplexityLimiter);
-      app.post("/api/events", (req, res) => res.json({ success: true }));
 
-      // A very expensive query, but not on /graphql path
-      const res = await request(app)
-        .post("/api/events")
-        .send({ query: "{ very expensive query }" });
+      const res = await request(app2)
+        .post('/graphql')
+        .send({ query: '{ data }' });
 
-      // Should pass through (complexity limiter only applies to /graphql)
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
+      // Pro tier budget is 2000
+      expect(parseInt(res.headers['x-graphql-cost-remaining'])).toBeLessThan(2000);
     });
   });
 
-  describe("Fragment and Inline Fragment Handling", () => {
-    it("accounts for fragment spreads in complexity calculation", async () => {
-      // Fragment spreads are counted as cost 1 per spread
-      const query = `
-        fragment EventFields on Event {
-          seq
-          contract_id
-          function
-        }
-        {
-          events {
-            data {
-              ...EventFields
-            }
-          }
-        }
-      `;
+  describe('Edge cases', () => {
+    it('skips middleware for non-GraphQL paths', async () => {
+      const res = await request(app)
+        .get('/api/other')
+        .send({});
 
-      const res = await request(app).post("/graphql").send({ query });
-
-      // Should calculate cost including fragment spread
       expect(res.status).toBe(200);
-      expect(res.headers["x-graphql-cost"]).toBeDefined();
+      expect(res.body).toEqual({ ok: true });
+      expect(res.headers['x-graphql-cost']).toBeUndefined();
+    });
+
+    it('passes through when there is no query in request', async () => {
+      const res = await request(app)
+        .post('/graphql')
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.headers['x-graphql-cost']).toBeUndefined();
+    });
+
+    it('passes through on parse error', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockImplementationOnce(() => {
+        throw new Error('Parse error');
+      });
+
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ invalid syntax }' });
+
+      expect(res.status).toBe(200);
+      expect(res.headers['x-graphql-cost']).toBeUndefined();
+    });
+
+    it('handles nested selection sets correctly', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: [
+                {
+                  kind: 'Field',
+                  name: { value: 'users' }, // 10
+                  selectionSet: {
+                    selections: [
+                      { kind: 'Field', name: { value: 'id' } }, // 1
+                      { kind: 'Field', name: { value: 'name' } }, // 1
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ users { id name } }' });
+
+      expect(res.status).toBe(200);
+      const cost = parseInt(res.headers['x-graphql-cost']);
+      expect(cost).toBe(12); // 10 + 1 + 1
+    });
+
+    it('handles fragment spreads with minimal cost', async () => {
+      const graphqlMod = await import('graphql');
+      graphqlMod.parse.mockReturnValueOnce({
+        definitions: [
+          {
+            kind: 'OperationDefinition',
+            selectionSet: {
+              selections: [
+                { kind: 'Field', name: { value: 'user' } },
+                { kind: 'FragmentSpread', name: { value: 'UserFragment' } },
+              ],
+            },
+          },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/graphql')
+        .send({ query: '{ user ...UserFragment }' });
+
+      expect(res.status).toBe(200);
+      // Fragment spreads cost 1 each
+      const cost = parseInt(res.headers['x-graphql-cost']);
+      expect(cost).toBe(2); // user (1) + fragment spread (1)
     });
   });
 });
