@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 import { resolveAssetLogo } from "../utils/assetLogo";
 import { truncateAddress } from "../utils/strkey";
@@ -55,6 +56,8 @@ function AssetLogo({ code, issuer }: { code: string; issuer: string | null }) {
  * XLM balance + classic/SEP-41 asset table for a wallet, sourced from Horizon
  * (issue #530). Fetch failures render a non-fatal inline message so the
  * caller's event history can still load (issue #529).
+ *
+ * Issue #916: also shows detected DeFi positions (LP shares, vault deposits).
  */
 export default function WalletBalances({ address }: Props) {
   const { data, isLoading, error } = useQuery({
@@ -67,6 +70,14 @@ export default function WalletBalances({ address }: Props) {
       xlm: balances.find((b) => b.asset_type === "native"),
       assets: balances.filter((b) => b.asset_type !== "native"),
     }),
+  });
+
+  // Issue #916: portfolio positions (LP, vault, lending)
+  const { data: portfolio } = useQuery({
+    queryKey: ["walletPortfolio", address],
+    queryFn: () => api.walletPortfolio(address),
+    enabled: !!address,
+    retry: false,
   });
 
   if (isLoading) return <p style={{ color: "var(--muted)" }}>Loading balances…</p>;
@@ -112,6 +123,52 @@ export default function WalletBalances({ address }: Props) {
                     {b.asset_issuer ? truncateAddress(b.asset_issuer) : "—"}
                   </td>
                   <td style={{ padding: "6px 8px", textAlign: "right" }}>{formatAmount(b.balance)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Issue #916: DeFi positions detected from indexed events */}
+      {portfolio && portfolio.positions.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>
+            Detected Positions
+            {portfolio.sampled && (
+              <span
+                style={{ marginLeft: 8, fontSize: 11, color: "#f59e0b" }}
+                title="This address has over 1M events; series is sampled."
+              >
+                (sampled)
+              </span>
+            )}
+          </h4>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
+                <th style={{ textAlign: "left", padding: "6px 8px", fontWeight: 500 }}>Contract</th>
+                <th style={{ textAlign: "left", padding: "6px 8px", fontWeight: 500 }}>Kind</th>
+                <th style={{ textAlign: "left", padding: "6px 8px", fontWeight: 500 }}>Protocol</th>
+                <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {portfolio.positions.map((p) => (
+                <tr key={p.contract_id} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "6px 8px" }}>
+                    <Link
+                      to={`/contract/${p.contract_id}`}
+                      style={{ color: "var(--accent)", fontFamily: "monospace", fontSize: 11 }}
+                    >
+                      {truncateAddress(p.contract_id)}
+                    </Link>
+                  </td>
+                  <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{p.kind}</td>
+                  <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{p.protocol ?? "—"}</td>
+                  <td style={{ padding: "6px 8px", textAlign: "right" }}>
+                    {p.balance !== null ? formatAmount(p.balance) : <span title="Cannot be reliably derived">unknown</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { truncateAddress } from "../utils/strkey";
@@ -32,8 +32,9 @@ import ProtocolBadge from "../components/ProtocolBadge";
 import InvocationFrequencyChart, { type StatsRange } from "../components/InvocationFrequencyChart";
 import StorageTierStackedBar from "../components/StorageTierStackedBar";
 import OfflineContractActions from "../components/OfflineContractActions";
+import ContractFunctionForm from "../components/contract/ContractFunctionForm";
 
-type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "abi-history";
+type Tab = "overview" | "source" | "read" | "write" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "abi-history";
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
@@ -238,6 +239,8 @@ export default function ContractPage() {
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "source", label: "Source Code" },
+    { key: "read", label: "Read" },
+    { key: "write", label: "Write" },
     { key: "simulate", label: "Simulate" },
     { key: "flow", label: "Invocation Flow" },
     { key: "roles", label: "Privileged Roles" },
@@ -702,6 +705,42 @@ export default function ContractPage() {
               title="No source available"
               message="No verified source files were returned for this contract."
             />
+          )}
+        </div>
+      )}
+
+      {/* Tab: Read Contract — Issue #913 */}
+      {tab === "read" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p style={{ color: "var(--muted)", fontSize: 13, margin: 0 }}>
+            Query read-only functions (getter, balance, name, symbol, etc.) without a wallet.
+          </p>
+          {functions.length === 0 ? (
+            <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
+              No ABI functions registered for this contract.
+            </div>
+          ) : (
+            functions.map((f) => (
+              <ContractFunctionForm key={f.name} contractId={id} fn={f} mode="read" />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Tab: Write Contract — Issue #913 */}
+      {tab === "write" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p style={{ color: "var(--muted)", fontSize: 13, margin: 0 }}>
+            Call state-changing functions. Simulation previews the outcome before signing.
+          </p>
+          {functions.length === 0 ? (
+            <div className="card" style={{ color: "var(--muted)", fontSize: 13 }}>
+              No ABI functions registered for this contract.
+            </div>
+          ) : (
+            functions.map((f) => (
+              <ContractFunctionForm key={f.name} contractId={id} fn={f} mode="write" />
+            ))
           )}
         </div>
       )}

@@ -31,6 +31,7 @@ const AbiDiffPage = lazy(() => import("./pages/AbiDiffPage"));
 const DashboardPage = lazy(() => import("./pages/DashboardPage"));
 const Status = lazy(() => import("./pages/Status"));
 const AdminJobsPage = lazy(() => import("./pages/AdminJobsPage"));
+const TokenPage = lazy(() => import("./pages/TokenPage"));
 
 function Fallback() {
   const { t } = useTranslation();
@@ -53,6 +54,8 @@ export default function App() {
             <Route path="/contract/:id/workspace" element={<DeveloperWorkspace />} />
             {/* Issue #521: ABI diff view */}
             <Route path="/contract/:id/abi-diff" element={<AbiDiffPage />} />
+            {/* Issue #915: dedicated token page */}
+            <Route path="/token/:id" element={<TokenPage />} />
             <Route path="/wallet/:address" element={<WalletPage />} />
             <Route path="/event/:seq" element={<EventPage />} />
             <Route path="/tx/:hash" element={<TransactionPage />} />

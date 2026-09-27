@@ -53,3 +53,18 @@ export async function fetchTokenMetadata(contractId) {
     decimals: Number(decimals ?? 7),
   };
 }
+
+/**
+ * Fetch the total supply of a SEP-41 token contract.
+ * Returns null if the contract does not implement total_supply().
+ * @param {string} contractId
+ * @returns {Promise<string|null>}
+ */
+export async function fetchTotalSupply(contractId) {
+  try {
+    const supply = await simulateCall(contractId, "total_supply");
+    return supply !== null ? String(supply) : null;
+  } catch {
+    return null;
+  }
+}

@@ -186,6 +186,7 @@ export default function WalletPage() {
   const { address = "" } = useParams<{ address: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const [copied, setCopied] = useState(false);
+  const [pageTab, setPageTab] = useState<"overview" | "portfolio">("overview");
   const { isSaved, toggle } = useWatchlist();
 
   // ── Resolve muxed addresses ──────────────────────────────────────────────
@@ -224,6 +225,21 @@ export default function WalletPage() {
   const allEvents = walletQuery.data?.events ?? [];
   const horizonAccount = walletQuery.data?.horizon_account ?? null;
   const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
+
+  // Issue #916: portfolio data (only fetched when portfolio tab is active)
+  const portfolioQuery = useQuery({
+    queryKey: ["walletPortfolio", address],
+    queryFn: () => api.walletPortfolio(address),
+    enabled: !!address && isValidAddress && pageTab === "portfolio",
+    retry: false,
+  });
+
+  const balanceSeriesQuery = useQuery({
+    queryKey: ["walletBalanceSeries", address],
+    queryFn: () => api.walletBalanceSeries(address, { days: 30 }),
+    enabled: !!address && isValidAddress && pageTab === "portfolio",
+    retry: false,
+  });
 
   // ── Client-side function-name + event-type filters (server only filters by date) ──
   const filtered = useMemo(() => {
@@ -497,6 +513,184 @@ export default function WalletPage() {
         )}
       </div>
 
+      {/* Page-level tab bar — Overview / Portfolio (issue #916) */}
+      <div
+        style={{
+          display: "flex",
+          gap: 4,
+          borderBottom: "1px solid var(--border)",
+          paddingBottom: 0,
+        }}
+      >
+        {(["overview", "portfolio"] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setPageTab(t)}
+            style={{
+              background: "transparent",
+              border: "none",
+              borderBottom: pageTab === t ? "2px solid var(--accent)" : "2px solid transparent",
+              padding: "8px 16px",
+              cursor: "pointer",
+              color: pageTab === t ? "var(--accent)" : "var(--muted)",
+              fontWeight: pageTab === t ? 700 : 400,
+              fontSize: 13,
+              textTransform: "capitalize",
+            }}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Portfolio tab — Issue #916 */}
+      {pageTab === "portfolio" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Balance-over-time series */}
+          <div className="card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <h3 style={{ margin: 0, fontSize: 14 }}>Balance History (30 days)</h3>
+              {portfolioQuery.data?.sampled && (
+                <span style={{ fontSize: 11, color: "#f59e0b" }}>
+                  ⚠ Address has &gt;1M events — series is sampled
+                </span>
+              )}
+            </div>
+            {balanceSeriesQuery.isLoading ? (
+              <p style={{ color: "var(--muted)", fontSize: 13 }}>Loading…</p>
+            ) : !balanceSeriesQuery.data?.series.length ? (
+              <p style={{ color: "var(--muted)", fontSize: 13 }}>No balance history available.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <caption className="sr-only">Daily balance net change by asset</caption>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--muted)" }}>Day</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--muted)" }}>Asset</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px", color: "var(--muted)" }}>Net change</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {balanceSeriesQuery.data.series.map((row, i) => (
+                      <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "6px 8px" }}>{new Date(row.day).toLocaleDateString()}</td>
+                        <td style={{ padding: "6px 8px" }}>{row.asset}</td>
+                        <td
+                          style={{
+                            padding: "6px 8px",
+                            textAlign: "right",
+                            color: Number(row.net_change ?? row.balance) >= 0 ? "#34d399" : "#f87171",
+                          }}
+                        >
+                          {Number(row.net_change ?? row.balance).toLocaleString(undefined, { maximumFractionDigits: 7 })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Protocol usage breakdown */}
+          <div className="card">
+            <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Protocol Usage</h3>
+            {portfolioQuery.isLoading ? (
+              <p style={{ color: "var(--muted)", fontSize: 13 }}>Loading…</p>
+            ) : !portfolioQuery.data?.protocol_usage.length ? (
+              <p style={{ color: "var(--muted)", fontSize: 13 }}>No protocol interactions found.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--muted)" }}>Contract</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--muted)" }}>Name</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px", color: "var(--muted)" }}>Calls</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--muted)" }}>First</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--muted)" }}>Last</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {portfolioQuery.data.protocol_usage.map((p) => (
+                      <tr key={p.contract_id} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "6px 8px" }}>
+                          <Link
+                            to={`/contract/${p.contract_id}`}
+                            style={{ color: "var(--accent)", fontFamily: "monospace", fontSize: 11 }}
+                          >
+                            {truncateAddress(p.contract_id)}
+                          </Link>
+                        </td>
+                        <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{p.name ?? "—"}</td>
+                        <td style={{ padding: "6px 8px", textAlign: "right" }}>{Number(p.calls).toLocaleString()}</td>
+                        <td style={{ padding: "6px 8px", color: "var(--muted)" }}>
+                          {new Date(p.first_seen).toLocaleDateString()}
+                        </td>
+                        <td style={{ padding: "6px 8px", color: "var(--muted)" }}>
+                          {new Date(p.last_seen).toLocaleDateString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* CSV export — shareable read-only portfolio URL via current address */}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 12 }}>
+            <button
+              onClick={() => {
+                const rows = [
+                  ["contract_id", "kind", "protocol", "balance"],
+                  ...(portfolioQuery.data?.positions ?? []).map((p) => [
+                    p.contract_id,
+                    p.kind,
+                    p.protocol ?? "",
+                    p.balance ?? "unknown",
+                  ]),
+                ];
+                const csv = rows.map((r) => r.map((v) => `"${v}"`).join(",")).join("\n");
+                const blob = new Blob([csv], { type: "text/csv" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `portfolio-${address}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+              style={{
+                padding: "5px 12px",
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                cursor: "pointer",
+                color: "var(--muted)",
+              }}
+            >
+              ⬇ Export CSV
+            </button>
+            <span style={{ color: "var(--muted)" }}>
+              Share:{" "}
+              <a
+                href={window.location.href}
+                style={{ color: "var(--accent)" }}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {window.location.href.slice(0, 60)}…
+              </a>
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Overview tab — existing content */}
+      {pageTab === "overview" && (
+        <>
       {/* XLM balance */}
       {xlmBalance && (
         <div className="card">
@@ -551,6 +745,8 @@ export default function WalletPage() {
           <EventTable events={filtered} />
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

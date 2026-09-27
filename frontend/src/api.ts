@@ -1209,4 +1209,76 @@ export const api = {
       if (!r.ok) throw new Error(data.error || "Verification failed");
       return data as { verified: boolean; computed_hash: string; algorithm: string };
     }),
+
+  // Issue #915: Token page endpoints
+  tokenSummary: (contractId: string) =>
+    get<{
+      contract_id: string;
+      name: string;
+      symbol: string;
+      decimals: number;
+      is_non_standard: boolean;
+      total_holders: number;
+      total_supply: string | null;
+      sac: { asset_code: string; asset_issuer: string } | null;
+    }>(`/tokens/${encodeURIComponent(contractId)}/summary`),
+
+  tokenSupplySeries: (contractId: string, days = 30) =>
+    get<{ contract_id: string; days: number; series: { day: string; minted: string; burned: string }[] }>(
+      `/tokens/${encodeURIComponent(contractId)}/supply-series?days=${days}`,
+    ),
+
+  tokenDistribution: (contractId: string) =>
+    get<{
+      contract_id: string;
+      gini: number | null;
+      top10_share: number | null;
+      top100_share: number | null;
+      histogram: { range_min: number; range_max: number; count: number }[];
+      total_holders: number;
+    }>(`/tokens/${encodeURIComponent(contractId)}/distribution`),
+
+  tokenTransfers: (contractId: string, params: { limit?: number; after?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.limit) q.set("limit", String(params.limit));
+    if (params.after) q.set("after", String(params.after));
+    const qs = q.toString();
+    return get<{
+      contract_id: string;
+      transfers: { seq: number; ledger: number; tx_hash: string; decoded_text: string; created_at: string }[];
+      next_cursor: number | null;
+    }>(`/tokens/${encodeURIComponent(contractId)}/transfers${qs ? `?${qs}` : ""}`);
+  },
+
+  // Issue #916: Wallet portfolio endpoints
+  walletBalanceSeries: (address: string, params: { asset?: string; days?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.asset) q.set("asset", params.asset);
+    if (params.days) q.set("days", String(params.days));
+    const qs = q.toString();
+    return get<{
+      address: string;
+      series: { day: string; asset: string; balance: string; net_change?: string }[];
+    }>(`/wallet/${encodeURIComponent(address)}/balance-series${qs ? `?${qs}` : ""}`);
+  },
+
+  walletPortfolio: (address: string) =>
+    get<{
+      address: string;
+      positions: {
+        contract_id: string;
+        protocol: string | null;
+        kind: string;
+        underlying: string | null;
+        balance: string | null;
+      }[];
+      protocol_usage: {
+        contract_id: string;
+        name: string | null;
+        calls: number;
+        first_seen: string;
+        last_seen: string;
+      }[];
+      sampled: boolean;
+    }>(`/wallet/${encodeURIComponent(address)}/portfolio`),
 };

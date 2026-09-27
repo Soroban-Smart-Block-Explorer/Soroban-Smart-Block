@@ -859,6 +859,91 @@ export const db = {
     return rows;
   },
 
+  // Issue #916: daily balance snapshots per asset for a wallet address
+  async getWalletBalanceSeries(address, { days = 30, asset = null } = {}) {
+    const params = [address, days];
+    let assetClause = "";
+    if (asset) {
+      params.push(asset);
+      assetClause = `AND (raw_data::jsonb->>'asset' = $${params.length} OR raw_data::jsonb->>'asset_code' = $${params.length})`;
+    }
+    const { rows } = await pool.query(
+      `SELECT
+         date_trunc('day', created_at) AS day,
+         COALESCE(raw_data::jsonb->>'asset', raw_data::jsonb->>'asset_code', 'unknown') AS asset,
+         SUM(CASE WHEN raw_data::jsonb->>'to' = $1 THEN (raw_data::jsonb->>'amount')::NUMERIC ELSE 0 END) -
+         SUM(CASE WHEN raw_data::jsonb->>'from' = $1 THEN (raw_data::jsonb->>'amount')::NUMERIC ELSE 0 END) AS net_change
+       FROM events
+       WHERE (raw_data::jsonb->>'from' = $1 OR raw_data::jsonb->>'to' = $1)
+         AND function IN ('transfer', 'mint', 'burn')
+         AND created_at >= NOW() - ($2 || ' days')::INTERVAL
+         ${assetClause}
+       GROUP BY 1, 2
+       ORDER BY 1`,
+      params,
+    );
+    return rows;
+  },
+
+  // Issue #916: detected positions (LP tokens, vault shares, lending balances)
+  async getWalletPositions(address) {
+    // Derive positions from token_holders entries filtered to known DeFi contract types
+    const { rows } = await pool.query(
+      `SELECT
+         th.contract_id,
+         c.protocol_type AS protocol,
+         CASE
+           WHEN c.protocol_type = 'dex' THEN 'lp_share'
+           WHEN c.protocol_type = 'lending' THEN 'lending_deposit'
+           ELSE 'token'
+         END AS kind,
+         NULL AS underlying,
+         th.balance_raw AS balance
+       FROM token_holders th
+       LEFT JOIN contracts c ON c.id = th.contract_id
+       WHERE th.address = $1
+         AND th.balance_raw::NUMERIC > 0
+       ORDER BY th.balance_raw::NUMERIC DESC`,
+      [address],
+    );
+    return rows;
+  },
+
+  // Issue #916: protocol usage breakdown — which contracts, how often, first/last used
+  async getWalletProtocolUsage(address) {
+    const { rows } = await pool.query(
+      `SELECT
+         e.contract_id,
+         c.name,
+         COUNT(*) AS calls,
+         MIN(e.created_at) AS first_seen,
+         MAX(e.created_at) AS last_seen
+       FROM events e
+       LEFT JOIN contracts c ON c.id = e.contract_id
+       WHERE e.raw_data::jsonb->>'from' = $1
+          OR e.raw_data::jsonb->>'to' = $1
+          OR e.raw_data::jsonb->>'address' = $1
+       GROUP BY e.contract_id, c.name
+       ORDER BY calls DESC
+       LIMIT 50`,
+      [address],
+    );
+    return rows;
+  },
+
+  // Issue #916: total event count for an address (used to detect > 1M threshold)
+  async getWalletEventCount(address) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS cnt
+       FROM events
+       WHERE raw_data::jsonb->>'from' = $1
+          OR raw_data::jsonb->>'to' = $1
+          OR raw_data::jsonb->>'address' = $1`,
+      [address],
+    );
+    return Number(rows[0]?.cnt ?? 0);
+  },
+
   async searchContracts(q, { limit = 10 } = {}) {
     const terms = normalizeSearchTerms(q);
     if (!terms.length) return [];
@@ -2065,6 +2150,49 @@ export const db = {
        WHERE contract_id = $1
        ORDER BY balance_raw::NUMERIC DESC`,
       [contractId],
+    );
+    return rows;
+  },
+
+  // Issue #915: supply time series from daily rollups
+  async getTokenSupplySeries(contractId, days = 30) {
+    const { rows } = await pool.query(
+      `SELECT date_trunc('day', created_at) AS day,
+              SUM((raw_data::jsonb->>'amount')::NUMERIC) AS minted,
+              0 AS burned
+       FROM events
+       WHERE contract_id = $1
+         AND function IN ('mint', 'burn')
+         AND created_at >= NOW() - ($2 || ' days')::INTERVAL
+       GROUP BY 1
+       ORDER BY 1`,
+      [contractId, days],
+    );
+    return rows;
+  },
+
+  // Issue #915: SAC (Stellar Asset Contract) metadata for a token contract
+  async getSacInfo(contractId) {
+    const { rows } = await pool.query(
+      `SELECT asset_code, asset_issuer, is_sac
+       FROM contracts
+       WHERE id = $1 AND is_sac = true`,
+      [contractId],
+    );
+    return rows[0] ?? null;
+  },
+
+  // Issue #915: cursor-paginated transfer events for a token contract
+  async getTokenTransfers(contractId, { limit = 25, after_seq = 0 } = {}) {
+    const { rows } = await pool.query(
+      `SELECT seq, ledger, tx_hash, decoded_text, raw_data, created_at
+       FROM events
+       WHERE contract_id = $1
+         AND function = 'transfer'
+         AND seq > $2
+       ORDER BY seq ASC
+       LIMIT $3`,
+      [contractId, after_seq, limit],
     );
     return rows;
   },

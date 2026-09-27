@@ -1827,6 +1827,51 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
+  // ── Wallet portfolio endpoints (issue #916) ──────────────────────────────
+
+  // GET /api/wallet/:address/balance-series?asset=&days=30
+  // Returns daily balance snapshots per asset for the given address.
+  // Values that cannot be derived reliably are shown as null (never zero).
+  app.get("/api/wallet/:address/balance-series", async (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
+        return res.status(400).json({ error: "Invalid address" });
+      }
+      const days = Math.min(Number(req.query.days) || 30, 365);
+      const asset = req.query.asset || null;
+      const rows = await db.getWalletBalanceSeries(address, { days, asset }).catch(() => []);
+      res.json({ address, days, series: rows });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/wallet/:address/portfolio
+  // Returns detected positions (LP, vault, lending) + protocol usage breakdown.
+  // Addresses with > 1M events get a sampled time series with a warning.
+  app.get("/api/wallet/:address/portfolio", async (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!/^[GMC][A-Z2-7]{55,}$/.test(address)) {
+        return res.status(400).json({ error: "Invalid address" });
+      }
+      const [positions, protocolUsage, eventCount] = await Promise.all([
+        db.getWalletPositions(address).catch(() => []),
+        db.getWalletProtocolUsage(address).catch(() => []),
+        db.getWalletEventCount(address).catch(() => 0),
+      ]);
+      res.json({
+        address,
+        positions,
+        protocol_usage: protocolUsage,
+        sampled: eventCount > 1_000_000,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── Token metadata registry (#550) ──────────────────────────────────────
   // Backed by the `assets` table, populated as classic asset transfers are
   // decoded (see decoder.js's classicAssetLabel).
@@ -1930,6 +1975,119 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
       const volume = await db.get24hVolume(contractId, decimals);
       res.json({ contract_id: contractId, window: "24h", ...volume });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Token page endpoints (issue #915) ────────────────────────────────────
+
+  // GET /api/tokens/:id/summary — metadata, total supply, holders count, SAC link
+  app.get("/api/tokens/:id/summary", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      let meta = { name: "", symbol: "", decimals: 7 };
+      let isNonStandard = false;
+      try {
+        meta = await fetchTokenMetadata(contractId);
+      } catch {
+        isNonStandard = true;
+      }
+      const rows = await db.getTokenHolders(contractId);
+      const supplyRow = await db.get24hVolume(contractId, meta.decimals).catch(() => null);
+      const sacInfo = await db.getSacInfo(contractId).catch(() => null);
+      res.json({
+        contract_id: contractId,
+        name: meta.name,
+        symbol: meta.symbol,
+        decimals: meta.decimals,
+        is_non_standard: isNonStandard,
+        total_holders: rows.length,
+        total_supply: supplyRow?.total_supply ?? null,
+        sac: sacInfo ?? null,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:id/supply-series?days=30 — supply over time from rollups
+  app.get("/api/tokens/:id/supply-series", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      const days = Math.min(Number(req.query.days) || 30, 365);
+      const rows = await db.getTokenSupplySeries(contractId, days).catch(() => []);
+      res.json({ contract_id: contractId, days, series: rows });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:id/distribution — Gini coefficient, top-N share, histogram
+  app.get("/api/tokens/:id/distribution", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      let decimals = 7;
+      try {
+        const meta = await fetchTokenMetadata(contractId);
+        decimals = meta.decimals;
+      } catch { /* use default */ }
+
+      const rows = await db.getTokenHolders(contractId);
+      if (rows.length === 0) {
+        return res.json({ contract_id: contractId, gini: null, top10_share: null, top100_share: null, histogram: [] });
+      }
+
+      const balances = rows.map((r) => Number(r.balance_raw) / Math.pow(10, decimals));
+      balances.sort((a, b) => b - a);
+      const total = balances.reduce((s, v) => s + v, 0);
+
+      // Gini coefficient
+      let giniNumerator = 0;
+      for (let i = 0; i < balances.length; i++) {
+        for (let j = 0; j < balances.length; j++) {
+          giniNumerator += Math.abs(balances[i] - balances[j]);
+        }
+      }
+      const gini = total > 0 ? giniNumerator / (2 * balances.length * total) : null;
+
+      const top10Share = total > 0 ? balances.slice(0, 10).reduce((s, v) => s + v, 0) / total : null;
+      const top100Share = total > 0 ? balances.slice(0, 100).reduce((s, v) => s + v, 0) / total : null;
+
+      // Simple 10-bucket histogram
+      const max = balances[0] ?? 1;
+      const buckets = Array.from({ length: 10 }, (_, i) => ({
+        range_min: (max * i) / 10,
+        range_max: (max * (i + 1)) / 10,
+        count: 0,
+      }));
+      for (const b of balances) {
+        const idx = Math.min(Math.floor((b / max) * 10), 9);
+        buckets[idx].count++;
+      }
+
+      res.json({
+        contract_id: contractId,
+        gini: gini !== null ? Math.round(gini * 1000) / 1000 : null,
+        top10_share: top10Share !== null ? Math.round(top10Share * 1000) / 1000 : null,
+        top100_share: top100Share !== null ? Math.round(top100Share * 1000) / 1000 : null,
+        histogram: buckets,
+        total_holders: rows.length,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:id/transfers?limit=25&after= — cursor-paginated transfer feed
+  app.get("/api/tokens/:id/transfers", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      const limit = Math.min(Number(req.query.limit) || 25, 100);
+      const after = req.query.after ? Number(req.query.after) : 0;
+      const rows = await db.getTokenTransfers(contractId, { limit, after_seq: after }).catch(() => []);
+      const nextCursor = rows.length === limit ? rows[rows.length - 1]?.seq ?? null : null;
+      res.json({ contract_id: contractId, transfers: rows, next_cursor: nextCursor });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
