@@ -883,8 +883,9 @@ export const db = {
        FROM contracts c
        LEFT JOIN events e ON e.contract_id = c.id
        WHERE (${fts} OR (${likeTerms}))
+         AND c.moderation_status IN ('published', 'pending')
        GROUP BY c.id
-       ORDER BY event_count DESC, c.name ASC
+       ORDER BY (c.moderation_status = 'pending') ASC, event_count DESC, c.name ASC
        LIMIT $${params.length}`,
       params,
     );
@@ -1077,7 +1078,8 @@ export const db = {
       hasAnchor = true;
     }
 
-    const filterConditions = [];
+    // Held/hidden/rejected registrations are curated out of listings (#934).
+    const filterConditions = ["moderation_status IN ('published', 'pending')"];
     const filterParams = [];
 
     if (q) {
@@ -1106,7 +1108,7 @@ export const db = {
       const [{ rows }, { rows: countRows }] = await Promise.all([
         pool.query(
           `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused,
-                  is_rwa, rwa_type, protocol_type, is_verified, verified_ledger, created_at
+                  is_rwa, rwa_type, protocol_type, is_verified, verified_ledger, created_at, moderation_status
            FROM contracts ${where}
            ORDER BY created_at DESC, id DESC
            LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
@@ -1147,7 +1149,7 @@ export const db = {
     const orderDirection = isBackward ? "ASC" : "DESC";
     const { rows } = await pool.query(
       `SELECT id, name, description, registered_by, has_circuit_breaker, is_paused,
-              is_rwa, rwa_type, protocol_type, is_verified, verified_ledger, created_at
+              is_rwa, rwa_type, protocol_type, is_verified, verified_ledger, created_at, moderation_status
        FROM contracts ${where}
        ORDER BY created_at ${orderDirection}, id ${orderDirection}
        LIMIT $${queryParams.length}`,
@@ -1220,6 +1222,336 @@ export const db = {
         total_pages: Math.ceil(total / safeLimit),
       },
     };
+  },
+
+  // ── Developer accounts & passkeys (#933) ──────────────────────────────────
+  async findOrCreateAccountByEmail(email) {
+    const { rows } = await pool.query(
+      `INSERT INTO accounts (email) VALUES ($1)
+       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+       RETURNING *, (xmax = 0) AS created`,
+      [email],
+    );
+    return rows[0];
+  },
+
+  async getAccount(id) {
+    const { rows } = await pool.query("SELECT * FROM accounts WHERE id = $1", [id]);
+    return rows[0] ?? null;
+  },
+
+  async getAccountByEmail(email) {
+    const { rows } = await pool.query("SELECT * FROM accounts WHERE email = $1", [email]);
+    return rows[0] ?? null;
+  },
+
+  async getAccountByStellarAddress(address) {
+    const { rows } = await pool.query("SELECT * FROM accounts WHERE stellar_address = $1", [address]);
+    return rows[0] ?? null;
+  },
+
+  async linkStellarAddress(accountId, address) {
+    await pool.query("UPDATE accounts SET stellar_address = $2 WHERE id = $1", [accountId, address]);
+  },
+
+  async listPasskeys(accountId) {
+    const { rows } = await pool.query(
+      `SELECT id, public_key, counter, transports, device_type, backed_up, name, created_at, last_used_at
+       FROM webauthn_credentials WHERE account_id = $1 ORDER BY created_at`,
+      [accountId],
+    );
+    return rows;
+  },
+
+  async getPasskey(id) {
+    const { rows } = await pool.query("SELECT * FROM webauthn_credentials WHERE id = $1", [id]);
+    return rows[0] ?? null;
+  },
+
+  async insertPasskey({ id, accountId, publicKey, counter, transports, deviceType, backedUp, name }) {
+    await pool.query(
+      `INSERT INTO webauthn_credentials (id, account_id, public_key, counter, transports, device_type, backed_up, name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, accountId, Buffer.from(publicKey), counter, transports ?? [], deviceType ?? null, Boolean(backedUp), name ?? null],
+    );
+  },
+
+  async updatePasskeyCounter(id, counter) {
+    await pool.query("UPDATE webauthn_credentials SET counter = $2, last_used_at = now() WHERE id = $1", [id, counter]);
+  },
+
+  async deletePasskey(accountId, id) {
+    const { rowCount } = await pool.query("DELETE FROM webauthn_credentials WHERE account_id = $1 AND id = $2", [accountId, id]);
+    return rowCount > 0;
+  },
+
+  async insertAuthSession({ idHash, accountId, authMethod, expiresAt, elevatedUntil = null }) {
+    await pool.query(
+      `INSERT INTO auth_sessions (id_hash, account_id, auth_method, expires_at, elevated_until)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [idHash, accountId, authMethod, expiresAt, elevatedUntil],
+    );
+  },
+
+  async getAuthSession(idHash) {
+    const { rows } = await pool.query("SELECT * FROM auth_sessions WHERE id_hash = $1", [idHash]);
+    return rows[0] ?? null;
+  },
+
+  async touchAuthSession(idHash) {
+    await pool.query("UPDATE auth_sessions SET last_seen_at = now() WHERE id_hash = $1", [idHash]);
+  },
+
+  async revokeAuthSession(idHash) {
+    await pool.query("UPDATE auth_sessions SET revoked_at = now() WHERE id_hash = $1 AND revoked_at IS NULL", [idHash]);
+  },
+
+  async revokeAccountSessions(accountId, exceptIdHash = null) {
+    await pool.query(
+      "UPDATE auth_sessions SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL AND id_hash IS DISTINCT FROM $2",
+      [accountId, exceptIdHash],
+    );
+  },
+
+  async insertAuthChallenge({ idHash, purpose, challenge, accountId = null, expiresAt }) {
+    await pool.query(
+      "INSERT INTO auth_challenges (id_hash, purpose, challenge, account_id, expires_at) VALUES ($1, $2, $3, $4, $5)",
+      [idHash, purpose, challenge, accountId, expiresAt],
+    );
+  },
+
+  // Single use: the challenge row is deleted as it is read.
+  async consumeAuthChallenge(idHash, purpose) {
+    const { rows } = await pool.query(
+      "DELETE FROM auth_challenges WHERE id_hash = $1 AND purpose = $2 RETURNING *",
+      [idHash, purpose],
+    );
+    const row = rows[0];
+    return row && new Date(row.expires_at) > new Date() ? row : null;
+  },
+
+  async insertEmailToken({ tokenHash, email, purpose, expiresAt }) {
+    await pool.query(
+      "INSERT INTO auth_email_tokens (token_hash, email, purpose, expires_at) VALUES ($1, $2, $3, $4)",
+      [tokenHash, email, purpose, expiresAt],
+    );
+  },
+
+  async consumeEmailToken(tokenHash, purpose) {
+    const { rows } = await pool.query(
+      `UPDATE auth_email_tokens SET used_at = now()
+       WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now()
+       RETURNING email`,
+      [tokenHash, purpose],
+    );
+    return rows[0]?.email ?? null;
+  },
+
+  async replaceRecoveryCodes(accountId, codeHashes) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM recovery_codes WHERE account_id = $1", [accountId]);
+      for (const hash of codeHashes) {
+        await client.query("INSERT INTO recovery_codes (account_id, code_hash) VALUES ($1, $2)", [accountId, hash]);
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+  },
+
+  async consumeRecoveryCode(accountId, codeHash) {
+    const { rowCount } = await pool.query(
+      "UPDATE recovery_codes SET used_at = now() WHERE account_id = $1 AND code_hash = $2 AND used_at IS NULL",
+      [accountId, codeHash],
+    );
+    return rowCount > 0;
+  },
+
+  async countRecoveryCodes(accountId) {
+    const { rows } = await pool.query(
+      "SELECT COUNT(*)::INT AS n FROM recovery_codes WHERE account_id = $1 AND used_at IS NULL",
+      [accountId],
+    );
+    return rows[0].n;
+  },
+
+  // Migration path: verified key holders claim keys registered to their email.
+  async claimApiKeysByEmail(accountId, email) {
+    const { rowCount } = await pool.query(
+      "UPDATE api_keys SET account_id = $1 WHERE email = $2 AND verified = TRUE AND account_id IS NULL",
+      [accountId, email],
+    );
+    return rowCount;
+  },
+
+  async listAccountApiKeys(accountId) {
+    const { rows } = await pool.query(
+      `SELECT id, name, key_prefix, tier, scopes, created_at, expires_at
+       FROM api_keys WHERE account_id = $1 ORDER BY created_at DESC`,
+      [accountId],
+    );
+    return rows;
+  },
+
+  async assignApiKeyAccount(keyId, accountId) {
+    await pool.query("UPDATE api_keys SET account_id = $2 WHERE id = $1", [keyId, accountId]);
+  },
+
+  // ── Registry moderation (#934) ────────────────────────────────────────────
+  async getModerationContext(submitter) {
+    const { rows } = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::INT FROM contracts WHERE (registered_by_key_id::TEXT = $1 OR registered_by = $1)
+            AND moderation_status IN ('rejected','hidden')) AS prior_rejections,
+         (SELECT COUNT(*)::INT FROM contracts WHERE (registered_by_key_id::TEXT = $1 OR registered_by = $1)
+            AND moderation_status = 'published') AS prior_approved,
+         (SELECT COUNT(*)::INT FROM contracts WHERE (registered_by_key_id::TEXT = $1 OR registered_by = $1)
+            AND created_at > now() - interval '1 hour') AS recent_submissions,
+         EXISTS (SELECT 1 FROM moderation_banned_submitters WHERE submitter = $1) AS banned`,
+      [String(submitter ?? "")],
+    );
+    const r = rows[0] ?? {};
+    return {
+      priorRejections: r.prior_rejections ?? 0,
+      priorApproved: r.prior_approved ?? 0,
+      recentSubmissions: r.recent_submissions ?? 0,
+      banned: Boolean(r.banned),
+    };
+  },
+
+  async setContractModeration(id, { status, score, signals }) {
+    const sets = ["moderation_status = $2"];
+    const params = [id, status];
+    if (score !== undefined) {
+      params.push(score);
+      sets.push(`risk_score = $${params.length}`);
+    }
+    if (signals !== undefined) {
+      params.push(JSON.stringify(signals));
+      sets.push(`risk_signals = $${params.length}::jsonb`);
+    }
+    const { rows } = await pool.query(
+      `UPDATE contracts SET ${sets.join(", ")} WHERE id = $1
+       RETURNING id, moderation_status, registered_by, registered_by_key_id`,
+      params,
+    );
+    return rows[0] ?? null;
+  },
+
+  async insertModerationAction({ contractId, action, actor, fromStatus = null, toStatus = null, notice = null, evidence = {}, onchainStatus = null }) {
+    const { rows } = await pool.query(
+      `INSERT INTO moderation_actions (contract_id, action, actor, from_status, to_status, notice, evidence, onchain_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) RETURNING *`,
+      [contractId, action, String(actor), fromStatus, toStatus, notice, JSON.stringify(evidence), onchainStatus],
+    );
+    return rows[0];
+  },
+
+  async listModerationQueue({ status = "held", limit = 50 } = {}) {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.name, c.description, c.registered_by, c.moderation_status, c.risk_score, c.risk_signals, c.created_at,
+              COALESCE(r.open_reports, 0)::INT AS open_reports, COALESCE(r.report_weight, 0) AS report_weight,
+              COALESCE(a.open_appeals, 0)::INT AS open_appeals
+       FROM contracts c
+       LEFT JOIN (SELECT contract_id, COUNT(*) AS open_reports, SUM(weight) AS report_weight
+                  FROM moderation_reports WHERE NOT resolved GROUP BY contract_id) r ON r.contract_id = c.id
+       LEFT JOIN (SELECT contract_id, COUNT(*) AS open_appeals
+                  FROM moderation_appeals WHERE status = 'open' GROUP BY contract_id) a ON a.contract_id = c.id
+       WHERE c.moderation_status = $1 OR ($1 = 'reported' AND r.open_reports > 0) OR ($1 = 'appealed' AND a.open_appeals > 0)
+       ORDER BY c.risk_score DESC, c.created_at ASC
+       LIMIT $2`,
+      [status, Math.min(Math.max(1, Number(limit) || 50), 200)],
+    );
+    return rows;
+  },
+
+  async getModerationDetail(id) {
+    const [contract, reports, actions, appeals] = await Promise.all([
+      pool.query(
+        `SELECT id, name, description, functions, registered_by, registered_by_key_id, moderation_status,
+                risk_score, risk_signals, ownership_verified, created_at FROM contracts WHERE id = $1`,
+        [id],
+      ),
+      pool.query("SELECT * FROM moderation_reports WHERE contract_id = $1 ORDER BY created_at DESC LIMIT 200", [id]),
+      pool.query("SELECT * FROM moderation_actions WHERE contract_id = $1 ORDER BY created_at DESC LIMIT 200", [id]),
+      pool.query("SELECT * FROM moderation_appeals WHERE contract_id = $1 ORDER BY created_at DESC", [id]),
+    ]);
+    if (!contract.rows[0]) return null;
+    return { contract: contract.rows[0], reports: reports.rows, actions: actions.rows, appeals: appeals.rows };
+  },
+
+  async getReporterStats(reporter) {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(r.upheld, 0) AS upheld, COALESCE(r.dismissed, 0) AS dismissed,
+              (SELECT COUNT(*)::INT FROM moderation_reports WHERE reporter = $1 AND created_at > now() - interval '1 hour') AS recent
+       FROM (SELECT 1) x LEFT JOIN moderation_reporters r ON r.reporter = $1`,
+      [reporter],
+    );
+    return rows[0];
+  },
+
+  async hasOpenReport(contractId, reporter) {
+    const { rows } = await pool.query(
+      "SELECT 1 FROM moderation_reports WHERE contract_id = $1 AND reporter = $2 AND NOT resolved LIMIT 1",
+      [contractId, reporter],
+    );
+    return rows.length > 0;
+  },
+
+  async insertModerationReport({ contractId, reporter, reason, details, weight }) {
+    await pool.query(
+      "INSERT INTO moderation_reports (contract_id, reporter, reason, details, weight) VALUES ($1, $2, $3, $4, $5)",
+      [contractId, reporter, reason, details ?? null, weight],
+    );
+    const { rows } = await pool.query(
+      "SELECT COALESCE(SUM(weight), 0)::REAL AS total FROM moderation_reports WHERE contract_id = $1 AND NOT resolved",
+      [contractId],
+    );
+    return Number(rows[0].total);
+  },
+
+  // Close open reports; upheld reports raise reporter reputation, dismissed lower it.
+  async resolveModerationReports(contractId, upheld) {
+    const column = upheld ? "upheld" : "dismissed";
+    await pool.query(
+      `WITH closed AS (
+         UPDATE moderation_reports SET resolved = TRUE WHERE contract_id = $1 AND NOT resolved RETURNING reporter
+       )
+       INSERT INTO moderation_reporters (reporter, ${column})
+       SELECT reporter, COUNT(*) FROM closed GROUP BY reporter
+       ON CONFLICT (reporter) DO UPDATE SET ${column} = moderation_reporters.${column} + EXCLUDED.${column}`,
+      [contractId],
+    );
+  },
+
+  async insertModerationAppeal({ contractId, submitter, message }) {
+    const { rows } = await pool.query(
+      "INSERT INTO moderation_appeals (contract_id, submitter, message) VALUES ($1, $2, $3) RETURNING *",
+      [contractId, submitter, message],
+    );
+    return rows[0];
+  },
+
+  async decideModerationAppeal(appealId, { granted, decidedBy }) {
+    const { rows } = await pool.query(
+      `UPDATE moderation_appeals SET status = $2, decided_by = $3, decided_at = now()
+       WHERE id = $1 AND status = 'open' RETURNING *`,
+      [appealId, granted ? "granted" : "denied", decidedBy],
+    );
+    return rows[0] ?? null;
+  },
+
+  async banSubmitter(submitter, { reason, bannedBy }) {
+    await pool.query(
+      `INSERT INTO moderation_banned_submitters (submitter, reason, banned_by) VALUES ($1, $2, $3)
+       ON CONFLICT (submitter) DO NOTHING`,
+      [submitter, reason ?? null, bannedBy],
+    );
   },
 
   async getContractMeta(id) {

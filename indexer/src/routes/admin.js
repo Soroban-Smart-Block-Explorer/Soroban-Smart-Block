@@ -38,6 +38,7 @@ import {
 } from "../cursor.js";
 import config from "../config.js";
 import { getEventLineage } from "../lineage.js";
+import { moderate, decideAppeal, NOTICE_TEMPLATES } from "../moderation/service.js";
 // Note: getRedisClient (rateLimit/tokenBucket.js) and runAllChecks
 // (doctor-lib.js) were imported here but never called anywhere in this
 // file — dead imports left over from the removed legacy /api/doctor route
@@ -242,6 +243,53 @@ export default function registerAdminRoutes(app) {
   // ── GET /api/admin/integrity ─────────────────────────────────────────────
   // ── GET /api/admin/events/:seq/lineage ─────────────────────────────────────
   // Full provenance chain for one event (#945).
+  // ── Registry moderation (#934) ─────────────────────────────────────────
+  // Queue views: held | pending | hidden | rejected | reported | appealed.
+  router.get("/moderation/queue", async (req, res) => {
+    try {
+      const status = String(req.query.status ?? "held");
+      res.json({ items: await db.listModerationQueue({ status, limit: req.query.limit }), templates: NOTICE_TEMPLATES });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  router.get("/moderation/contracts/:id", async (req, res) => {
+    try {
+      const detail = await db.getModerationDetail(req.params.id);
+      if (!detail) return res.status(404).json({ error: "Not found" });
+      res.json(detail);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Body: { action: approve|reject|hide|ban, reason?, notice? }
+  router.post("/moderation/contracts/:id/actions", async (req, res) => {
+    try {
+      const actor = req.admin?.id ?? req.admin?.username ?? "admin";
+      const entry = await moderate(req.params.id, { ...req.body, actor: String(actor) });
+      res.status(201).json(entry);
+    } catch (e) {
+      res.status(e.status ?? 500).json({ error: e.message });
+    }
+  });
+
+  // Body: { granted: boolean, notice? }
+  router.post("/moderation/appeals/:appealId/decision", async (req, res) => {
+    try {
+      const actor = req.admin?.id ?? req.admin?.username ?? "admin";
+      const appeal = await decideAppeal(Number(req.params.appealId), {
+        granted: req.body?.granted === true,
+        actor: String(actor),
+        notice: req.body?.notice,
+      });
+      res.json(appeal);
+    } catch (e) {
+      res.status(e.status ?? 500).json({ error: e.message });
+    }
+  });
+
   router.get("/events/:seq/lineage", async (req, res) => {
     try {
       const seq = Number(req.params.seq);

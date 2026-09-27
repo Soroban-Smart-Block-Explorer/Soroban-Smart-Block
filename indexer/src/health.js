@@ -299,7 +299,20 @@ export function getLivenessStatus() {
  * Readiness check
  * Returns 200 if service can handle traffic (dependencies healthy)
  */
+let draining = false;
+
+/**
+ * Mark the process as draining (SIGTERM received) so readiness fails and the
+ * load balancer stops routing new requests before the server closes (#935).
+ */
+export function setDraining(value = true) {
+  draining = value;
+}
+
 export async function getReadinessStatus() {
+  if (draining) {
+    return { status: "not_ready", timestamp: new Date().toISOString(), reason: "Draining for shutdown", dependencies: {} };
+  }
   const health = await getHealthStatus();
   
   // Ready if status is healthy or degraded (not unhealthy)

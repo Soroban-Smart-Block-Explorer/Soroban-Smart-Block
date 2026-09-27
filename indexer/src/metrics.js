@@ -34,6 +34,13 @@ export const rpcErrors = new Counter({
 });
 
 /** Current DB pool size (total connections). */
+/** In-flight HTTP requests; drives the API HPA custom metric (#935). */
+export const httpRequestsInFlight = new Gauge({
+  name: "http_requests_in_flight",
+  help: "HTTP requests currently being served",
+  registers: [registry],
+});
+
 export const dbPoolTotal = new Gauge({
   name: "soroban_db_pool_total",
   help: "Total connections in the PostgreSQL pool",

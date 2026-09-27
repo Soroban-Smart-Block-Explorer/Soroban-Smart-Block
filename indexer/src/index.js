@@ -11,6 +11,12 @@ import config from "./config.js";
 initSentry();
 startProfiling();
 import { startApi } from "./api.js";
+import {
+  tryAcquireLock,
+  isLeader,
+  start as startLeaderElection,
+  stop as stopLeaderElection,
+} from "./optional/leaderElection.js";
 import { db, pool } from "./db.js";
 import { startLineageBatch } from "./lineage.js";
 import { decode, getDecodeStats } from "./decoder.js";
@@ -56,7 +62,7 @@ import {
 import { startUsageFlushCron, startRetentionCleanupCron } from "./usage/usageTracker.js";
 import { startAuditPartitionCron, startAuditFlush } from "./audit/auditLogger.js";
 import { startUptimeRecorder } from "./uptimeRecorder.js";
-import { updateIndexerStatus, updateDlqDepth } from "./health.js";
+import { updateIndexerStatus, updateDlqDepth, setDraining } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
 import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue, getDlqDepth } from "./deadLetterQueue.js";
@@ -502,13 +508,23 @@ function assertLeadership() {
 let shutdown = false;
 let ledgersSinceReorgCheck = 0;
 
+// Deployable role (#935): "ingest" polls RPC, "api" only serves HTTP/WS,
+// "workers" runs background jobs, "all" (default) runs everything in one process.
+const INDEXER_ROLE = (process.env.INDEXER_ROLE || "all").toLowerCase();
+const RUNS_INGEST = INDEXER_ROLE === "all" || INDEXER_ROLE === "ingest";
+const RUNS_WORKERS = INDEXER_ROLE === "all" || INDEXER_ROLE === "workers";
+// Time to keep serving after SIGTERM so endpoints deregister before close.
+// Redis-lease leader election so only one ingest pod writes at a time.
+const LEADERSHIP_ENABLED = process.env.LEADER_ELECTION_ENABLED === "true";
+const DRAIN_MS = Number(process.env.SHUTDOWN_DRAIN_MS ?? 10_000);
+
 async function run() {
   // Fail fast if the secrets provider (Vault/KMS) is unreachable at boot (#929).
   await initSecrets();
   await db.init();
   // Resumable: re-wraps only rows not yet on the current KEK.
   rotateWebhookSecrets(pool).catch((err) => logger.warn(`[secrets] webhook secret rotation failed: ${err.message}`));
-  if (LEADERSHIP_ENABLED) {
+  if (LEADERSHIP_ENABLED && RUNS_INGEST) {
     await tryAcquireLock();
     startLeaderElection({
       onBecomeLeader: () => logger.info("[leaderElection] this instance is now indexing"),
@@ -531,6 +547,14 @@ async function run() {
   // Poll DB pool stats every 15 s for Prometheus gauges
   setInterval(() => updateDbPoolMetrics(pool), 15_000);
   warmCache().catch((e) => logger.warn({ err: e.message }, "cache warm failed"));
+
+  if (!RUNS_INGEST && !RUNS_WORKERS) {
+    logger.info({ role: INDEXER_ROLE }, "api-only role; ingest and workers disabled");
+    while (!shutdown) await new Promise((r) => setTimeout(r, 1_000));
+    return drainAndExit(server);
+  }
+  if (!RUNS_WORKERS) return runIngest(server);
+
   seedBuiltinAbis().catch((e) => logger.warn({ err: e.message }, "builtin ABI seed failed"));
   startAbiSync();
   initRuntimeConfig(pool).catch((err) => logger.error("[runtimeConfig] init failed:", err.message)); // hot-reloadable config (#894)
@@ -570,6 +594,16 @@ async function run() {
       })
       .catch((err) => logger.error({ err: err.message }, "dlq depth check failed"));
   }, 60_000);
+
+  if (!RUNS_INGEST) {
+    logger.info({ role: INDEXER_ROLE }, "workers role; ingest disabled");
+    while (!shutdown) await new Promise((r) => setTimeout(r, 1_000));
+    return drainAndExit(server);
+  }
+  return runIngest(server);
+}
+
+async function runIngest(server) {
 
   // Resume from the durable cursor. Legacy databases without one replay the
   // highest indexed ledger so a partially written ledger is not skipped.
@@ -692,8 +726,15 @@ async function run() {
   }
 
   logger.info("daemon shutting down");
-  server?.close();
   if (LEADERSHIP_ENABLED) await stopLeaderElection();
+  return drainAndExit(server);
+}
+
+// Fail readiness, keep serving in-flight requests for DRAIN_MS, then close.
+async function drainAndExit(server) {
+  setDraining(true);
+  if (server && DRAIN_MS > 0) await new Promise((r) => setTimeout(r, DRAIN_MS));
+  server?.close();
   process.exit(0);
 }
 

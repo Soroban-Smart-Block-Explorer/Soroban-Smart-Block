@@ -1,0 +1,32 @@
+{{- if .Values.workers.enabled }}
+{{- $name := printf "%s-workers" (include "se.name" .) }}
+# Background jobs and the outbox relay; no ingest loop (INDEXER_ROLE=workers).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "se.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.workers.replicas }}
+  strategy:
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: {{ $name }}}
+  template:
+    metadata:
+      labels: {app: {{ $name }}, role: workers}
+    spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints: {{- include "se.spread" $name | nindent 8 }}
+      containers:
+        - name: workers
+          image: "{{ .Values.image.registry }}/indexer:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "se.dbEnv" . | nindent 12 }}
+            - name: INDEXER_ROLE
+              value: workers
+          resources: {{- toYaml .Values.workers.resources | nindent 12 }}
+          ports: [{containerPort: 3001, name: http}]
+          {{- include "se.probes" . | nindent 10 }}
+{{- end }}

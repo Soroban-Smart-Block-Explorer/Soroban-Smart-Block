@@ -1,0 +1,156 @@
+name: Infra — Terraform
+
+on:
+  pull_request:
+    paths: ["infra/terraform/**", ".github/workflows/infra.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/terraform/**"]
+  schedule:
+    - cron: "0 6 * * *" # daily drift detection
+  workflow_dispatch:
+
+# OIDC: CI assumes a least-privilege IAM role per environment; no static keys.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  TF_VERSION: 1.9.5
+  TF_IN_AUTOMATION: "true"
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Policy checks (fmt, tfsec, checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform fmt -check -recursive infra/terraform/modules infra/terraform/envs
+      - uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: infra/terraform
+          additional_args: --minimum-severity HIGH
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/terraform
+          framework: terraform
+          soft_fail_on: LOW,MEDIUM
+
+  plan:
+    name: Plan — ${{ matrix.env }}
+    needs: policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [staging, production]
+    defaults:
+      run:
+        working-directory: infra/terraform/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars[format('TF_PLAN_ROLE_{0}', matrix.env)] }}
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: terraform init -input=false
+      - id: plan
+        run: |
+          terraform plan -input=false -no-color -lock=false -out=tfplan | tee plan.txt
+      - name: Post plan as PR comment
+        uses: actions/github-script@v7
+        env:
+          ENV_NAME: ${{ matrix.env }}
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync(`infra/terraform/envs/${process.env.ENV_NAME}/plan.txt`, 'utf8');
+            const body = `### Terraform plan — \`${process.env.ENV_NAME}\`\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan.slice(-60000)}\n\`\`\`\n</details>`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+  apply:
+    name: Apply — ${{ matrix.env }}
+    needs: policy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        env: [staging, production]
+    # The `production` environment requires a manual reviewer approval.
+    environment: ${{ matrix.env }}
+    defaults:
+      run:
+        working-directory: infra/terraform/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars[format('TF_APPLY_ROLE_{0}', matrix.env)] }}
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform init -input=false
+      - run: terraform apply -input=false -auto-approve
+
+  drift:
+    name: Drift detection — ${{ matrix.env }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [staging, production]
+    defaults:
+      run:
+        working-directory: infra/terraform/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars[format('TF_PLAN_ROLE_{0}', matrix.env)] }}
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: terraform init -input=false
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = drift.
+      - id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock=false -detailed-exitcode > drift.txt
+          code=$?
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" = 1 ] && exit 1 || exit 0
+      - name: Alert on drift
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/github-script@v7
+        env:
+          ENV_NAME: ${{ matrix.env }}
+        with:
+          script: |
+            const fs = require('fs');
+            const drift = fs.readFileSync(`infra/terraform/envs/${process.env.ENV_NAME}/drift.txt`, 'utf8');
+            await github.rest.issues.create({
+              ...context.repo,
+              title: `Infrastructure drift detected in ${process.env.ENV_NAME}`,
+              labels: ['infra', 'drift'],
+              body: `Scheduled \`terraform plan\` found differences from code.\n\n\`\`\`\n${drift.slice(-60000)}\n\`\`\``,
+            });
+            core.setFailed('drift detected');

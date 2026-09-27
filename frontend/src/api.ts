@@ -271,6 +271,8 @@ export interface ContractListItem {
   /** Ledger at which verification was last confirmed (null if never verified). */
   verified_ledger: number | null;
   created_at: string;
+  /** Registry moderation state (#934); "pending" shows a review badge. */
+  moderation_status?: "published" | "pending";
 }
 
 /** One ABI version snapshot returned by GET /api/contracts/:id/abi-history */

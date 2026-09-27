@@ -1,0 +1,24 @@
+{{- if .Values.migrations.enabled }}
+# Runs db.init() migrations before new pods roll out. Migrations must be
+# expand-only so old pods keep working during the rollout (#859).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "se.name" . }}-migrate-{{ .Release.Revision }}
+  labels: {{- include "se.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.registry }}/indexer:{{ .Values.image.tag }}"
+          command: ["node", "-e", "import('./src/db.js').then(async ({ db }) => { await db.init(); process.exit(0); })"]
+          env:
+            {{- include "se.dbEnv" . | nindent 12 }}
+{{- end }}
