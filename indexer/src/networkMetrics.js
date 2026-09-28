@@ -74,3 +74,106 @@ export async function getNetworkMetrics(pool, range = "1h") {
   const metrics = rows.map((r, i) => computeLedgerMetrics({ ...r, prev_closed_at: rows[i - 1]?.closed_at }));
   return { range, metrics, recommended: recommendFee(metrics.slice(-50)), staleness_seconds: staleness(metrics) };
 }
+
+// ── Ledger browsing (#912) ────────────────────────────────────────────────────
+
+// Indexing status for a ledger sequence: "future" (beyond the indexed tip →
+// 404), "not_indexed" (older than retention), "gap" (inside an open gap
+// record) or "indexed".
+export function ledgerStatus(seq, { minLedger, maxLedger, gap }) {
+  if (maxLedger === null || seq > maxLedger) return "future";
+  if (seq < minLedger) return "not_indexed";
+  if (gap) return "gap";
+  return "indexed";
+}
+
+export async function getLedgerDetail(pool, seq) {
+  const [{ rows: bounds }, { rows: gaps }] = await Promise.all([
+    pool.query(`SELECT MIN(ledger)::BIGINT AS min, MAX(ledger)::BIGINT AS max FROM ledger_hashes`),
+    pool.query(
+      `SELECT id, from_ledger, to_ledger, status FROM gap_log
+        WHERE $1 BETWEEN from_ledger AND to_ledger AND status <> 'closed'
+        ORDER BY created_at DESC LIMIT 1`,
+      [seq],
+    ),
+  ]);
+  const minLedger = bounds[0].min === null ? null : Number(bounds[0].min);
+  const maxLedger = bounds[0].max === null ? null : Number(bounds[0].max);
+  const gap = gaps[0] ?? null;
+  const status = ledgerStatus(seq, { minLedger, maxLedger, gap });
+  const nav = {
+    prev: minLedger !== null && seq > minLedger ? seq - 1 : null,
+    next: maxLedger !== null && seq < maxLedger ? seq + 1 : null,
+  };
+  if (status === "future" || status === "not_indexed") return { ledger: seq, status, gap: null, ...nav };
+
+  const [{ rows: hashRows }, { rows: txRows }, { rows: eventRows }, { rows: limitRows }] = await Promise.all([
+    pool.query(`SELECT hash, indexed_at FROM ledger_hashes WHERE ledger = $1`, [seq]),
+    pool.query(
+      `SELECT hash, source, status, operation_count, footprint_read_bytes, footprint_write_bytes,
+              inclusion_fee, resource_fee, charged_fee, created_at
+         FROM transactions WHERE ledger = $1 ORDER BY hash`,
+      [seq],
+    ),
+    pool.query(
+      `SELECT tx_hash, contract_id, function, description, protocol_version, cpu_instructions
+         FROM events WHERE ledger = $1 ORDER BY seq`,
+      [seq],
+    ),
+    pool.query(`SELECT limits FROM ledger_config_settings WHERE ledger <= $1 ORDER BY ledger DESC LIMIT 1`, [seq]),
+  ]);
+
+  // Group event narratives under their transaction; include txs that only
+  // appear via events (transactions rows are best-effort).
+  const txs = new Map(txRows.map((t) => [t.hash, { ...t, instructions: 0, narratives: [] }]));
+  for (const ev of eventRows) {
+    if (!ev.tx_hash) continue;
+    if (!txs.has(ev.tx_hash)) txs.set(ev.tx_hash, { hash: ev.tx_hash, instructions: 0, narratives: [] });
+    const tx = txs.get(ev.tx_hash);
+    tx.instructions += Number(ev.cpu_instructions) || 0;
+    tx.narratives.push({ contract_id: ev.contract_id, function: ev.function, description: ev.description });
+  }
+  const transactions = [...txs.values()];
+  const metrics = computeLedgerMetrics({
+    sequence: seq,
+    closed_at: txRows.reduce((m, t) => (!m || t.created_at > m ? t.created_at : m), null),
+    limits: limitRows[0]?.limits ?? null,
+    txs: transactions.map((t) => ({
+      inclusion_fee: t.inclusion_fee,
+      instructions: t.instructions,
+      read_bytes: t.footprint_read_bytes,
+      write_bytes: t.footprint_write_bytes,
+    })),
+  });
+
+  return {
+    ledger: seq,
+    status,
+    hash: hashRows[0]?.hash ?? null,
+    indexed_at: hashRows[0]?.indexed_at ?? null,
+    closed_at: metrics.closed_at,
+    protocol_version: eventRows.find((e) => e.protocol_version !== null)?.protocol_version ?? null,
+    soroban_tx_count: transactions.length,
+    event_count: eventRows.length,
+    fees: metrics.fees,
+    utilization: metrics.utilization,
+    limits: limitRows[0]?.limits ?? null,
+    transactions,
+    gap,
+    ...nav,
+  };
+}
+
+export async function listLedgers(pool, { cursor = null, limit = 20 } = {}) {
+  const { rows } = await pool.query(
+    `SELECT h.ledger, h.hash, h.indexed_at,
+            (SELECT COUNT(DISTINCT e.tx_hash) FROM events e WHERE e.ledger = h.ledger)::INT AS soroban_tx_count,
+            (SELECT COUNT(*) FROM events e WHERE e.ledger = h.ledger)::INT AS event_count
+       FROM ledger_hashes h
+      WHERE ($1::BIGINT IS NULL OR h.ledger < $1::BIGINT)
+      ORDER BY h.ledger DESC LIMIT $2`,
+    [cursor, limit + 1],
+  );
+  const data = rows.slice(0, limit).map((r) => ({ ...r, ledger: Number(r.ledger) }));
+  return { data, next_cursor: rows.length > limit ? String(data[data.length - 1].ledger) : null };
+}

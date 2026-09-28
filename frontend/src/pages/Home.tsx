@@ -7,6 +7,7 @@ import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
 import SkeletonLoader from "../components/SkeletonLoader";
 import StatsBar from "../components/StatsBar";
+import LatestLedgers from "../components/LatestLedgers";
 import { useEventStream } from "../hooks/useEventStream";
 import { useMetaTags } from "../hooks/useMetaTags";
 
@@ -127,6 +128,10 @@ export default function Home() {
       ) {
         queryClient.invalidateQueries({ queryKey: ["events", contractParam] });
       }
+      const latest = queryClient.getQueryData<{ data: { ledger: number }[] }>(["ledgers", "latest"]);
+      if (ev.ledger > (latest?.data[0]?.ledger ?? 0)) {
+        queryClient.invalidateQueries({ queryKey: ["ledgers", "latest"] });
+      }
     },
     [contractParam, fnFilter, fromDate, queryClient],
   );
@@ -136,6 +141,7 @@ export default function Home() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <StatsBar />
+      <LatestLedgers />
 
       <div>
         <h1 style={{ fontSize: 22, marginBottom: 4 }}>Soroban Smart Block Explorer</h1>

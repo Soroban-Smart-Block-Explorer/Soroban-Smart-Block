@@ -9,7 +9,12 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import { db as defaultDb, pool } from "./db.js";
-import { getNetworkMetrics, RANGES as NETWORK_METRIC_RANGES } from "./networkMetrics.js";
+import {
+  getNetworkMetrics,
+  RANGES as NETWORK_METRIC_RANGES,
+  getLedgerDetail,
+  listLedgers,
+} from "./networkMetrics.js";
 import { safeFetch } from "./safeHttp.js";
 import config from "./config.js";
 import { InvalidCursorError, CursorFilterMismatchError } from "./cursor.js";
@@ -69,6 +74,8 @@ import { abuseScorer } from "./abuse/scorer.js";
 import { rateLimitHeaderWriter } from "./rateLimit/headers.js";
 import { auditLoggerMiddleware, ensureAuditPartitions } from "./audit/auditLogger.js";
 import registerAdminRoutes from "./routes/admin.js";
+import { requestSigningMiddleware } from "./auth/requestSigning.js";
+import { requestVerification, getCodeVerification } from "./contractVerifier.js";
 import { getEventLineage } from "./lineage.js";
 import registerWebhookRoutes from "./routes/webhooks.js";
 import registerDashboardRoutes from "./routes/dashboard.js";
@@ -470,7 +477,14 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // Stripe webhook requires raw body — mount BEFORE express.json()
   app.use("/api/billing", stripeWebhookRouter);
 
-  app.use(express.json());
+  // Keep the raw bytes: request signatures (#852) are computed over them.
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
   app.use(requestIdMiddleware);
   app.use(tracingMiddleware);
   app.use(createHttpLogger(logDestination));
@@ -510,6 +524,8 @@ export function createApi({ logDestination, dbOverride } = {}) {
   ensureAuditPartitions().catch((err) => logger.error("[api] Startup audit partition check failed:", err.message));
   app.use(auditLoggerMiddleware);
   app.use(apiKeyAuthenticator);
+  // HMAC request signing + replay protection on mutating routes (#852).
+  app.use(requestSigningMiddleware);
   // Scoped API tokens (#901): enforce each route's declared scopes.
   app.use(scopeMiddleware);
   // RATE_LIMITING_DISABLED short-circuits the per-client throttles. Intended
@@ -2431,6 +2447,27 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // POST /api/contracts/:id/source-verifications
   // Body: { wasm_hash, signer, signature, compiler_hash }
+  // ── Reproducible-build verification (#796) ─────────────────────────────────
+  // POST queues a build from source coordinates; the badge is derived solely
+  // from verifier-computed hashes, never from submitted metadata.
+  app.post("/api/contracts/:id/code-verifications", writeLimiter, requireApiKey, async (req, res) => {
+    try {
+      const result = await requestVerification(req.params.id, req.body ?? {}, req.rateContext?.keyId ?? null);
+      const { status, ...body } = result;
+      res.status(status).json(body);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/contracts/:id/code-verification", async (req, res) => {
+    try {
+      res.json(await getCodeVerification(req.params.id));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/contracts/:id/source-verifications", writeLimiter, requireApiKey, async (req, res) => {
     try {
       const { wasm_hash, signer, signature, compiler_hash } = req.body;
@@ -2493,6 +2530,30 @@ export function createApi({ logDestination, dbOverride } = {}) {
     if (!NETWORK_METRIC_RANGES[range]) return res.status(400).json({ error: "range must be 1h, 24h or 7d" });
     try { res.json(await getNetworkMetrics(pool, range)); }
     catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/ledgers?cursor=&limit= — newest-first ledger listing (#912).
+  app.get("/api/ledgers", async (req, res) => {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const cursor = req.query.cursor ? Number(req.query.cursor) : null;
+    if (cursor !== null && (!Number.isInteger(cursor) || cursor < 0)) {
+      return res.status(400).json({ error: "cursor must be a ledger sequence" });
+    }
+    try { res.json(await listLedgers(pool, { cursor, limit })); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/ledgers/:seq — ledger header, fees, utilization, Soroban txs (#912).
+  // Ledgers beyond the indexed tip → 404; older than retention → 200 with
+  // status "not_indexed".
+  app.get("/api/ledgers/:seq", async (req, res) => {
+    const seq = Number(req.params.seq);
+    if (!Number.isInteger(seq) || seq < 1) return res.status(400).json({ error: "seq must be a positive integer" });
+    try {
+      const detail = await getLedgerDetail(pool, seq);
+      if (detail.status === "future") return res.status(404).json({ error: "ledger_not_found", ledger: seq });
+      res.json(detail);
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // GET /api/network/metrics/stream — server-sent latest ledger metrics at ledger cadence.

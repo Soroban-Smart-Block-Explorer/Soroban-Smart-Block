@@ -12,6 +12,7 @@ const ContractPage = lazy(() => import("./pages/ContractPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
 const EventPage = lazy(() => import("./pages/EventPage"));
 const TransactionPage = lazy(() => import("./pages/TransactionPage"));
+const LedgerPage = lazy(() => import("./pages/LedgerPage"));
 const SearchPage = lazy(() => import("./pages/SearchPage"));
 const XdrInspector = lazy(() => import("./pages/XdrInspector"));
 const RpcMetricsDashboard = lazy(() => import("./pages/RpcMetricsDashboard"));
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="/wallet/:address" element={<ClientOnly><WalletPage /></ClientOnly>} />
             <Route path="/event/:seq" element={<EventPage />} />
             <Route path="/tx/:hash" element={<TransactionPage />} />
+            <Route path="/ledger/:seq" element={<LedgerPage />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/xdr" element={<ClientOnly><XdrInspector /></ClientOnly>} />
             <Route path="/rpc-metrics" element={<RpcMetricsDashboard />} />

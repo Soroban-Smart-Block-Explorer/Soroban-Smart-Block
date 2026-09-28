@@ -33,6 +33,7 @@ import ProtocolBadge from "../components/ProtocolBadge";
 import InvocationFrequencyChart, { type StatsRange } from "../components/InvocationFrequencyChart";
 import StorageTierStackedBar from "../components/StorageTierStackedBar";
 import OfflineContractActions from "../components/OfflineContractActions";
+import { CodeVerificationBadge, CodeVerificationPanel } from "../components/CodeVerification";
 
 type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "storage" | "abi-history";
 
@@ -277,6 +278,8 @@ export default function ContractPage() {
       {/* CAP-0077 quorum freeze security warning */}
       <QuorumFreezeBadge contractId={id} />
 
+      <CodeVerificationPanel contractId={id} />
+
       {/* RWA metadata display */}
       <RwaMetadataDisplay contractId={id} />
 
@@ -294,6 +297,7 @@ export default function ContractPage() {
               <h2 id="contract-title" style={{ margin: 0 }}>{meta.name || "Unnamed Contract"}</h2>
               {(meta as any).is_verified && <VerifiedBadge ledger={(meta as any).verified_ledger} />}{' '}
               <SourceVerifiedBadge contractId={id} />
+              <CodeVerificationBadge contractId={id} />
               <OwnershipBadge
                 verified={(meta as any).ownership_verified}
                 method={(meta as any).ownership_method}

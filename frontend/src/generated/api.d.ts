@@ -5696,6 +5696,439 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ledgers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List indexed ledgers, newest first (#912) */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Return ledgers with a sequence lower than this (the previous page's next_cursor) */
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of ledger summaries */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["LedgerSummary"][];
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                /** @description Invalid cursor */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ledgers/{seq}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ledger detail — header, protocol version, fees, utilization and Soroban txs (#912)
+         * @description Ledgers older than the indexer's retention window return 200 with status "not_indexed". Ledgers inside an open gap return status "gap" with the gap record. Sequences beyond the indexed tip return 404.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    seq: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ledger detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["LedgerDetail"];
+                    };
+                };
+                /** @description Invalid sequence */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Ledger not yet closed / indexed (future ledger) */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/contracts/{id}/code-verifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue a reproducible-build source verification (#796)
+         * @description Submits source coordinates only. The verifier builds the WASM in a pinned container and compares sha256(wasm) with the on-chain code hash; submitted metadata can never mark a contract verified.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example https://github.com/org/repo */
+                        source_repo: string;
+                        /** @description Full 40-character commit SHA */
+                        commit: string;
+                        toolchain?: {
+                            rust?: string;
+                            soroban_sdk?: string;
+                            stellar_cli?: string;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Verification queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid source coordinates */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description A verification for this contract is already queued */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/contracts/{id}/code-verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Source-verification badge and trust details (#796) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Badge state (verified_reproducible, verified_hash_match, mismatch, unverified, pending, failed), on-chain and built hashes, toolchain, source link, build timestamp, sanitized build log for failures. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/dlq": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List dead-letter-queue entries (#851) */
+        get: {
+            parameters: {
+                query?: {
+                    state?: "queued" | "retrying" | "quarantined" | "resolved";
+                    error_class?: string;
+                    page?: number;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Paginated DLQ entries */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/dlq/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry a DLQ entry now (also un-quarantines it) (#851) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Entry re-queued */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Already resolved */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/dlq/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark a DLQ entry resolved (#851) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Entry resolved */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/dlq/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bulk re-queue open DLQ entries of one error class (#851) */
+        post: {
+            parameters: {
+                query: {
+                    error_class: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Number of entries re-queued */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description error_class missing */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/api-keys/{id}/signing-secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a request-signing secret for an API key (#852)
+         * @description Returns the secret once. The previous secret remains valid (rotation overlap); older secrets are revoked. Mutating routes under /api/contracts, /api/abi and /api/admin accept X-SSB-Key-Id, X-SSB-Timestamp (unix seconds), X-SSB-Nonce and X-SSB-Signature = hex HMAC-SHA256(secret, METHOD \n PATH \n SHA256(raw body) \n timestamp \n nonce). With SIGNING_ENFORCED=on unsigned requests are rejected. Errors: 401 stale_timestamp (with server_time), 401 invalid_signature, 409 nonce_reused.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description { key_id, signing_secret } */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description API key not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/network/metrics/stream": {
         parameters: {
             query?: never;
@@ -6027,6 +6460,60 @@ export interface components {
                 write_bytes: components["schemas"]["NullableNumber"];
             };
             surge: boolean;
+        };
+        LedgerSummary: {
+            ledger: number;
+            hash: string;
+            /** Format: date-time */
+            indexed_at: string;
+            soroban_tx_count: number;
+            event_count: number;
+        };
+        LedgerDetail: {
+            ledger: number;
+            /** @enum {string} */
+            status: "indexed" | "gap" | "not_indexed";
+            hash?: string | null;
+            /** Format: date-time */
+            indexed_at?: string | null;
+            /** Format: date-time */
+            closed_at?: string | null;
+            protocol_version?: number | null;
+            soroban_tx_count?: number;
+            event_count?: number;
+            /** @description Inclusion-fee percentiles in stroops */
+            fees?: {
+                p10?: number | null;
+                p50?: number | null;
+                p90?: number | null;
+                p99?: number | null;
+            };
+            /** @description Fraction (0–1) of each per-ledger network limit used; null when the limit is unknown */
+            utilization?: {
+                [key: string]: number | null;
+            };
+            limits?: {
+                [key: string]: unknown;
+            } | null;
+            transactions?: {
+                hash: string;
+                status?: string;
+                source?: string | null;
+                charged_fee?: string;
+                narratives: {
+                    contract_id?: string;
+                    function?: string;
+                    description?: string;
+                }[];
+            }[];
+            gap: {
+                id?: number;
+                from_ledger?: number;
+                to_ledger?: number;
+                status?: string;
+            } | null;
+            prev: number | null;
+            next: number | null;
         };
         NetworkMetricsResponse: {
             /** @enum {string} */
