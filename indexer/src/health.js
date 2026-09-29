@@ -12,7 +12,9 @@
  */
 
 import { db, pool } from "./db.js";
-import { getActiveAlerts } from "./alertManager.js";
+import * as alertManager from "./alertManager.js";
+
+const { getActiveAlerts } = alertManager;
 
 // ── Configurable thresholds ───────────────────────────────────────────────────
 // INDEXER_LAG_THRESHOLD_SECONDS: Threshold above which indexer is marked unhealthy
@@ -73,12 +75,14 @@ export function setRedisClient(client) {
  * Update indexer health status (called from main daemon)
  */
 export function updateIndexerStatus(ledger, lagSeconds, ledgerLag = 0) {
+  const normalizedLag = Number.isFinite(Number(lagSeconds)) ? Number(lagSeconds) : 0;
+  const normalizedLedgerLag = Number.isFinite(Number(ledgerLag)) ? Number(ledgerLag) : 0;
   _indexerStatus = {
-    healthy: lagSeconds < INDEXER_LAG_THRESHOLD_SECONDS, // unhealthy if lag exceeds threshold
+    healthy: normalizedLag < INDEXER_LAG_THRESHOLD_SECONDS,
     lastLedger: ledger,
     lastSync: Date.now(),
-    lagSeconds,
-    ledgerLag,
+    lagSeconds: normalizedLag,
+    ledgerLag: normalizedLedgerLag,
   };
 }
 

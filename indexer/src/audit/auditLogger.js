@@ -27,7 +27,9 @@ import crypto from 'crypto';
 import cron from 'node-cron';
 import { pool } from '../db.js';
 import { logger } from '../logger.js';
-import { fireAlert, resolveAlert, ALERT_CONDITIONS } from '../alertManager.js';
+import * as alertManager from '../alertManager.js';
+
+const { fireAlert, resolveAlert, ALERT_CONDITIONS } = alertManager;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 500;

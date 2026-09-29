@@ -79,6 +79,9 @@ import { requestVerification, getCodeVerification } from "./contractVerifier.js"
 import { getEventLineage } from "./lineage.js";
 import registerWebhookRoutes from "./routes/webhooks.js";
 import registerDashboardRoutes from "./routes/dashboard.js";
+import { requireAuthenticatedKey } from "./auth/requireAuthenticatedKey.js";
+import { ALERT_EVENT_TIME_GRACE_MS, evaluateAlertRule } from "./alertingEngine.js";
+import { getIndexerNetwork } from "./networkConfig.js";
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
 import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
 import {
@@ -107,7 +110,9 @@ import { formatAmount } from "./formatAmount.js";
 import { verifySourceVerification } from "./sourceVerification.js";
 import { sendVerificationEmail, isConfigured } from "./emailService.js";
 import { getHealthStatus, getLivenessStatus, getReadinessStatus } from "./health.js";
-import { getActiveAlerts } from "./alertManager.js";
+import * as alertManager from "./alertManager.js";
+
+const { getActiveAlerts } = alertManager;
 import { randomUUID } from "crypto";
 import Ajv from "ajv";
 import { isPurgeHealthy } from "./cdnPurge.js";
@@ -214,6 +219,266 @@ function tracingMiddleware(req, res, next) {
       },
     );
   });
+}
+
+function validateAlertRule(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { valid: false, error: "rule body must be an object" };
+  }
+  const ruleTypes = new Set([
+    "threshold",
+    "rate_of_change",
+    "anomaly",
+    "absence",
+    "function_match",
+    "decoded_predicate",
+    "system_event",
+  ]);
+  if (!ruleTypes.has(input.rule_type)) return { valid: false, error: "unsupported rule_type" };
+  if (typeof input.name !== "string" || input.name.trim().length < 1 || input.name.length > 120) {
+    return { valid: false, error: "name must be 1-120 characters" };
+  }
+  if (input.contract_id != null && !/^C[A-Z2-7]{55}$/.test(input.contract_id)) {
+    return { valid: false, error: "contract_id must be a valid Stellar contract address" };
+  }
+  const channels = input.channels ?? ["in_app"];
+  if (
+    !Array.isArray(channels) ||
+    channels.length === 0 ||
+    channels.some((channel) => !["email", "webhook", "in_app"].includes(channel)) ||
+    new Set(channels).size !== channels.length
+  ) {
+    return { valid: false, error: "channels must be unique values from email, webhook, in_app" };
+  }
+  const window_seconds = Number(input.window_seconds ?? 3600);
+  const cooldown_seconds = Number(input.cooldown_seconds ?? 0);
+  if (!Number.isInteger(window_seconds) || window_seconds < 60 || window_seconds > 86400) {
+    return { valid: false, error: "window_seconds must be an integer between 60 and 86400" };
+  }
+  if (!Number.isInteger(cooldown_seconds) || cooldown_seconds < 0 || cooldown_seconds > 2_592_000) {
+    return { valid: false, error: "cooldown_seconds must be an integer between 0 and 2592000" };
+  }
+
+  const config = input.config ?? {};
+  let normalizedConfig = config;
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return { valid: false, error: "config must be an object" };
+  }
+  const operators = new Set(["eq", "neq", "gt", "gte", "lt", "lte"]);
+  if (input.rule_type === "threshold") {
+    if (!operators.has(config.operator ?? "gt") || !Number.isFinite(Number(config.value))) {
+      return { valid: false, error: "threshold requires a valid operator and numeric value" };
+    }
+  } else if (input.rule_type === "rate_of_change") {
+    if (
+      !["increase", "decrease"].includes(config.direction ?? "increase") ||
+      !Number.isFinite(Number(config.minimum_change_percent ?? 50)) ||
+      Number(config.minimum_change_percent ?? 50) < 0
+    ) {
+      return { valid: false, error: "rate_of_change requires direction and a non-negative percentage" };
+    }
+  } else if (input.rule_type === "anomaly") {
+    if (
+      !Number.isInteger(Number(config.baseline_windows ?? 24)) ||
+      Number(config.baseline_windows ?? 24) < 3 ||
+      Number(config.baseline_windows ?? 24) > 168 ||
+      !Number.isFinite(Number(config.standard_deviations ?? 3)) ||
+      Number(config.standard_deviations ?? 3) <= 0
+    ) {
+      return { valid: false, error: "anomaly requires 3-168 baseline windows and a positive deviation" };
+    }
+  } else if (input.rule_type === "function_match") {
+    if (typeof config.function !== "string" || config.function.length < 1 || config.function.length > 128) {
+      return { valid: false, error: "function_match requires a function name" };
+    }
+  } else if (input.rule_type === "system_event") {
+    if (!["upgrade", "pause", "circuit_breaker"].includes(config.event)) {
+      return { valid: false, error: "system_event must be upgrade, pause, or circuit_breaker" };
+    }
+  } else if (input.rule_type === "decoded_predicate") {
+    const allowedFields = /^(function|description|ledger|cpu_instructions|fee_charged|raw_topics\.\d{1,2})$/;
+    if (
+      typeof config.field !== "string" ||
+      !allowedFields.test(config.field) ||
+      !operators.has(config.operator) ||
+      config.value === undefined ||
+      !["string", "number"].includes(typeof config.value)
+    ) {
+      return { valid: false, error: "decoded_predicate requires a supported field, operator, and scalar value" };
+    }
+    if (
+      ["function", "description"].includes(config.field) &&
+      !["eq", "neq"].includes(config.operator)
+    ) {
+      return { valid: false, error: "string predicates support only eq and neq" };
+    }
+    if (
+      !["function", "description"].includes(config.field) &&
+      !Number.isFinite(Number(config.value))
+    ) {
+      return { valid: false, error: "numeric predicates require a numeric value" };
+    }
+    if (!["function", "description"].includes(config.field)) {
+      normalizedConfig = { ...config, value: Number(config.value) };
+    }
+  }
+
+  const mute_windows = input.mute_windows ?? [];
+  if (
+    !Array.isArray(mute_windows) ||
+    mute_windows.length > 50 ||
+    mute_windows.some((window) => {
+      const start = new Date(window?.start);
+      const end = new Date(window?.end);
+      return !Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end;
+    })
+  ) {
+    return { valid: false, error: "mute_windows must contain at most 50 valid start/end timestamps" };
+  }
+
+  return {
+    valid: true,
+    value: {
+      name: input.name.trim(),
+      contract_id: input.contract_id ?? null,
+      rule_type: input.rule_type,
+      config: normalizedConfig,
+      channels,
+      window_seconds,
+      cooldown_seconds,
+      digest_mode: input.digest_mode === true,
+      auto_resolve: input.auto_resolve !== false,
+      mute_windows,
+    },
+  };
+}
+
+async function validateAlertChannels(db, apiKeyId, channels) {
+  if (channels.includes("email")) {
+    if (!isConfigured()) return "Email delivery is not configured";
+    if (!(await db.getVerifiedEmailForApiKey(apiKeyId))) {
+      return "A verified email address is required for email alerts";
+    }
+  }
+  if (channels.includes("webhook") && (await db.getActiveWebhooksForApiKey(apiKeyId)).length === 0) {
+    return "Create an active webhook subscription before enabling webhook alerts";
+  }
+  return null;
+}
+
+async function dryRunAlertRule(db, rule) {
+  const durationMs = Number(rule.window_seconds) * 1000;
+  const now = Date.now();
+  const end = Math.floor((now - ALERT_EVENT_TIME_GRACE_MS) / durationMs) * durationMs;
+  const start = Math.floor((now - 86_400_000) / durationMs) * durationMs;
+  const baselineWindows = rule.rule_type === "anomaly"
+    ? Math.min(168, Math.max(3, Number(rule.config.baseline_windows) || 24))
+    : rule.rule_type === "rate_of_change"
+      ? 1
+      : 0;
+  const queryStart = new Date(start - baselineWindows * durationMs);
+  const params = [getIndexerNetwork(), rule.contract_id, rule.window_seconds, new Date(start), queryStart, new Date(end)];
+  let predicate = "";
+  if (rule.rule_type === "function_match") {
+    params.push(rule.config.function);
+    predicate = ` AND function = $${params.length}`;
+  } else if (rule.rule_type === "system_event") {
+    if (rule.config.event === "upgrade") predicate = " AND upgrade_info IS NOT NULL";
+    else if (rule.config.event === "pause") predicate = " AND function ~* '(pause|unpause|halt)'";
+    else predicate = " AND function ~* '(circuit|breaker|trip)'";
+  } else if (rule.rule_type === "decoded_predicate") {
+    const field = rule.config.field;
+    const operators = { eq: "=", neq: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=" };
+    let expression;
+    let cast;
+    if (field === "raw_topics.0" || /^raw_topics\.\d{1,2}$/.test(field)) {
+      const index = Number(field.slice("raw_topics.".length));
+      expression = `CASE WHEN (raw_topics->>$${params.length + 1}::INT) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (raw_topics->>$${params.length + 1}::INT)::NUMERIC END`;
+      params.push(index);
+      cast = "NUMERIC";
+    } else if (["function", "description"].includes(field)) {
+      expression = field;
+      cast = "TEXT";
+    } else {
+      expression = field;
+      cast = "NUMERIC";
+    }
+    params.push(rule.config.value);
+    predicate = ` AND ${expression} ${operators[rule.config.operator]} $${params.length}::${cast}`;
+  }
+  const { rows } = await db.query(
+    `SELECT date_bin(make_interval(secs => $3), created_at, $4) AS bucket, COUNT(*)::INT AS total
+     FROM events
+     WHERE network = $1 AND ($2::TEXT IS NULL OR contract_id = $2)
+       AND created_at >= $5 AND created_at < $6${predicate}
+     GROUP BY bucket`,
+    params,
+  );
+  const counts = new Map(rows.map((row) => [new Date(row.bucket).toISOString(), Number(row.total)]));
+  const windows = [];
+  let active = Boolean(rule.active);
+  let lastFiredAt = rule.last_fired_at ? new Date(rule.last_fired_at).getTime() : 0;
+  for (let current = start; current < end; current += durationMs) {
+    const windowStart = new Date(current);
+    const currentCount = counts.get(windowStart.toISOString()) ?? 0;
+    const syntheticEvent = {};
+    if (rule.rule_type === "function_match") {
+      syntheticEvent.function = rule.config.function;
+    } else if (rule.rule_type === "system_event") {
+      if (rule.config.event === "upgrade") syntheticEvent.upgrade_info = {};
+      else syntheticEvent.function = rule.config.event === "pause" ? "pause" : "circuit_breaker";
+    } else if (rule.rule_type === "decoded_predicate") {
+      const expected = rule.config.value;
+      const actualByOperator = {
+        eq: expected,
+        neq: typeof expected === "number" ? expected + 1 : `${expected}_other`,
+        gt: Number(expected) + 1,
+        gte: expected,
+        lt: Number(expected) - 1,
+        lte: expected,
+      };
+      const actual = actualByOperator[rule.config.operator];
+      if (rule.config.field.startsWith("raw_topics.")) {
+        const index = Number(rule.config.field.slice("raw_topics.".length));
+        syntheticEvent.raw_topics = [];
+        syntheticEvent.raw_topics[index] = String(actual);
+      } else {
+        syntheticEvent[rule.config.field] = actual;
+      }
+    }
+    const syntheticEvents =
+      currentCount > 0 && ["function_match", "decoded_predicate", "system_event"].includes(rule.rule_type)
+        ? [syntheticEvent]
+        : [];
+    const result = evaluateAlertRule(rule, syntheticEvents, counts, windowStart);
+    const windowEnd = current + durationMs;
+    const muted =
+      (rule.muted_until && new Date(rule.muted_until).getTime() > windowEnd) ||
+      (rule.mute_windows ?? []).some(
+        (mute) => new Date(mute.start).getTime() <= windowEnd && new Date(mute.end).getTime() > windowEnd,
+      );
+    const cooldownElapsed =
+      !lastFiredAt || windowEnd - lastFiredAt >= Number(rule.cooldown_seconds) * 1000;
+    const wouldFire = result.matched && !muted && (!active || (rule.cooldown_seconds > 0 && cooldownElapsed));
+    if (wouldFire) {
+      windows.push({
+        window_start: windowStart.toISOString(),
+        window_end: new Date(windowEnd).toISOString(),
+        event_count: currentCount,
+        metric: result.metric,
+      });
+      active = true;
+      lastFiredAt = windowEnd;
+    } else if (!result.matched && active && rule.auto_resolve) {
+      active = false;
+    }
+  }
+  return {
+    rule_id: rule.id,
+    period_start: new Date(start).toISOString(),
+    period_end: new Date(end).toISOString(),
+    windows,
+  };
 }
 
 function createHttpLogger(logDestination) {
@@ -359,7 +624,8 @@ const writeLimiter = rateLimit({
 export function createApi({ logDestination, dbOverride } = {}) {
   // Allow callers (tests) to inject a fake DB implementation via `dbOverride`.
   const db = dbOverride || defaultDb;
-  const runningUnderTest = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
+  const runningUnderTest =
+    process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID || !!process.env.NODE_TEST_CONTEXT;
   const app = express();
   app.use(
     helmet({
@@ -558,6 +824,214 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // ── Self-service routes (auth-gated by req.rateContext.keyId) ────────────
   registerWebhookRoutes(app);
   registerDashboardRoutes(app);
+  const alertsRouter = express.Router();
+  alertsRouter.use(requireAuthenticatedKey);
+
+  alertsRouter.get("/notifications", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT id, rule_id, kind, payload, channels, channel_status, created_at, delivered_at, read_at
+         FROM alert_notifications
+         WHERE api_key_id = $1 AND network = $2
+           AND channels @> ARRAY['in_app']::TEXT[]
+           AND channel_status->'in_app'->>'status' = 'sent'
+         ORDER BY created_at DESC
+         LIMIT 100`,
+        [req.rateContext.keyId, getIndexerNetwork()],
+      );
+      res.json({ data: rows });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.post("/notifications/:id/read", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `UPDATE alert_notifications SET read_at = NOW()
+         WHERE id = $1 AND api_key_id = $2 AND network = $3
+         RETURNING id, read_at`,
+        [req.params.id, req.rateContext.keyId, getIndexerNetwork()],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "notification not found" });
+      res.json(rows[0]);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.get("/", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM alert_rules WHERE api_key_id = $1 AND network = $2 ORDER BY created_at DESC`,
+        [req.rateContext.keyId, getIndexerNetwork()],
+      );
+      res.json({ data: rows });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.post("/", async (req, res) => {
+    const rule = validateAlertRule(req.body);
+    if (!rule.valid) return res.status(400).json({ error: rule.error });
+    try {
+      const channelError = await validateAlertChannels(db, req.rateContext.keyId, rule.value.channels);
+      if (channelError) return res.status(400).json({ error: channelError });
+      if (rule.value.contract_id && !(await db.getContractMeta(rule.value.contract_id))) {
+        return res.status(400).json({ error: "contract not found" });
+      }
+      const { rows } = await db.query(
+        `INSERT INTO alert_rules
+           (api_key_id, network, name, contract_id, rule_type, config, channels, window_seconds,
+            cooldown_seconds, digest_mode, auto_resolve, mute_windows)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING *`,
+        [
+          req.rateContext.keyId,
+          getIndexerNetwork(),
+          rule.value.name,
+          rule.value.contract_id,
+          rule.value.rule_type,
+          JSON.stringify(rule.value.config),
+          rule.value.channels,
+          rule.value.window_seconds,
+          rule.value.cooldown_seconds,
+          rule.value.digest_mode,
+          rule.value.auto_resolve,
+          JSON.stringify(rule.value.mute_windows),
+        ],
+      );
+      res.status(201).json(rows[0]);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.put("/:id", async (req, res) => {
+    const rule = validateAlertRule(req.body);
+    if (!rule.valid) return res.status(400).json({ error: rule.error });
+    try {
+      const channelError = await validateAlertChannels(db, req.rateContext.keyId, rule.value.channels);
+      if (channelError) return res.status(400).json({ error: channelError });
+      if (rule.value.contract_id && !(await db.getContractMeta(rule.value.contract_id))) {
+        return res.status(400).json({ error: "contract not found" });
+      }
+      const { rows } = await db.query(
+        `UPDATE alert_rules SET
+           name = $3, contract_id = $4, rule_type = $5, config = $6, channels = $7,
+           window_seconds = $8, cooldown_seconds = $9, digest_mode = $10,
+           auto_resolve = $11, mute_windows = $12,
+           last_evaluated_window = date_bin(make_interval(secs => $8), NOW(), TIMESTAMPTZ 'epoch'),
+           last_fired_at = NULL, active = FALSE, updated_at = NOW()
+         WHERE id = $1 AND api_key_id = $2 AND network = $13
+         RETURNING *`,
+        [
+          req.params.id,
+          req.rateContext.keyId,
+          rule.value.name,
+          rule.value.contract_id,
+          rule.value.rule_type,
+          JSON.stringify(rule.value.config),
+          rule.value.channels,
+          rule.value.window_seconds,
+          rule.value.cooldown_seconds,
+          rule.value.digest_mode,
+          rule.value.auto_resolve,
+          JSON.stringify(rule.value.mute_windows),
+          getIndexerNetwork(),
+        ],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "alert rule not found" });
+      res.json(rows[0]);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.delete("/:id", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `UPDATE alert_rules SET enabled = FALSE, updated_at = NOW()
+         WHERE id = $1 AND api_key_id = $2 AND network = $3
+         RETURNING id`,
+        [req.params.id, req.rateContext.keyId, getIndexerNetwork()],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "alert rule not found" });
+      res.status(204).end();
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.post("/:id/enable", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `UPDATE alert_rules SET enabled = TRUE, updated_at = NOW()
+         WHERE id = $1 AND api_key_id = $2 AND network = $3
+         RETURNING id, enabled`,
+        [req.params.id, req.rateContext.keyId, getIndexerNetwork()],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "alert rule not found" });
+      res.json(rows[0]);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.post("/:id/mute", async (req, res) => {
+    const mutedUntil = new Date(req.body?.muted_until);
+    if (!Number.isFinite(mutedUntil.getTime()) || mutedUntil <= new Date()) {
+      return res.status(400).json({ error: "muted_until must be a future ISO timestamp" });
+    }
+    try {
+      const { rows } = await db.query(
+        `UPDATE alert_rules SET muted_until = $3, updated_at = NOW()
+         WHERE id = $1 AND api_key_id = $2 AND network = $4
+         RETURNING id, muted_until`,
+        [req.params.id, req.rateContext.keyId, mutedUntil, getIndexerNetwork()],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "alert rule not found" });
+      res.json(rows[0]);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.get("/:id/history", async (req, res) => {
+    try {
+      const rule = await db.query(
+        "SELECT id FROM alert_rules WHERE id = $1 AND api_key_id = $2 AND network = $3",
+        [req.params.id, req.rateContext.keyId, getIndexerNetwork()],
+      );
+      if (!rule.rows[0]) return res.status(404).json({ error: "alert rule not found" });
+      const { rows } = await db.query(
+        `SELECT id, window_start, window_end, status, event_count, details, evaluated_at
+         FROM alert_evaluations WHERE rule_id = $1
+         ORDER BY window_start DESC LIMIT 200`,
+        [req.params.id],
+      );
+      res.json({ data: rows });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  alertsRouter.post("/:id/dry-run", async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        "SELECT * FROM alert_rules WHERE id = $1 AND api_key_id = $2 AND network = $3",
+        [req.params.id, req.rateContext.keyId, getIndexerNetwork()],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "alert rule not found" });
+      const result = await dryRunAlertRule(db, rows[0]);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.use("/api/alert-rules", alertsRouter);
 
   // ── API Documentation ────────────────────────────────────────────────────────
   const openApiPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../docs/api/openapi.yaml");
@@ -565,7 +1039,8 @@ export function createApi({ logDestination, dbOverride } = {}) {
     // Avoid dynamic imports during test runs which may resolve after Jest
     // tears down the environment and cause 'import after teardown' errors.
     // Detect test runs started by Jest (NODE_ENV may not always be set).
-    const runningUnderTest = process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID;
+    const runningUnderTest =
+      process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID || !!process.env.NODE_TEST_CONTEXT;
     if (!runningUnderTest) {
       const yaml = fs.readFileSync(openApiPath, "utf8");
       import("yaml")
@@ -732,7 +1207,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Prometheus metrics ────────────────────────────────────────────────────
   // Scraped by Prometheus or any OpenMetrics-compatible collector.
-  app.get("/metrics", async (_req, res) => {
+  app.get("/metrics", requireMetricsApiKey, async (_req, res) => {
     try {
       res.set("Content-Type", registry.contentType);
       res.end(await registry.metrics());
@@ -2029,7 +2504,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
   //   Collection-level analytics (issue #810): mint volume over time and a
   //   unique-holder-count trend, derived from indexed NFT mint/transfer events.
   //   ?days=<n> — rolling window length, default 30, clamped 7..365.
-  app.get("/api/tokens/:contractId/nfts/analytics", async (req, res) => {
+  // Older clients still call /api/tokens/:contractId/analytics — accept that
+  // alias while keeping the canonical /nfts/analytics route.
+  const nftAnalyticsHandler = async (req, res) => {
     try {
       const { contractId } = req.params;
       const days = req.query.days !== undefined ? Number(req.query.days) : 30;
@@ -2041,7 +2518,9 @@ export function createApi({ logDestination, dbOverride } = {}) {
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
-  });
+  };
+  app.get("/api/tokens/:contractId/nfts/analytics", nftAnalyticsHandler);
+  app.get("/api/tokens/:contractId/analytics", nftAnalyticsHandler);
 
   // GET /api/tokens/:contractId/nfts/:tokenId/history
   //   Returns the full mint + transfer event history for a single NFT token.
@@ -3314,7 +3793,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // During test runs we avoid calling `listen()` to prevent port conflicts
   // and background handles that outlive the Jest environment. Tests will
   // use the returned `app` or server object directly via supertest.
-  if (process.env.NODE_ENV === "test" || !!process.env.JEST_WORKER_ID) {
+  if (runningUnderTest) {
     return app;
   }
 

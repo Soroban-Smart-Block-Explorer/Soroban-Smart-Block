@@ -33,7 +33,7 @@ const MAX_HEAP_MB = config.ALERT_MAX_HEAP_MB;
 const INDEXER_STALL_MS = config.ALERT_INDEXER_STALL_MS;
 const MIN_DECODE_RATE = config.ALERT_MIN_DECODE_RATE;
 
-export const ALERT_CONDITIONS = {
+export const ALERT_CONDITIONS = Object.freeze({
   INDEXER_DOWN: "INDEXER_DOWN",
   RUNTIME_CONFIG_REVERTED: "RUNTIME_CONFIG_REVERTED",
   LEDGER_GAP: "LEDGER_GAP",
@@ -276,3 +276,32 @@ export async function checkDecodeRate(successRate) {
     resolveAlert(ALERT_CONDITIONS.DECODE_RATE_LOW);
   }
 }
+
+export async function checkAlertingPipelineLag(lagSeconds) {
+  if (lagSeconds > 300) {
+    await fireAlert(
+      ALERT_CONDITIONS.ALERTING_PIPELINE_LAG,
+      `Alerting evaluations are ${Math.round(lagSeconds)} seconds behind`,
+    );
+  } else {
+    resolveAlert(ALERT_CONDITIONS.ALERTING_PIPELINE_LAG);
+  }
+}
+
+export default Object.freeze({
+  ALERT_CONDITIONS,
+  fireAlert,
+  resolveAlert,
+  getActiveAlerts,
+  recordPoll,
+  checkIndexerDown,
+  checkLedgerGap,
+  checkDbHealth,
+  checkResourceConstraints,
+  checkRpcHealth,
+  checkThroughput,
+  checkDlqSize,
+  alertReorg,
+  checkDecodeRate,
+  checkAlertingPipelineLag,
+});
