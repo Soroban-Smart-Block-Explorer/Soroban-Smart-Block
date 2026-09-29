@@ -83,6 +83,28 @@ export const dlqDepth = new Gauge({
   registers: [registry],
 });
 
+/** Issue #851 — DLQ depth broken down by entry state. */
+export const dlqDepthByState = new Gauge({
+  name: "indexer_dlq_depth",
+  help: "Dead-letter-queue entries by state",
+  labelNames: ["state"],
+  registers: [registry],
+});
+
+/** Issue #851 — DLQ entries successfully replayed by the processor. */
+export const dlqReplayedTotal = new Counter({
+  name: "indexer_dlq_replayed_total",
+  help: "Total DLQ entries replayed successfully",
+  registers: [registry],
+});
+
+/** Issue #851 — DLQ entries moved to quarantine. */
+export const dlqQuarantinedTotal = new Counter({
+  name: "indexer_dlq_quarantined_total",
+  help: "Total DLQ entries quarantined (poison messages)",
+  registers: [registry],
+});
+
 /** Cache hits/misses by cache layer type (e.g. cache="wallet"). */
 export const cacheHitTotal = new Counter({
   name: "cache_hit_total",

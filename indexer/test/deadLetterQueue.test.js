@@ -102,3 +102,54 @@ describe("DLQ enqueue field mapping", () => {
     assert.equal(resolved, "TX1");
   });
 });
+
+// ── Issue #851: processor backoff, classification, poison detection ─────────
+import { computeBackoff, classifyError, nextStateAfterFailure } from "../src/deadLetterQueue.js";
+
+describe("computeBackoff", () => {
+  it("doubles per attempt and is capped", () => {
+    assert.equal(computeBackoff(1, { base: 1000, max: 10_000 }), 1000);
+    assert.equal(computeBackoff(2, { base: 1000, max: 10_000 }), 2000);
+    assert.equal(computeBackoff(3, { base: 1000, max: 10_000 }), 4000);
+    assert.equal(computeBackoff(10, { base: 1000, max: 10_000 }), 10_000);
+  });
+});
+
+describe("classifyError", () => {
+  class DecodeError extends Error {}
+
+  it("uses the error class name", () => {
+    assert.equal(classifyError(new DecodeError("bad xdr")).errorClass, "DecodeError");
+    assert.equal(classifyError(new TypeError("x")).errorClass, "TypeError");
+  });
+
+  it("hashes the same code path identically regardless of message", () => {
+    const [a, b] = ["ledger 1", "ledger 2"].map((msg) => new DecodeError(msg));
+    assert.equal(classifyError(a).stackHash, classifyError(b).stackHash);
+  });
+
+  it("hashes different code paths differently", () => {
+    const a = new DecodeError("x");
+    const b = new DecodeError("x");
+    b.stack = "DecodeError: x\n    at other (file.js:1:1)";
+    assert.notEqual(classifyError(a).stackHash, classifyError(b).stackHash);
+  });
+});
+
+describe("nextStateAfterFailure", () => {
+  const opts = { maxAttempts: 6, poisonThreshold: 50 };
+
+  it("keeps retrying transient failures below the attempt budget", () => {
+    assert.equal(nextStateAfterFailure({ attempts: 2, sameHashCount: 1, ...opts }), "queued");
+  });
+
+  it("quarantines after DLQ_MAX_ATTEMPTS deterministic failures", () => {
+    assert.equal(nextStateAfterFailure({ attempts: 5, sameHashCount: 1, ...opts }), "queued");
+    assert.equal(nextStateAfterFailure({ attempts: 6, sameHashCount: 1, ...opts }), "quarantined");
+  });
+
+  it("quarantines when a stack hash recurs across the poison threshold", () => {
+    assert.equal(nextStateAfterFailure({ attempts: 1, sameHashCount: 49, ...opts }), "queued");
+    assert.equal(nextStateAfterFailure({ attempts: 1, sameHashCount: 50, ...opts }), "quarantined");
+  });
+});
