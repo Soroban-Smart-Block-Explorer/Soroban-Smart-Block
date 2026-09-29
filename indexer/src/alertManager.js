@@ -26,13 +26,14 @@ const PAGERDUTY_ROUTING_KEY = process.env.PAGERDUTY_ROUTING_KEY ?? "";
 const PAGERDUTY_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue";
 
 const GAP_THRESHOLD = config.ALERT_GAP_THRESHOLD;
-const DLQ_MAX_SIZE = config.ALERT_DLQ_MAX_SIZE;
+// DLQ_ALERT_DEPTH (issue #851) takes precedence over the legacy ALERT_DLQ_MAX_SIZE.
+const DLQ_MAX_SIZE = process.env.DLQ_ALERT_DEPTH ? config.DLQ_ALERT_DEPTH : config.ALERT_DLQ_MAX_SIZE;
 const MIN_THROUGHPUT = config.ALERT_MIN_THROUGHPUT;
 const MAX_HEAP_MB = config.ALERT_MAX_HEAP_MB;
 const INDEXER_STALL_MS = config.ALERT_INDEXER_STALL_MS;
 const MIN_DECODE_RATE = config.ALERT_MIN_DECODE_RATE;
 
-export const ALERT_CONDITIONS = {
+export const ALERT_CONDITIONS = Object.freeze({
   INDEXER_DOWN: "INDEXER_DOWN",
   RUNTIME_CONFIG_REVERTED: "RUNTIME_CONFIG_REVERTED",
   LEDGER_GAP: "LEDGER_GAP",
@@ -41,6 +42,8 @@ export const ALERT_CONDITIONS = {
   ALL_RPC_DOWN: "ALL_RPC_DOWN",
   LOW_THROUGHPUT: "LOW_THROUGHPUT",
   DLQ_THRESHOLD: "DLQ_THRESHOLD",
+  DLQ_QUARANTINE: "DLQ_QUARANTINE",
+  DLQ_STALE: "DLQ_STALE",
   REORG_DETECTED: "REORG_DETECTED",
   DECODE_RATE_LOW: "DECODE_RATE_LOW",
   AUDIT_PARTITION_FAILURE: "AUDIT_PARTITION_FAILURE",
@@ -56,6 +59,8 @@ const SEVERITY = {
   [ALERT_CONDITIONS.ALL_RPC_DOWN]: "critical",
   [ALERT_CONDITIONS.LOW_THROUGHPUT]: "warning",
   [ALERT_CONDITIONS.DLQ_THRESHOLD]: "warning",
+  [ALERT_CONDITIONS.DLQ_QUARANTINE]: "warning",
+  [ALERT_CONDITIONS.DLQ_STALE]: "warning",
   [ALERT_CONDITIONS.REORG_DETECTED]: "critical",
   [ALERT_CONDITIONS.DECODE_RATE_LOW]: "warning",
   [ALERT_CONDITIONS.AUDIT_PARTITION_FAILURE]: "critical",
@@ -271,3 +276,32 @@ export async function checkDecodeRate(successRate) {
     resolveAlert(ALERT_CONDITIONS.DECODE_RATE_LOW);
   }
 }
+
+export async function checkAlertingPipelineLag(lagSeconds) {
+  if (lagSeconds > 300) {
+    await fireAlert(
+      ALERT_CONDITIONS.ALERTING_PIPELINE_LAG,
+      `Alerting evaluations are ${Math.round(lagSeconds)} seconds behind`,
+    );
+  } else {
+    resolveAlert(ALERT_CONDITIONS.ALERTING_PIPELINE_LAG);
+  }
+}
+
+export default Object.freeze({
+  ALERT_CONDITIONS,
+  fireAlert,
+  resolveAlert,
+  getActiveAlerts,
+  recordPoll,
+  checkIndexerDown,
+  checkLedgerGap,
+  checkDbHealth,
+  checkResourceConstraints,
+  checkRpcHealth,
+  checkThroughput,
+  checkDlqSize,
+  alertReorg,
+  checkDecodeRate,
+  checkAlertingPipelineLag,
+});

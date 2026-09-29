@@ -1,6 +1,8 @@
 import { BatchCall } from "./types/batch";
 import { getCsrfToken, refreshCsrfToken } from "./hooks/useCsrf";
 import { readCachedResponse, writeCachedResponse } from "./services/offlineStore";
+import { apiClient, unwrap, type Schemas } from "./generated/client";
+import type { I128 } from "./types/api";
 
 const BASE = "/api";
 
@@ -502,6 +504,9 @@ export interface StateDiff {
   new_value: string | null;
   change_type: "created" | "updated" | "removed";
   created_at: string;
+  // Issue #922: entry TTL and size when the indexer has them
+  live_until_ledger?: number | null;
+  size_bytes?: number | null;
 }
 
 // Issue #516: ABI version history entry (one row per contract_versions table row)
@@ -654,7 +659,8 @@ export interface GraphEdge {
   source: string;
   target: string;
   label?: string;
-  amount?: string;
+  // i128 amount serialized as a string (#923)
+  amount?: I128;
 }
 
 export interface AddressGraphData {
@@ -810,7 +816,83 @@ export interface TxNarrative {
   net_flows: Record<string, Record<string, string>>;
 }
 
+/** Ledger detail (#912). */
+export interface LedgerTx {
+  hash: string;
+  source?: string | null;
+  status?: string;
+  charged_fee?: string | number;
+  narratives: { contract_id: string; function: string; description: string }[];
+}
+
+export interface LedgerGap {
+  id: number;
+  from_ledger: number;
+  to_ledger: number;
+  status: string;
+}
+
+export interface LedgerDetail {
+  ledger: number;
+  status: "indexed" | "gap" | "not_indexed";
+  hash?: string | null;
+  indexed_at?: string | null;
+  closed_at?: string | null;
+  protocol_version?: number | null;
+  soroban_tx_count?: number;
+  event_count?: number;
+  fees?: { p10: number | null; p50: number | null; p90: number | null; p99: number | null };
+  utilization?: Record<string, number | null>;
+  transactions?: LedgerTx[];
+  gap: LedgerGap | null;
+  prev: number | null;
+  next: number | null;
+}
+
+export interface LedgerSummary {
+  ledger: number;
+  hash: string;
+  indexed_at: string;
+  soroban_tx_count: number;
+  event_count: number;
+}
+
+/** Reproducible-build source verification (#796). */
+export type CodeBadgeState =
+  | "verified_reproducible"
+  | "verified_hash_match"
+  | "mismatch"
+  | "unverified"
+  | "pending"
+  | "failed";
+
+export interface CodeVerification {
+  contract_id: string;
+  badge: { state: CodeBadgeState; expected?: string; actual?: string; upgraded?: boolean; reason?: string; source_retrievable?: boolean };
+  onchain_hash: string | null;
+  built_hash: string | null;
+  reproducible: boolean | null;
+  toolchain: Record<string, string> | null;
+  source_repo: string | null;
+  commit: string | null;
+  source_retrievable: boolean | null;
+  built_at: string | null;
+  reason: string | null;
+  build_log: string | null;
+  reproduce_doc: string;
+}
+
+/** Thrown by api.ledger for sequences beyond the indexed tip. */
+export class LedgerNotFoundError extends Error {}
+
+// Issue #921/#923: network metrics shapes come from the generated OpenAPI types.
+export type NetworkLedgerMetric = Schemas["NetworkLedgerMetric"];
+export type NetworkMetricsResponse = Schemas["NetworkMetricsResponse"];
+
 export const api = {
+  networkMetrics: (range: NetworkMetricsResponse["range"] = "1h") =>
+    unwrap(apiClient.GET("/api/network/metrics", { params: { query: { range } } })),
+  networkMetricsStreamUrl: `${BASE}/network/metrics/stream`,
   events: (params: { contract?: string; fn?: string; after_seq?: number; limit?: number; type?: string; from?: string; to?: string }) => {
     const q = new URLSearchParams();
     if (params.contract) q.set("contract", params.contract);
@@ -823,6 +905,18 @@ export const api = {
     return get<EventsPage>(`/events?${q}`);
   },
   event: (seq: number) => get<DecodedEvent>(`/events/${seq}`),
+  ledger: async (seq: number): Promise<LedgerDetail> => {
+    const res = await fetch(`${BASE}/ledgers/${seq}`, withTraceHeaders());
+    if (res.status === 404) throw new LedgerNotFoundError(`Ledger ${seq} not found`);
+    if (!res.ok) throw new Error(`API ${res.status}: /ledgers/${seq}`);
+    return res.json();
+  },
+  ledgers: (params: { cursor?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.cursor) q.set("cursor", params.cursor);
+    if (params.limit) q.set("limit", String(params.limit));
+    return get<{ data: LedgerSummary[]; next_cursor: string | null }>(`/ledgers?${q}`);
+  },
   txNarrative: (hash: string) => get<TxNarrative>(`/transactions/${hash}/narrative`),
   smartWallet: (address: string) => get<SmartWalletState>(`/wallet/${address}/smart-wallet`),
   asset: (issuer: string, code: string) => get<AssetInfo>(`/assets/${issuer}/${code}`),
@@ -984,6 +1078,21 @@ export const api = {
   },
 
   // multi-sig source verification
+  codeVerification: (id: string) => get<CodeVerification>(`/contracts/${id}/code-verification`),
+  requestCodeVerification: async (
+    id: string,
+    body: { source_repo: string; commit: string; toolchain?: Record<string, string> },
+    apiKey: string,
+  ) => {
+    const res = await mutationFetch(`${BASE}/contracts/${id}/code-verifications`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "x-api-key": apiKey },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `API ${res.status}`);
+    return json as { id: number; status: string };
+  },
   sourceVerifications: (id: string, wasmHash?: string) => {
     const q = wasmHash ? `?wasm_hash=${encodeURIComponent(wasmHash)}` : "";
     return get<SourceVerification[]>(`/contracts/${id}/source-verifications${q}`);

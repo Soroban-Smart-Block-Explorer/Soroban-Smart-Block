@@ -840,7 +840,6 @@ paths:
           description: Opaque signed keyset cursor for backward pagination
         - name: page
           in: query
-          description: Opaque cursor from the previous response
           schema:
             type: integer
             minimum: 1
@@ -1437,7 +1436,6 @@ paths:
           description: Opaque signed keyset cursor for backward pagination
         - name: page
           in: query
-          description: Sequence cursor returned as next_cursor on the previous page
           schema:
             type: integer
             default: 1
@@ -3526,7 +3524,6 @@ paths:
             maximum: 1000
         - name: after
           in: query
-          description: Opaque timestamp/id cursor from the previous response
           schema:
             type: integer
             default: 0
@@ -3560,9 +3557,6 @@ paths:
                     nullable: true
                   limit:
                     type: integer
-                  next_cursor:
-                    type: string
-                    nullable: true
         "401":
           description: Missing or invalid admin token
           content:
@@ -4113,6 +4107,269 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/network/metrics:
+    get:
+      summary: Per-ledger network metrics (TPS, close time, fee percentiles, utilization, surge)
+      parameters:
+        - name: range
+          in: query
+          schema:
+            type: string
+            enum: ["1h", "24h", "7d"]
+            default: "1h"
+      responses:
+        "200":
+          description: Network metrics for the requested range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkMetricsResponse"
+        "400":
+          description: Invalid range
+
+  /api/ledgers:
+    get:
+      summary: List indexed ledgers, newest first (#912)
+      parameters:
+        - name: cursor
+          in: query
+          description: Return ledgers with a sequence lower than this (the previous page's next_cursor)
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: A page of ledger summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LedgerSummary"
+                  next_cursor:
+                    type: string
+                    nullable: true
+        "400":
+          description: Invalid cursor
+
+  /api/ledgers/{seq}:
+    get:
+      summary: Ledger detail — header, protocol version, fees, utilization and Soroban txs (#912)
+      description: >
+        Ledgers older than the indexer's retention window return 200 with
+        status "not_indexed". Ledgers inside an open gap return status "gap"
+        with the gap record. Sequences beyond the indexed tip return 404.
+      parameters:
+        - name: seq
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Ledger detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LedgerDetail"
+        "400":
+          description: Invalid sequence
+        "404":
+          description: Ledger not yet closed / indexed (future ledger)
+
+  /api/contracts/{id}/code-verifications:
+    post:
+      summary: Queue a reproducible-build source verification (#796)
+      description: >
+        Submits source coordinates only. The verifier builds the WASM in a
+        pinned container and compares sha256(wasm) with the on-chain code
+        hash; submitted metadata can never mark a contract verified.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_repo, commit]
+              properties:
+                source_repo:
+                  type: string
+                  example: https://github.com/org/repo
+                commit:
+                  type: string
+                  description: Full 40-character commit SHA
+                toolchain:
+                  type: object
+                  properties:
+                    rust: { type: string }
+                    soroban_sdk: { type: string }
+                    stellar_cli: { type: string }
+      responses:
+        "202":
+          description: Verification queued
+        "400":
+          description: Invalid source coordinates
+        "429":
+          description: A verification for this contract is already queued
+
+  /api/contracts/{id}/code-verification:
+    get:
+      summary: Source-verification badge and trust details (#796)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            Badge state (verified_reproducible, verified_hash_match, mismatch,
+            unverified, pending, failed), on-chain and built hashes, toolchain,
+            source link, build timestamp, sanitized build log for failures.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/admin/dlq:
+    get:
+      summary: List dead-letter-queue entries (#851)
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [queued, retrying, quarantined, resolved]
+        - name: error_class
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            maximum: 200
+      responses:
+        "200":
+          description: Paginated DLQ entries
+
+  /api/admin/dlq/{id}/retry:
+    post:
+      summary: Retry a DLQ entry now (also un-quarantines it) (#851)
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Entry re-queued
+        "404":
+          description: Not found
+        "409":
+          description: Already resolved
+
+  /api/admin/dlq/{id}/resolve:
+    post:
+      summary: Mark a DLQ entry resolved (#851)
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Entry resolved
+        "404":
+          description: Not found
+
+  /api/admin/dlq/replay:
+    post:
+      summary: Bulk re-queue open DLQ entries of one error class (#851)
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: error_class
+          in: query
+          required: true
+          schema:
+            type: string
+            example: DecodeError
+      responses:
+        "200":
+          description: Number of entries re-queued
+        "400":
+          description: error_class missing
+
+  /api/admin/api-keys/{id}/signing-secret:
+    post:
+      summary: Issue a request-signing secret for an API key (#852)
+      description: >
+        Returns the secret once. The previous secret remains valid (rotation
+        overlap); older secrets are revoked. Mutating routes under
+        /api/contracts, /api/abi and /api/admin accept X-SSB-Key-Id,
+        X-SSB-Timestamp (unix seconds), X-SSB-Nonce and X-SSB-Signature =
+        hex HMAC-SHA256(secret, METHOD \n PATH \n SHA256(raw body) \n timestamp \n nonce).
+        With SIGNING_ENFORCED=on unsigned requests are rejected. Errors: 401
+        stale_timestamp (with server_time), 401 invalid_signature, 409 nonce_reused.
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: "{ key_id, signing_secret }"
+        "404":
+          description: API key not found
+
+  /api/network/metrics/stream:
+    get:
+      summary: Server-sent stream of the latest ledger's network metrics
+      responses:
+        "200":
+          description: text/event-stream of {metric, recommended, staleness_seconds}
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
   /api/export/contracts:
     get:
       summary: Export registered contracts as CSV or JSON
@@ -4129,7 +4386,6 @@ paths:
             minimum: 1
             maximum: 10000
             default: 1000
-      parameters:
         - name: format
           in: query
           schema:
@@ -4301,6 +4557,148 @@ components:
         Compatible with standard authenticator apps (30s step, 6 digits, SHA-1).
 
   schemas:
+    NullableNumber:
+      type: number
+      nullable: true
+    NetworkLedgerMetric:
+      type: object
+      required: [ledger, closed_at, tx_count, close_time, tps, fees, utilization, surge]
+      properties:
+        ledger: { type: integer }
+        closed_at: { type: string, format: date-time }
+        tx_count: { type: integer }
+        close_time: { $ref: "#/components/schemas/NullableNumber" }
+        tps: { $ref: "#/components/schemas/NullableNumber" }
+        fees:
+          type: object
+          required: [p10, p50, p90, p99]
+          properties:
+            p10: { $ref: "#/components/schemas/NullableNumber" }
+            p50: { $ref: "#/components/schemas/NullableNumber" }
+            p90: { $ref: "#/components/schemas/NullableNumber" }
+            p99: { $ref: "#/components/schemas/NullableNumber" }
+        utilization:
+          type: object
+          required: [tx_count, instructions, read_bytes, write_bytes]
+          properties:
+            tx_count: { $ref: "#/components/schemas/NullableNumber" }
+            instructions: { $ref: "#/components/schemas/NullableNumber" }
+            read_bytes: { $ref: "#/components/schemas/NullableNumber" }
+            write_bytes: { $ref: "#/components/schemas/NullableNumber" }
+        surge: { type: boolean }
+    LedgerSummary:
+      type: object
+      required: [ledger, hash, indexed_at, soroban_tx_count, event_count]
+      properties:
+        ledger:
+          type: integer
+        hash:
+          type: string
+        indexed_at:
+          type: string
+          format: date-time
+        soroban_tx_count:
+          type: integer
+        event_count:
+          type: integer
+    LedgerDetail:
+      type: object
+      required: [ledger, status, gap, prev, next]
+      properties:
+        ledger:
+          type: integer
+        status:
+          type: string
+          enum: [indexed, gap, not_indexed]
+        hash:
+          type: string
+          nullable: true
+        indexed_at:
+          type: string
+          format: date-time
+          nullable: true
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        protocol_version:
+          type: integer
+          nullable: true
+        soroban_tx_count:
+          type: integer
+        event_count:
+          type: integer
+        fees:
+          type: object
+          description: Inclusion-fee percentiles in stroops
+          properties:
+            p10: { type: number, nullable: true }
+            p50: { type: number, nullable: true }
+            p90: { type: number, nullable: true }
+            p99: { type: number, nullable: true }
+        utilization:
+          type: object
+          description: Fraction (0–1) of each per-ledger network limit used; null when the limit is unknown
+          additionalProperties:
+            type: number
+            nullable: true
+        limits:
+          type: object
+          nullable: true
+          additionalProperties: true
+        transactions:
+          type: array
+          items:
+            type: object
+            required: [hash, narratives]
+            properties:
+              hash:
+                type: string
+              status:
+                type: string
+              source:
+                type: string
+                nullable: true
+              charged_fee:
+                type: string
+              narratives:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    contract_id: { type: string }
+                    function: { type: string }
+                    description: { type: string }
+        gap:
+          type: object
+          nullable: true
+          properties:
+            id: { type: integer }
+            from_ledger: { type: integer }
+            to_ledger: { type: integer }
+            status: { type: string }
+        prev:
+          type: integer
+          nullable: true
+        next:
+          type: integer
+          nullable: true
+    NetworkMetricsResponse:
+      type: object
+      required: [range, metrics, recommended, staleness_seconds]
+      properties:
+        range: { type: string, enum: ["1h", "24h", "7d"] }
+        metrics:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkLedgerMetric" }
+        recommended:
+          type: object
+          nullable: true
+          required: [fee, surge]
+          properties:
+            fee: { $ref: "#/components/schemas/NullableNumber" }
+            surge: { type: boolean }
+        staleness_seconds: { $ref: "#/components/schemas/NullableNumber" }
     Transaction:
       type: object
       required: [hash, ledger, status, charged_fee]

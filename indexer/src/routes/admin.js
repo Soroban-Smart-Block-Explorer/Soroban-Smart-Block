@@ -29,6 +29,7 @@ import { adminAuthMiddleware } from "../admin/adminAuth.js";
 import { listKeys, createKey, updateKey, deleteKey, rotateKey, getKeyUsage } from "../admin/keyManager.js";
 import { db, pool } from "../db.js";
 import { getActiveAlerts, resolveAlert } from "../alertManager.js";
+import { createSigningSecret } from "../auth/requestSigning.js";
 import {
   decodeCursor,
   hashFilters,
@@ -38,7 +39,7 @@ import {
 } from "../cursor.js";
 import config from "../config.js";
 import { getEventLineage } from "../lineage.js";
-import { moderate, decideAppeal, NOTICE_TEMPLATES } from "../moderation/service.js";
+import { getItems as dlqGetItems, resolve as dlqResolve, requeueByErrorClass, DLQ_STATES } from "../deadLetterQueue.js";
 // Note: getRedisClient (rateLimit/tokenBucket.js) and runAllChecks
 // (doctor-lib.js) were imported here but never called anywhere in this
 // file — dead imports left over from the removed legacy /api/doctor route
@@ -406,6 +407,20 @@ export default function registerAdminRoutes(app) {
       res.json(result);
     } catch (e) {
       if (e.message.includes("not found")) return res.status(404).json({ error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── POST /api/admin/api-keys/:id/signing-secret (issue #852) ──────────────
+  // Issues a new HMAC signing secret, shown exactly once. The previous secret
+  // stays valid alongside it (rotation overlap); anything older is revoked.
+  router.post("/api-keys/:id/signing-secret", async (req, res) => {
+    try {
+      const { rows } = await pool.query(`SELECT id FROM api_keys WHERE id::text = $1`, [req.params.id]);
+      if (!rows.length) return res.status(404).json({ error: `API key ${req.params.id} not found` });
+      const signing_secret = await createSigningSecret(req.params.id);
+      res.status(201).json({ key_id: req.params.id, signing_secret });
+    } catch (e) {
       res.status(500).json({ error: e.message });
     }
   });
@@ -977,23 +992,77 @@ export default function registerAdminRoutes(app) {
       return res.status(400).json({ error: "id must be a number" });
     }
     try {
-      const { rows } = await pool.query(
-        `SELECT id, resolved, retry_count, max_retries FROM dead_letter_queue WHERE id = $1`,
-        [id],
-      );
+      const { rows } = await pool.query(`SELECT id, state FROM dead_letter_queue WHERE id = $1`, [id]);
       if (!rows.length) {
         return res.status(404).json({ error: `DLQ entry ${id} not found` });
       }
-      const entry = rows[0];
-      if (entry.resolved) {
+      if (rows[0].state === "resolved") {
         return res.status(409).json({ error: "DLQ entry is already resolved" });
       }
+      // Also un-quarantines: a manual retry resets the attempt budget.
       const nextRetryAt = new Date().toISOString();
-      await pool.query(`UPDATE dead_letter_queue SET next_retry_at = $1, updated_at = NOW() WHERE id = $2`, [
-        nextRetryAt,
-        id,
-      ]);
+      await pool.query(
+        `UPDATE dead_letter_queue SET state = 'queued', retry_count = 0, next_retry_at = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [nextRetryAt, id],
+      );
       return res.json({ ok: true, id, next_retry_at: nextRetryAt });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── GET /api/admin/dlq (issue #851) ───────────────────────────────────────
+  // Paginated DLQ listing, filterable by ?state= and ?error_class=.
+  router.get("/dlq", async (req, res) => {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25));
+    const state = req.query.state ? String(req.query.state) : undefined;
+    if (state && !DLQ_STATES.includes(state)) {
+      return res.status(400).json({ error: `state must be one of ${DLQ_STATES.join(", ")}` });
+    }
+    try {
+      const errorClass = req.query.error_class ? String(req.query.error_class) : undefined;
+      const { data, total } = await dlqGetItems({ page, limit, state, errorClass, resolved: false });
+      return res.json({ data, total, page, limit });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── POST /api/admin/dlq/:id/resolve (issue #851) ──────────────────────────
+  router.post("/dlq/:id/resolve", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: "id must be a number" });
+    }
+    try {
+      const { rows } = await pool.query(`SELECT id FROM dead_letter_queue WHERE id = $1`, [id]);
+      if (!rows.length) {
+        return res.status(404).json({ error: `DLQ entry ${id} not found` });
+      }
+      await dlqResolve(id, req.body?.reason ? String(req.body.reason).slice(0, 500) : "manually resolved");
+      return res.json({ ok: true, id });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── POST /api/admin/dlq/replay?error_class= (issue #851) ──────────────────
+  // Bulk re-queue of every open entry with the given error class. Chunked in
+  // the DB; the background processor drains the queue at DLQ_BATCH_SIZE/tick.
+  router.post("/dlq/replay", async (req, res) => {
+    const errorClass = req.query.error_class ? String(req.query.error_class) : "";
+    if (!errorClass) {
+      return res.status(400).json({ error: "error_class is required" });
+    }
+    const controller = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) controller.abort(); // client went away → cancel remaining chunks
+    });
+    try {
+      const requeued = await requeueByErrorClass(errorClass, { signal: controller.signal });
+      return res.json({ ok: true, error_class: errorClass, requeued });
     } catch (e) {
       return res.status(500).json({ error: e.message });
     }

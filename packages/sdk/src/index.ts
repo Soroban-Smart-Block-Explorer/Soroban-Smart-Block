@@ -38,6 +38,8 @@ export interface ApiResponse<T> {
 
 export { verifyEventInclusion } from "./verify.js";
 export type { EventInclusionProof } from "./verify.js";
+export { signRequest } from "./signing.js";
+export type { SignRequestInput } from "./signing.js";
 
 export class ExplorerApiClient {
   private baseUrl: string;

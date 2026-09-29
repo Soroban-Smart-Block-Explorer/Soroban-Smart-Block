@@ -109,3 +109,49 @@ button:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+/* Issue #924: mobile-first detail pages — no horizontal page scroll at 360px,
+   ≥44px touch targets, card transforms for tables and sticky section nav. */
+img, svg, canvas, video { max-width: 100%; }
+pre, code { overflow-wrap: anywhere; }
+main { overflow-wrap: anywhere; }
+
+.contract-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  scrollbar-width: none;
+}
+.contract-tabs > button { white-space: nowrap; flex: 0 0 auto; }
+
+@media (max-width: 640px) {
+  main table { display: block; max-width: 100%; overflow-x: auto; }
+  table.responsive-table, .responsive-table tbody, .responsive-table tr, .responsive-table td { display: block; width: 100%; }
+  .responsive-table thead { display: none; }
+  .responsive-table tr {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 8px;
+    margin-bottom: 8px;
+  }
+  .responsive-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  /* Wide visualizations: allow native pan/pinch inside their own box, never the page. */
+  .card { max-width: 100%; overflow-x: auto; touch-action: pan-x pan-y pinch-zoom; }
+}
+
+@media (pointer: coarse), (max-width: 640px) {
+  button, [role="button"], select, input[type="checkbox"], input[type="radio"], .contract-tabs > button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .copy-btn { min-width: 44px !important; min-height: 44px !important; }
+}

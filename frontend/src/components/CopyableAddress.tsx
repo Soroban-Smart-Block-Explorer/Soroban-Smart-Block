@@ -3,10 +3,15 @@ import { useState } from "react";
 interface CopyableAddressProps {
   /** The full untruncated value to copy */
   fullValue: string;
-  /** The displayed truncated value */
-  displayValue: string;
+  /** The displayed truncated value; defaults to a middle-truncated fullValue */
+  displayValue?: string;
   /** Optional title attribute */
   title?: string;
+}
+
+/** Middle-truncates long addresses/hashes (e.g. GABC…WXYZ) so both ends stay visible. */
+export function middleTruncate(value: string, head = 6, tail = 6): string {
+  return value.length <= head + tail + 1 ? value : `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
 /**
@@ -14,7 +19,11 @@ interface CopyableAddressProps {
  * Clicking the icon copies the full value and shows a transient "Copied!" tooltip for 2 seconds.
  * Gracefully falls back if Clipboard API is unavailable.
  */
-export default function CopyableAddress({ fullValue, displayValue, title }: CopyableAddressProps) {
+export default function CopyableAddress({
+  fullValue,
+  displayValue = middleTruncate(fullValue),
+  title,
+}: CopyableAddressProps) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
@@ -59,6 +68,7 @@ export default function CopyableAddress({ fullValue, displayValue, title }: Copy
       <span>{displayValue}</span>
       <button
         onClick={handleCopy}
+        className="copy-btn"
         style={{
           display: "inline-flex",
           alignItems: "center",

@@ -1,0 +1,16 @@
+{
+  "limits": { "tx_count": 4, "instructions": 1000, "read_bytes": 1000, "write_bytes": 1000 },
+  "ledgers": [
+    { "sequence": 100, "closed_at": "2026-01-01T00:00:00Z", "txs": [] },
+    { "sequence": 101, "closed_at": "2026-01-01T00:00:05Z", "txs": [
+      { "inclusion_fee": 100, "instructions": 100, "read_bytes": 10, "write_bytes": 10 },
+      { "inclusion_fee": 200, "instructions": 100, "read_bytes": 10, "write_bytes": 10 }
+    ] },
+    { "sequence": 102, "closed_at": "2026-01-01T00:00:10Z", "txs": [
+      { "inclusion_fee": 100, "instructions": 950, "read_bytes": 10, "write_bytes": 10 },
+      { "inclusion_fee": 300, "instructions": 0, "read_bytes": 0, "write_bytes": 0 },
+      { "inclusion_fee": 500, "instructions": 0, "read_bytes": 0, "write_bytes": 0 },
+      { "inclusion_fee": 1000, "instructions": 0, "read_bytes": 0, "write_bytes": 0 }
+    ] }
+  ]
+}

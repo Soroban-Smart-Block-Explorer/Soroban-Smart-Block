@@ -7,9 +7,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 
-const SECS_PER_LEDGER = 5; // ~5 s per ledger on Stellar mainnet/testnet
+export const SECS_PER_LEDGER = 5; // ~5 s per ledger on Stellar mainnet/testnet
 
-function formatRemaining(ledgers: number): string {
+export function formatRemaining(ledgers: number): string {
   const secs = ledgers * SECS_PER_LEDGER;
   const days = Math.floor(secs / 86400);
   const hours = Math.floor((secs % 86400) / 3600);
@@ -26,13 +26,13 @@ function statusColor(pct: number): string {
   return "#10b981"; // healthy — green
 }
 
-interface BarProps {
+export interface BarProps {
   label: string;
   liveUntilLedger: number | null;
   currentLedger: number;
 }
 
-function Bar({ label, liveUntilLedger, currentLedger }: BarProps) {
+export function Bar({ label, liveUntilLedger, currentLedger }: BarProps) {
   if (liveUntilLedger === null) {
     return (
       <div style={{ marginBottom: 12 }}>

@@ -264,6 +264,27 @@ jobs:
         run: node src/migrate.js
         working-directory: indexer
 
+  # ── Dependency Audit ─────────────────────────────────────────────────────
+  # Closes #970 — fails CI if any high-severity advisory is introduced into
+  # the indexer's production dependency tree.
+  npm-audit:
+    name: npm audit (indexer, high severity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install indexer deps
+        run: npm ci
+        working-directory: indexer
+
+      - name: Audit production deps for high-severity issues
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: indexer
+
   # ── Frontend Tests ────────────────────────────────────────────────────────
   frontend-tests:
     name: Frontend Tests (Vitest + React Testing Library)
@@ -284,6 +305,11 @@ jobs:
 
       - name: Install frontend deps
         run: npm ci
+        working-directory: frontend
+
+      # #923: generated API types must match docs/api/openapi.yaml
+      - name: Check generated API types are in sync
+        run: npm run check:api
         working-directory: frontend
 
       - name: Frontend tests

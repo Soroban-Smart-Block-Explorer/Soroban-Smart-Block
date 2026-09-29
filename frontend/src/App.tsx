@@ -12,6 +12,7 @@ const ContractPage = lazy(() => import("./pages/ContractPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
 const EventPage = lazy(() => import("./pages/EventPage"));
 const TransactionPage = lazy(() => import("./pages/TransactionPage"));
+const LedgerPage = lazy(() => import("./pages/LedgerPage"));
 const SearchPage = lazy(() => import("./pages/SearchPage"));
 const XdrInspector = lazy(() => import("./pages/XdrInspector"));
 const RpcMetricsDashboard = lazy(() => import("./pages/RpcMetricsDashboard"));
@@ -33,6 +34,7 @@ const Login = lazy(() => import("./pages/Login"));
 const Status = lazy(() => import("./pages/Status"));
 const AdminJobsPage = lazy(() => import("./pages/AdminJobsPage"));
 const AdminModerationPage = lazy(() => import("./pages/AdminModerationPage"));
+const NetworkDashboard = lazy(() => import("./pages/NetworkDashboard"));
 
 function Fallback() {
   const { t } = useTranslation();
@@ -58,6 +60,7 @@ export default function App() {
             <Route path="/wallet/:address" element={<ClientOnly><WalletPage /></ClientOnly>} />
             <Route path="/event/:seq" element={<EventPage />} />
             <Route path="/tx/:hash" element={<TransactionPage />} />
+            <Route path="/ledger/:seq" element={<LedgerPage />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/xdr" element={<ClientOnly><XdrInspector /></ClientOnly>} />
             <Route path="/rpc-metrics" element={<RpcMetricsDashboard />} />
@@ -78,6 +81,7 @@ export default function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/login" element={<Login />} />
             <Route path="/status" element={<Status />} />
+            <Route path="/network" element={<NetworkDashboard />} />
             <Route path="/filter-builder" element={<FilterBuilder />} />
           </Routes>
         </Suspense>

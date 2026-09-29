@@ -213,6 +213,26 @@ const configSchema = z
 
     DLQ_RETRY_DELAY_MS: positiveInt(30000),
 
+    // Issue #851 — DLQ processor: backoff, poison detection, alerting
+    DLQ_BACKOFF_BASE: positiveInt(30000),
+
+    DLQ_BACKOFF_MAX_MS: positiveInt(3600000),
+
+    DLQ_MAX_ATTEMPTS: positiveInt(6),
+
+    DLQ_POISON_THRESHOLD: positiveInt(50),
+
+    DLQ_ALERT_DEPTH: positiveInt(100),
+
+    DLQ_ALERT_AGE: positiveInt(86400000),
+
+    DLQ_BATCH_SIZE: positiveInt(100),
+
+    // ── Request signing (issue #852) ────────────────────────────────────────────
+    SIGN_SKEW: positiveInt(300),
+
+    SIGNING_ENFORCED: z.enum(["off", "on"]).default("off"),
+
     // ── Leader Election ─────────────────────────────────────────────────────────
     LEADER_ELECTION_KEY: z.string().default("soroban-indexer:leader"),
 

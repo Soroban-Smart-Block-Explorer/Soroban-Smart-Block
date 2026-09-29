@@ -26,14 +26,16 @@ import QuorumFreezeBadge from "../components/QuorumFreezeBadge";
 import RwaMetadataDisplay from "../components/RwaMetadataDisplay";
 import SourceVerificationBadge from "../components/SourceVerificationBadge";
 import StateDiffTimeline from "../components/StateDiffTimeline";
+import StorageExplorer from "../components/storage/StorageExplorer";
 import ExportButton from "../components/ExportButton";
 import AbiHistoryDrawer from "../components/AbiHistoryDrawer";
 import ProtocolBadge from "../components/ProtocolBadge";
 import InvocationFrequencyChart, { type StatsRange } from "../components/InvocationFrequencyChart";
 import StorageTierStackedBar from "../components/StorageTierStackedBar";
 import OfflineContractActions from "../components/OfflineContractActions";
+import { CodeVerificationBadge, CodeVerificationPanel } from "../components/CodeVerification";
 
-type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "abi-history";
+type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "storage" | "abi-history";
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
@@ -245,6 +247,7 @@ export default function ContractPage() {
     { key: "graph", label: "Address Graph" },
     { key: "call-graph", label: "Call Graph" },
     { key: "state-diff", label: "State Timeline" },
+    { key: "storage", label: "Storage" },
     { key: "abi-history", label: "ABI History" },
   ];
 
@@ -275,6 +278,8 @@ export default function ContractPage() {
       {/* CAP-0077 quorum freeze security warning */}
       <QuorumFreezeBadge contractId={id} />
 
+      <CodeVerificationPanel contractId={id} />
+
       {/* RWA metadata display */}
       <RwaMetadataDisplay contractId={id} />
 
@@ -292,6 +297,7 @@ export default function ContractPage() {
               <h2 id="contract-title" style={{ margin: 0 }}>{meta.name || "Unnamed Contract"}</h2>
               {(meta as any).is_verified && <VerifiedBadge ledger={(meta as any).verified_ledger} />}{' '}
               <SourceVerifiedBadge contractId={id} />
+              <CodeVerificationBadge contractId={id} />
               <OwnershipBadge
                 verified={(meta as any).ownership_verified}
                 method={(meta as any).ownership_method}
@@ -634,7 +640,7 @@ export default function ContractPage() {
                     </summary>
                     <div style={{ marginTop: 10 }}>
                       {f.args && f.args.length > 0 ? (
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <table className="responsive-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                           <thead>
                             <tr style={{ color: "var(--muted)", textAlign: "left" }}>
                               <th style={{ padding: "2px 8px 2px 0" }}>Param</th>
@@ -644,8 +650,8 @@ export default function ContractPage() {
                           <tbody>
                             {f.args.map((a) => (
                               <tr key={a.name}>
-                                <td style={{ padding: "2px 8px 2px 0", fontFamily: "monospace" }}>{a.name}</td>
-                                <td style={{ padding: "2px 0", color: "var(--muted)", fontFamily: "monospace" }}>{a.type}</td>
+                                <td data-label="Param" style={{ padding: "2px 8px 2px 0", fontFamily: "monospace" }}>{a.name}</td>
+                                <td data-label="Type" style={{ padding: "2px 0", color: "var(--muted)", fontFamily: "monospace" }}>{a.type}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -757,6 +763,7 @@ export default function ContractPage() {
 
       {/* Tab: State-Diff Timeline — */}
       {tab === "state-diff" && <StateDiffTimeline contractId={id} />}
+      {tab === "storage" && <StorageExplorer contractId={id} />}
 
       {/* ABI Version History Drawer — Issue #516 */}
       <AbiHistoryDrawer

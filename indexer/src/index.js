@@ -22,7 +22,7 @@ import { startLineageBatch } from "./lineage.js";
 import { decode, getDecodeStats } from "./decoder.js";
 import { startAbiSync } from "./githubAbiSync.js";
 import { seedBuiltinAbis } from "./abiSeeder.js";
-import { startContractVerifier } from "./contractVerifier.js";
+import { startContractVerifier, recordOnChainHash } from "./contractVerifier.js";
 import { startQueryJobMaintenance } from "./jobs/queryJobs.js";
 import { withRetry } from "./rpcRetry.js";
 import { isHighBloatRisk } from "./bloatDetector.js";
@@ -65,7 +65,12 @@ import { startUptimeRecorder } from "./uptimeRecorder.js";
 import { updateIndexerStatus, updateDlqDepth, setDraining } from "./health.js";
 import { logger } from "./logger.js";
 import * as alertManager from "./alertManager.js";
-import { processRetries as dlqProcessRetries, enqueue as dlqEnqueue, getDlqDepth } from "./deadLetterQueue.js";
+import {
+  processRetries as dlqProcessRetries,
+  enqueue as dlqEnqueue,
+  getDlqDepth,
+  refreshDlqHealth,
+} from "./deadLetterQueue.js";
 import { recordLedger as gapRecordLedger } from "./predictiveGapDetector.js";
 import { retryWebhookDelivery } from "./webhookDelivery.js";
 import { runIntegrityChecks } from "./routes/admin.js";
@@ -232,6 +237,8 @@ export async function processSingleEvent(rawSorobanEvent, context = undefined, l
     );
     decoded.upgrade = upgrade;
     invalidateContractSpec(rawSorobanEvent.contractId); // new WASM → new spec from this ledger on (#895)
+    // Source-verification badge re-checks against the new code hash (#796).
+    await recordOnChainHash(rawSorobanEvent.contractId, upgrade.newHash, rawSorobanEvent.ledger).catch(() => {});
     if (decoded.abi_version > 0) {
       await db.markNeedsRedecode(rawSorobanEvent.contractId, decoded.abi_version);
     }
@@ -318,6 +325,7 @@ export async function processEventBatch(batch, contextByTx = new Map(), lineageB
       const upgrade = detectUpgrade(rawSorobanEvent);
       if (upgrade) {
         decoded.upgrade = upgrade;
+        await recordOnChainHash(rawSorobanEvent.contractId, upgrade.newHash, rawSorobanEvent.ledger).catch(() => {});
         if (decoded.abi_version > 0) {
           await db.markNeedsRedecode(rawSorobanEvent.contractId, decoded.abi_version).catch(() => {});
         }
@@ -593,6 +601,7 @@ async function run() {
         return alertManager.checkDlqSize(depth);
       })
       .catch((err) => logger.error({ err: err.message }, "dlq depth check failed"));
+    refreshDlqHealth().catch((err) => logger.error({ err: err.message }, "dlq health check failed"));
   }, 60_000);
 
   if (!RUNS_INGEST) {

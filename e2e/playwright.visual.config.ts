@@ -1,4 +1,4 @@
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 import baseConfig from "./playwright.config";
 
 /**
@@ -10,4 +10,12 @@ import baseConfig from "./playwright.config";
 export default defineConfig({
   ...baseConfig,
   testDir: "./test/visual",
+  // Issue #924: mobile device profiles, including 360px phones, landscape phones and small tablets.
+  projects: [
+    { name: "desktop", use: { ...devices["Desktop Chrome"] } },
+    { name: "mobile-360", use: { ...devices["Galaxy S9+"], viewport: { width: 360, height: 740 } } },
+    { name: "mobile-landscape", use: { ...devices["Pixel 5 landscape"] } },
+    { name: "iphone", use: { ...devices["iPhone 14"] } },
+    { name: "small-tablet", use: { ...devices["iPad Mini"] } },
+  ],
 });
