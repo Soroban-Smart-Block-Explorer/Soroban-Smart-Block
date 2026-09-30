@@ -43,3 +43,32 @@ blueGreen:
   autoPromotionEnabled: true
 {{- end }}
 {{- end -}}
+
+{{- define "se.probes" -}}
+# Probes map to health.js: /health/live (process up), /health/ready (deps ok,
+# fails while draining after SIGTERM).
+startupProbe:
+  httpGet: {path: /health/live, port: http}
+  periodSeconds: 5
+  failureThreshold: 30
+livenessProbe:
+  httpGet: {path: /health/live, port: http}
+  periodSeconds: 10
+readinessProbe:
+  httpGet: {path: /health/ready, port: http}
+  periodSeconds: 5
+  failureThreshold: 2
+lifecycle:
+  preStop:
+    exec: {command: ["sleep", "5"]}
+{{- end -}}
+{{- define "se.spread" -}}
+- maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
+  labelSelector: {matchLabels: {app: {{ . }}}}
+- maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+  labelSelector: {matchLabels: {app: {{ . }}}}
+{{- end -}}

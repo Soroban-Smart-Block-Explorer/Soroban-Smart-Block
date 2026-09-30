@@ -232,6 +232,58 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   # ── 3a. Deploy to dev ────────────────────────────────────────────────────────
+  # ── Helm chart test on kind: install, smoke, rolling upgrade under load ────
+  helm-kind-test:
+    name: Helm chart — kind rolling upgrade
+    runs-on: ubuntu-latest
+    needs: [resolve-env, build-images]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: explorer
+
+      - name: Install Argo Rollouts and Redis
+        run: |
+          kubectl create namespace argo-rollouts
+          kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/download/v1.7.2/install.yaml
+          kubectl -n argo-rollouts rollout status deploy/argo-rollouts --timeout 3m
+          kubectl create deployment redis --image=redis:7-alpine
+          kubectl expose deployment redis --port 6379
+          kubectl create secret generic soroban-explorer-redis --from-literal=REDIS_URL=redis://redis:6379
+
+      - name: Lint and install chart
+        env:
+          TAG: ${{ needs.resolve-env.outputs.image_tag }}
+        run: |
+          helm lint deploy/helm/soroban-explorer
+          helm upgrade --install explorer deploy/helm/soroban-explorer --wait --timeout 10m \
+            --set image.tag="$TAG" --set preview.enabled=true --set migrations.enabled=false \
+            --set canary.enabled=false --set serviceMonitor.enabled=false --set ingress.enabled=false \
+            --set api.hpa.enabled=false --set workers.hpa.enabled=false
+          kubectl argo rollouts status explorer-api --timeout 5m 2>/dev/null || kubectl rollout status deploy/explorer-workers
+
+      - name: Smoke test
+        run: |
+          kubectl port-forward svc/explorer-api 3001:80 >/dev/null 2>&1 &
+          sleep 5
+          curl -sf http://localhost:3001/health/ready
+          curl -sf "http://localhost:3001/api/events?limit=1"
+
+      # k6 runs in-cluster against the Service so traffic follows endpoint
+      # changes (a port-forward would pin one pod and fail on its termination).
+      - name: Rolling upgrade under load (0 failed requests)
+        run: |
+          kubectl run k6 -i --rm --image=grafana/k6 --restart=Never -- \
+            run -e INDEXER_URL=http://explorer-api -e DURATION=3m - < e2e/test/load/rolling-upgrade.js &
+          K6=$!
+          sleep 30
+          helm upgrade explorer deploy/helm/soroban-explorer --reuse-values --wait --timeout 10m
+          kubectl patch rollout explorer-api --type merge \
+            -p "{\"spec\":{\"restartAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}"
+          wait $K6
+
   deploy-dev:
     name: Deploy — dev
     runs-on: ubuntu-latest

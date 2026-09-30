@@ -23,6 +23,7 @@
     "@opentelemetry/sdk-trace-node": "^2.0.0",
     "@opentelemetry/semantic-conventions": "^1.29.0",
     "@sentry/node": "^10.72.0",
+    "@simplewebauthn/server": "^13.3.3",
     "@stellar/stellar-sdk": "^15.1.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",

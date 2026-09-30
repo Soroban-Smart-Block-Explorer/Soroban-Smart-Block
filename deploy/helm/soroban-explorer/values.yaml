@@ -12,6 +12,22 @@ databaseUrlSecret: soroban-explorer-db   # Secret with key DATABASE_URL
 api:
   replicas: 3
   port: 3001
+  # Keep serving after SIGTERM while readiness fails, so WebSockets and
+  # in-flight requests drain before the server closes.
+  drainMs: 15000
+  terminationGracePeriodSeconds: 45
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 512Mi}
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilization: 70
+    # Custom metric exposed via prometheus-adapter (http_requests_in_flight).
+    targetRequestConcurrency: "50"
+  pdb:
+    minAvailable: 2
 frontend:
   replicas: 2
   port: 8080
@@ -21,6 +37,40 @@ ingest:
   # Shadow canary: runs the new image against the chain without writing, and
   # compares its decode output with the live ingester (see deploy/rollouts).
   shadowCanary: true
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  # Redis for leader election (LEADER_ELECTION_ENABLED on ingest pods).
+  redisUrlSecret: soroban-explorer-redis   # Secret with key REDIS_URL
+  pdb:
+    maxUnavailable: 1
+
+workers:
+  enabled: true
+  replicas: 2
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 512Mi}
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilization: 75
+  pdb:
+    minAvailable: 1
+
+# Migrations run as a pre-install/pre-upgrade Job (expand-only migrations,
+# compatible with the zero-downtime strategy in #859).
+migrations:
+  enabled: true
+  backoffLimit: 2
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
 
 canary:
   enabled: true

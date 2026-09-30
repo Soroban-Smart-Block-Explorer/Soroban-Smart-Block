@@ -11,7 +11,7 @@ import { logger } from "../logger.js";
  */
 
 import { createClient } from "redis";
-import config from "./config.js";
+import config from "../config.js";
 
 const REDIS_URL = config.REDIS_URL || "redis://localhost:6379";
 const LEADER_KEY = process.env.LEADER_ELECTION_KEY || config.LEADER_ELECTION_KEY;

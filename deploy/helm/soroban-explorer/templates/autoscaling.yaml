@@ -1,0 +1,70 @@
+{{- $root := . }}
+{{- $api := printf "%s-api" (include "se.name" .) }}
+{{- $workers := printf "%s-workers" (include "se.name" .) }}
+{{- if .Values.api.hpa.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $api }}
+  labels: {{- include "se.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef: {apiVersion: argoproj.io/v1alpha1, kind: Rollout, name: {{ $api }}}
+  minReplicas: {{ .Values.api.hpa.minReplicas }}
+  maxReplicas: {{ .Values.api.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ .Values.api.hpa.targetCPUUtilization }}}
+    - type: Pods
+      pods:
+        metric: {name: http_requests_in_flight}
+        target: {type: AverageValue, averageValue: {{ .Values.api.hpa.targetRequestConcurrency | quote }}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+{{- end }}
+{{- if and .Values.workers.enabled .Values.workers.hpa.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $workers }}
+  labels: {{- include "se.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $workers }}}
+  minReplicas: {{ .Values.workers.hpa.minReplicas }}
+  maxReplicas: {{ .Values.workers.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ .Values.workers.hpa.targetCPUUtilization }}}
+---
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $api }}
+spec:
+  minAvailable: {{ .Values.api.pdb.minAvailable }}
+  selector: {matchLabels: {app: {{ $api }}}}
+---
+{{- if .Values.workers.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $workers }}
+spec:
+  minAvailable: {{ .Values.workers.pdb.minAvailable }}
+  selector: {matchLabels: {app: {{ $workers }}}}
+---
+{{- end }}
+{{- if .Values.ingest.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "se.name" . }}-ingest
+spec:
+  maxUnavailable: {{ .Values.ingest.pdb.maxUnavailable }}
+  selector: {matchLabels: {app: {{ include "se.name" . }}-ingest}}
+{{- end }}

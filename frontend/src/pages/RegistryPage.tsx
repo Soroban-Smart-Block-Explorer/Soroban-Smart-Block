@@ -26,6 +26,54 @@ function timeAgo(dateStr: string): string {
   return `${diffDays} days ago`;
 }
 
+const REPORT_REASONS = ["impersonation", "phishing", "offensive", "spam", "incorrect_abi", "other"] as const;
+
+/** "Report this contract" (#934): posts a report for moderator review. */
+function ReportContractButton({ contractId }: { contractId: string }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState<string>(REPORT_REASONS[0]);
+  const [status, setStatus] = useState("");
+
+  const submit = async () => {
+    try {
+      const res = await fetch(`/api/contracts/${encodeURIComponent(contractId)}/reports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+      const body = await res.json().catch(() => ({}));
+      setStatus(res.ok ? "Reported — thank you." : (body.error ?? "Report failed"));
+      if (res.ok) setOpen(false);
+    } catch {
+      setStatus("Report failed");
+    }
+  };
+
+  return (
+    <span style={{ marginLeft: 8, fontSize: 11 }}>
+      {open ? (
+        <>
+          <select aria-label="Report reason" value={reason} onChange={(e) => setReason(e.target.value)}>
+            {REPORT_REASONS.map((r) => (
+              <option key={r} value={r}>
+                {r.replace("_", " ")}
+              </option>
+            ))}
+          </select>{" "}
+          <button type="button" onClick={submit}>
+            Send report
+          </button>
+        </>
+      ) : (
+        <button type="button" onClick={() => setOpen(true)} aria-label={`Report contract ${contractId}`}>
+          Report
+        </button>
+      )}
+      {status && <span role="status"> {status}</span>}
+    </span>
+  );
+}
+
 /** 7-day daily event-count sparkline — plain SVG, no chart library. */
 function MiniSparkline({ data }: { data: { date: string; count: number }[] }) {
   const w = 80;
@@ -260,6 +308,15 @@ export default function RegistryPage() {
                             {c.name || truncateAddress(c.id)}
                           </Link>{" "}
                           <ProtocolBadge type={c.protocol_type} />
+                          {c.moderation_status === "pending" && (
+                            <span
+                              title="This registration is awaiting moderator review"
+                              style={{ marginLeft: 6, fontSize: 11, color: "var(--warning, #b45309)" }}
+                            >
+                              Pending review
+                            </span>
+                          )}
+                          <ReportContractButton contractId={c.id} />
                           {c.description && (
                             <p style={{ color: "var(--muted)", marginTop: 2, fontSize: 12 }}>
                               {c.description}

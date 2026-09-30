@@ -1,4 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import {
+  getMe,
+  logout,
+  registerPasskey,
+  removePasskey,
+  regenerateRecoveryCodes,
+  type Me,
+} from "../services/accountApi";
 import { getStoredApiKey, setStoredApiKey, clearStoredApiKey } from "../services/dashboardApi";
 import ApiKeysPanel from "../components/dashboard/ApiKeysPanel";
 import WebhooksPanel from "../components/dashboard/WebhooksPanel";
@@ -12,7 +21,60 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "deliveries", label: "Webhook Deliveries" },
 ];
 
+/** Passkeys, recovery codes and session for a signed-in account (#933). */
+function AccountSecurityPanel({ me, onChange }: { me: Me; onChange: () => void }) {
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [error, setError] = useState("");
+  const act = async (fn: () => Promise<unknown>) => {
+    setError("");
+    try {
+      await fn();
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Action failed");
+    }
+  };
+
+  return (
+    <section className="card" aria-label="Account security" style={{ padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong>{me.account.email}</strong>
+        <button type="button" onClick={() => act(logout)}>Sign out of account</button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+      <h3 style={{ fontSize: 14 }}>Passkeys</h3>
+      <ul data-testid="passkey-list">
+        {me.account.passkeys.map((p) => (
+          <li key={p.id}>
+            {p.name ?? "Passkey"} · {p.device_type === "multiDevice" ? "synced" : "this device"}
+            {p.transports.includes("hybrid") ? " · cross-device" : ""} · added {new Date(p.created_at).toLocaleDateString()}{" "}
+            <button type="button" onClick={() => act(() => removePasskey(p.id))}>Remove</button>
+          </li>
+        ))}
+      </ul>
+      <button type="button" onClick={() => act(() => registerPasskey())}>Add a passkey</button>
+      <h3 style={{ fontSize: 14 }}>Recovery codes</h3>
+      <p style={{ fontSize: 13, color: "var(--muted)" }}>
+        {me.account.recovery_codes_remaining} unused. Recovery needs your email <em>and</em> one of these codes.
+      </p>
+      <button
+        type="button"
+        onClick={() => act(async () => setCodes((await regenerateRecoveryCodes()).recovery_codes))}
+      >
+        Generate new recovery codes
+      </button>
+      {codes && <pre data-testid="new-recovery-codes">{codes.join("\n")}</pre>}
+    </section>
+  );
+}
+
 export default function DashboardPage() {
+  const [me, setMe] = useState<Me | null>(null);
+  const loadMe = () => {
+    getMe().then(setMe).catch(() => setMe(null));
+  };
+  useEffect(loadMe, []);
+
   const [apiKey, setApiKey] = useState(() => getStoredApiKey());
   const [inputKey, setInputKey] = useState("");
   const [tab, setTab] = useState<Tab>("keys");
@@ -46,6 +108,13 @@ export default function DashboardPage() {
           />
           <button type="submit">Unlock</button>
         </form>
+        {me ? (
+          <AccountSecurityPanel me={me} onChange={loadMe} />
+        ) : (
+          <p style={{ fontSize: 13, marginTop: 16 }}>
+            Prefer an account? <Link to="/login">Sign in with a passkey</Link>
+          </p>
+        )}
       </div>
     );
   }
@@ -95,6 +164,8 @@ export default function DashboardPage() {
           </button>
         ))}
       </div>
+
+      {me && <AccountSecurityPanel me={me} onChange={loadMe} />}
 
       {tab === "keys" && <ApiKeysPanel />}
       {tab === "webhooks" && <WebhooksPanel />}

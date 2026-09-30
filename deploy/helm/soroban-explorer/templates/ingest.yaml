@@ -8,7 +8,9 @@ metadata:
   name: {{ $name }}
   labels: {{- include "se.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  # Two replicas: one holds the Redis lease and writes, the other is a warm
+  # standby that takes over within LEADER_LEASE_TTL_S if the leader is evicted.
+  replicas: 2
   selector:
     matchLabels: {app: {{ $name }}}
   strategy:
@@ -32,6 +34,8 @@ spec:
     metadata:
       labels: {app: {{ $name }}, role: ingest}
     spec:
+      # Leader election hands the lease to the next pod within leaseSeconds.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: ingest
           image: "{{ .Values.image.registry }}/indexer:{{ .Values.image.tag }}"
@@ -42,7 +46,14 @@ spec:
             - name: INGEST_DRY_RUN
               valueFrom:
                 fieldRef: {fieldPath: "metadata.labels['shadow']"}
+            - name: LEADER_ELECTION_ENABLED
+              value: "true"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.ingest.redisUrlSecret }}, key: REDIS_URL}
+          resources: {{- toYaml .Values.ingest.resources | nindent 12 }}
           ports: [{containerPort: 3001, name: http}]
+          {{- include "se.probes" . | nindent 10 }}
 ---
 {{- range $svc := list $name (printf "%s-shadow" $name) }}
 apiVersion: v1

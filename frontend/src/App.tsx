@@ -30,8 +30,10 @@ const NftGallery = lazy(() => import("./pages/NftGallery"));
 const RegistrationSuccessPage = lazy(() => import("./pages/RegistrationSuccessPage"));
 const AbiDiffPage = lazy(() => import("./pages/AbiDiffPage"));
 const DashboardPage = lazy(() => import("./pages/DashboardPage"));
+const Login = lazy(() => import("./pages/Login"));
 const Status = lazy(() => import("./pages/Status"));
 const AdminJobsPage = lazy(() => import("./pages/AdminJobsPage"));
+const AdminModerationPage = lazy(() => import("./pages/AdminModerationPage"));
 const NetworkDashboard = lazy(() => import("./pages/NetworkDashboard"));
 
 function Fallback() {
@@ -74,8 +76,10 @@ export default function App() {
             {/* Issue #737: admin audit-trail UI */}
             <Route path="/admin/audit-log" element={<AuditLogPage />} />
             <Route path="/admin/jobs" element={<AdminJobsPage />} />
+            <Route path="/admin/moderation" element={<AdminModerationPage />} />
             <Route path="/nft/:contractId" element={<NftGallery />} />
             <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/login" element={<Login />} />
             <Route path="/status" element={<Status />} />
             <Route path="/network" element={<NetworkDashboard />} />
             <Route path="/filter-builder" element={<FilterBuilder />} />

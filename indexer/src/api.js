@@ -54,7 +54,7 @@ import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, o
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats, multiNodeRpc } from "./rpcMultiNode.js";
-import { cacheHitTotal, cacheMissTotal, apiRequestDuration } from "./metrics.js";
+import { cacheHitTotal, cacheMissTotal, apiRequestDuration, httpRequestsInFlight } from "./metrics.js";
 import { tracer, getTraceHeaders } from "./tracing.js";
 import { context, propagation } from "@opentelemetry/api";
 import { getUptimeHistory } from "./uptimeRecorder.js";
@@ -101,6 +101,22 @@ import { attachCollabServer, createSession as createCollabSession, authorize as 
 import { requestContext } from "./logger.js";
 import { runAllChecks } from "./doctor-lib.js";
 import { registry } from "./metrics.js";
+import {
+  loadSession,
+  requireSession,
+  requireStepUp,
+  startSession,
+  rotateSession,
+  endSession,
+  issueChallenge,
+  takeChallenge,
+  isElevated,
+} from "./auth/session.js";
+import { registrationOptions, verifyRegistration, authenticationOptions, verifyAuthentication } from "./auth/passkeys.js";
+import { EMAIL_PURPOSES, sendEmailLink, consumeEmailLink, issueRecoveryCodes, hashRecoveryCode } from "./auth/recovery.js";
+import { sep10Enabled, buildChallenge as buildSep10Challenge, verifyChallenge as verifySep10Challenge } from "./auth/sep10.js";
+import { createKey } from "./admin/keyManager.js";
+import { evaluateSubmission, reportContract, fileAppeal, HIDDEN_STATUSES } from "./moderation/service.js";
 import pg from "pg";
 import { analyticsPool, executeAnalyticsQuery, toCsv } from "./analyticsSql.js";
 import { ALLOWED_RPC_METHODS, proxyRpcRequest } from "./rpcProxy.js";
@@ -501,6 +517,8 @@ function createHttpLogger(logDestination) {
 
 function metricsMiddleware(req, res, next) {
   const endTimer = apiRequestDuration.startTimer();
+  httpRequestsInFlight.inc();
+  res.once("close", () => httpRequestsInFlight.dec());
   res.on("finish", () => {
     const route = req.route && req.route.path ? req.route.path : req.path || req.url;
     endTimer({ method: req.method, route: String(route), status: String(res.statusCode) });
@@ -1032,6 +1050,264 @@ export function createApi({ logDestination, dbOverride } = {}) {
   });
 
   app.use("/api/alert-rules", alertsRouter);
+
+  // ── Developer accounts: passkeys, sessions, recovery, SEP-10 (#933) ────────
+  // All POSTs here pass through verifyCsrf above (no x-api-key), so a session
+  // cookie alone can never drive a state change.
+  const authLimiter = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false });
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  // Development/test only: return email tokens in the response so E2E tests
+  // can complete the flow without a mailbox. Never enabled in production.
+  const echoEmailToken = process.env.NODE_ENV !== "production" && process.env.AUTH_EMAIL_ECHO_TOKEN === "true";
+  const authError = (res, e) => res.status(e.status ?? 500).json({ error: e.message });
+  const accountView = async (accountId) => {
+    const [account, passkeys, recoveryCodesLeft] = await Promise.all([
+      db.getAccount(accountId),
+      db.listPasskeys(accountId),
+      db.countRecoveryCodes(accountId),
+    ]);
+    return {
+      id: account.id,
+      email: account.email,
+      stellar_address: account.stellar_address,
+      passkeys: passkeys.map(({ public_key: _pk, counter: _c, ...p }) => p),
+      recovery_codes_remaining: recoveryCodesLeft,
+    };
+  };
+
+  app.use("/api/auth", loadSession);
+
+  // Email link for signup (first passkey), claim (existing API keys) or recovery.
+  app.post("/api/auth/email/start", authLimiter, async (req, res) => {
+    try {
+      const email = String(req.body?.email ?? "").trim().toLowerCase();
+      const purpose = String(req.body?.purpose ?? "signup");
+      if (!EMAIL_RE.test(email) || !EMAIL_PURPOSES.includes(purpose)) {
+        return res.status(400).json({ error: "valid email and purpose are required" });
+      }
+      // Recovery links only go to existing accounts; response is identical either way.
+      const token =
+        purpose === "recovery" && !(await db.getAccountByEmail(email)) ? null : await sendEmailLink(email, purpose);
+      res.status(202).json({ ok: true, ...(echoEmailToken && token ? { token } : {}) });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  // Signup: the email link creates the account and an enrollment session
+  // (elevated, so the first passkey can be registered). Recovery codes are
+  // shown exactly once.
+  app.post("/api/auth/email/verify", authLimiter, async (req, res) => {
+    try {
+      const email = await consumeEmailLink(String(req.body?.token ?? ""), "signup");
+      if (!email) return res.status(400).json({ error: "Invalid or expired link" });
+      const account = await db.findOrCreateAccountByEmail(email);
+      if (!account.created && (await db.listPasskeys(account.id)).length > 0) {
+        // Existing accounts with passkeys must sign in with a passkey or use recovery.
+        return res.status(409).json({ error: "Account already has passkeys; sign in or use recovery" });
+      }
+      await startSession(req, res, account.id, "email", { elevated: true });
+      const recovery_codes = account.created ? await issueRecoveryCodes(account.id) : undefined;
+      const claimed = await db.claimApiKeysByEmail(account.id, email);
+      res.json({ account: await accountView(account.id), recovery_codes, claimed_api_keys: claimed });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  // One-time migration for existing key holders: verified email → keys linked.
+  app.post("/api/auth/claim", authLimiter, requireSession, async (req, res) => {
+    try {
+      const email = await consumeEmailLink(String(req.body?.token ?? ""), "claim");
+      const account = await db.getAccount(req.session.account_id);
+      if (!email || email !== account.email) return res.status(400).json({ error: "Invalid or expired link" });
+      res.json({ claimed_api_keys: await db.claimApiKeysByEmail(account.id, email) });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  // Recovery requires BOTH the email link AND an unused recovery code.
+  app.post("/api/auth/recovery", authLimiter, async (req, res) => {
+    try {
+      const email = await consumeEmailLink(String(req.body?.token ?? ""), "recovery");
+      const account = email ? await db.getAccountByEmail(email) : null;
+      const codeOk = account && (await db.consumeRecoveryCode(account.id, hashRecoveryCode(req.body?.code ?? "")));
+      if (!codeOk) return res.status(400).json({ error: "Invalid link or recovery code" });
+      await db.revokeAccountSessions(account.id);
+      await startSession(req, res, account.id, "recovery", { elevated: true });
+      res.json({ account: await accountView(account.id) });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/passkeys/register/options", requireStepUp, async (req, res) => {
+    try {
+      const account = await db.getAccount(req.session.account_id);
+      const options = await registrationOptions(account);
+      await issueChallenge(res, { purpose: "register", challenge: options.challenge, accountId: account.id });
+      res.json(options);
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/passkeys/register/verify", requireStepUp, async (req, res) => {
+    try {
+      const challenge = await takeChallenge(req, res, "register");
+      if (!challenge || challenge.account_id !== req.session.account_id) {
+        return res.status(400).json({ error: "Challenge expired" });
+      }
+      const account = await db.getAccount(req.session.account_id);
+      const ok = await verifyRegistration(account, req.body?.response, challenge.challenge, req.body?.name);
+      if (!ok) return res.status(400).json({ error: "Passkey verification failed" });
+      await rotateSession(req, res);
+      res.status(201).json({ account: await accountView(account.id) });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/passkeys/login/options", authLimiter, async (req, res) => {
+    try {
+      const options = await authenticationOptions();
+      await issueChallenge(res, { purpose: "login", challenge: options.challenge });
+      res.json(options);
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/passkeys/login/verify", authLimiter, async (req, res) => {
+    try {
+      const challenge = await takeChallenge(req, res, "login");
+      if (!challenge) return res.status(400).json({ error: "Challenge expired" });
+      const accountId = await verifyAuthentication(req.body?.response, challenge.challenge);
+      if (!accountId) return res.status(401).json({ error: "Passkey sign-in failed" });
+      await startSession(req, res, accountId, "passkey");
+      res.json({ account: await accountView(accountId) });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  // Step-up re-authentication with a passkey of the signed-in account.
+  app.post("/api/auth/step-up/options", requireSession, async (req, res) => {
+    try {
+      const options = await authenticationOptions(req.session.account_id);
+      await issueChallenge(res, { purpose: "step_up", challenge: options.challenge, accountId: req.session.account_id });
+      res.json(options);
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/step-up/verify", requireSession, async (req, res) => {
+    try {
+      const challenge = await takeChallenge(req, res, "step_up");
+      if (!challenge || challenge.account_id !== req.session.account_id) {
+        return res.status(400).json({ error: "Challenge expired" });
+      }
+      const accountId = await verifyAuthentication(req.body?.response, challenge.challenge, req.session.account_id);
+      if (!accountId) return res.status(401).json({ error: "Re-authentication failed" });
+      await rotateSession(req, res, { elevated: true });
+      res.json({ elevated: true });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.get("/api/auth/me", requireSession, async (req, res) => {
+    try {
+      res.json({
+        account: await accountView(req.session.account_id),
+        session: { auth_method: req.session.auth_method, elevated: isElevated(req.session), expires_at: req.session.expires_at },
+        api_keys: await db.listAccountApiKeys(req.session.account_id),
+      });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.delete("/api/auth/passkeys/:id", requireStepUp, async (req, res) => {
+    try {
+      const ok = await db.deletePasskey(req.session.account_id, req.params.id);
+      res.status(ok ? 204 : 404).end();
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/recovery-codes", requireStepUp, async (req, res) => {
+    try {
+      res.json({ recovery_codes: await issueRecoveryCodes(req.session.account_id) });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  // Account-owned API keys; admin-scoped keys require a step-up.
+  app.post("/api/auth/api-keys", requireSession, async (req, res) => {
+    try {
+      const { name, tier, scopes, expires_at } = req.body ?? {};
+      const wantsAdmin = Array.isArray(scopes) && scopes.some((s) => String(s).startsWith("admin:"));
+      if (wantsAdmin && !isElevated(req.session)) {
+        return res.status(403).json({ error: "Re-authentication required", step_up: true });
+      }
+      const account = await db.getAccount(req.session.account_id);
+      const result = await createKey(
+        { name, tier, scopes, expires_at, email: account.email, verified: true },
+        { allowAdmin: wantsAdmin },
+      );
+      await db.assignApiKeyAccount(result.record.id, account.id);
+      res.status(201).json(result);
+    } catch (e) {
+      res.status(/required|must be|scope/i.test(e.message) ? 400 : 500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/auth/logout", async (req, res) => {
+    try {
+      await endSession(req, res);
+      res.status(204).end();
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  // SEP-10: link a wallet (stepped-up session) or sign in with a linked wallet.
+  app.get("/api/auth/stellar/challenge", authLimiter, async (req, res) => {
+    try {
+      if (!sep10Enabled()) return res.status(404).json({ error: "SEP-10 sign-in is not enabled" });
+      const account = String(req.query.account ?? "");
+      if (!/^G[A-Z2-7]{55}$/.test(account)) return res.status(400).json({ error: "account must be a G... address" });
+      const transaction = buildSep10Challenge(account);
+      await issueChallenge(res, { purpose: "stellar", challenge: transaction, accountId: req.session?.account_id ?? null });
+      res.json({ transaction });
+    } catch (e) {
+      authError(res, e);
+    }
+  });
+
+  app.post("/api/auth/stellar/verify", authLimiter, async (req, res) => {
+    try {
+      const challenge = await takeChallenge(req, res, "stellar");
+      if (!challenge) return res.status(400).json({ error: "Challenge expired" });
+      const address = verifySep10Challenge(String(req.body?.transaction ?? ""), challenge.challenge);
+      if (req.session) {
+        if (!isElevated(req.session)) return res.status(403).json({ error: "Re-authentication required", step_up: true });
+        await db.linkStellarAddress(req.session.account_id, address);
+        return res.json({ linked: address });
+      }
+      const account = await db.getAccountByStellarAddress(address);
+      if (!account) return res.status(404).json({ error: "No account is linked to this wallet" });
+      await startSession(req, res, account.id, "stellar");
+      res.json({ account: await accountView(account.id) });
+    } catch (e) {
+      res.status(e.status ?? 400).json({ error: e.message });
+    }
+  });
 
   // ── API Documentation ────────────────────────────────────────────────────────
   const openApiPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../docs/api/openapi.yaml");
@@ -1815,6 +2091,17 @@ export function createApi({ logDestination, dbOverride } = {}) {
       try {
         const meta = await db.getContractMeta(req.params.id);
         if (!meta) return res.status(404).json({ error: "Not found" });
+        // Held/hidden/rejected registrations keep their on-chain data but not
+        // their curated metadata (#934).
+        if (HIDDEN_STATUSES.includes(meta.moderation_status)) {
+          return res.json({
+            id: meta.id,
+            moderation_status: meta.moderation_status,
+            name: null,
+            description: null,
+            functions: [],
+          });
+        }
 
         const sourceFiles = Array.isArray(meta.source_files)
           ? meta.source_files
@@ -1829,6 +2116,33 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
     },
   );
+
+  // POST /api/contracts/:id/reports — "Report this contract" (#934)
+  app.post("/api/contracts/:id/reports", writeLimiter, async (req, res) => {
+    try {
+      const reporter = req.rateContext?.keyId ? String(req.rateContext.keyId) : `ip:${req.ip}`;
+      const result = await reportContract(req.params.id, {
+        reporter,
+        reason: String(req.body?.reason ?? ""),
+        details: req.body?.details ? String(req.body.details) : null,
+      });
+      res.status(201).json(result);
+    } catch (e) {
+      res.status(e.status ?? 500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/contracts/:id/appeals — submitter appeals a moderation decision (#934)
+  app.post("/api/contracts/:id/appeals", writeLimiter, async (req, res) => {
+    try {
+      const submitter = req.rateContext?.keyId ?? null;
+      if (!submitter) return res.status(401).json({ error: "Appeals require the API key used to register" });
+      const appeal = await fileAppeal(req.params.id, { submitter, message: String(req.body?.message ?? "") });
+      res.status(201).json(appeal);
+    } catch (e) {
+      res.status(e.status ?? 500).json({ error: e.message });
+    }
+  });
 
   // GET /api/contracts/:id/build-metadata — WASM build metadata (compiler, SDK, repo link)
   app.get("/api/contracts/:id/build-metadata", async (req, res) => {
@@ -1917,8 +2231,10 @@ export function createApi({ logDestination, dbOverride } = {}) {
       }
 
       // Verify ABI against on-chain spec if enabled
+      let abiMismatches = 0;
       if (process.env.VERIFY_ABI !== "false") {
         const verification = await verifyAbi(id, functions);
+        abiMismatches = (verification.missingFunctions?.length ?? 0) + (verification.argMismatch?.length ?? 0);
 
         if (!verification.valid) {
           return res.status(400).json({
@@ -1942,8 +2258,13 @@ export function createApi({ logDestination, dbOverride } = {}) {
       if (keyId) {
         await db.query("UPDATE contracts SET registered_by_key_id = $1 WHERE id = $2", [keyId, id]).catch(() => {});
       }
+      // Risk scoring (#934): low → published, medium → pending, high → held.
+      const moderation = await evaluateSubmission(id, req.body, {
+        submitter: keyId ?? req.body.registered_by,
+        abiMismatches,
+      });
       await cacheInvalidate(`contracts:single:*:${id}`);
-      res.status(201).json({ ok: true });
+      res.status(201).json({ ok: true, moderation_status: moderation.status });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

@@ -14,6 +14,8 @@ spec:
     metadata:
       labels: {app: {{ $name }}, role: api}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      topologySpreadConstraints: {{- include "se.spread" $name | nindent 8 }}
       containers:
         - name: api
           image: "{{ .Values.image.registry }}/indexer:{{ .Values.image.tag }}"
@@ -23,11 +25,10 @@ spec:
             {{- include "se.dbEnv" . | nindent 12 }}
             - name: INDEXER_ROLE
               value: api
-          readinessProbe:
-            httpGet: {path: /health, port: http}
-          livenessProbe:
-            httpGet: {path: /health, port: http}
-            initialDelaySeconds: 20
+            - name: SHUTDOWN_DRAIN_MS
+              value: {{ .Values.api.drainMs | quote }}
+          resources: {{- toYaml .Values.api.resources | nindent 12 }}
+          {{- include "se.probes" . | nindent 10 }}
 ---
 {{- range $svc := list $name (printf "%s-canary" $name) }}
 apiVersion: v1
