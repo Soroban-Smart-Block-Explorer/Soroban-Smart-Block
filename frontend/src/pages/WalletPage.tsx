@@ -180,6 +180,109 @@ function WalletSummary({ events }: { events: DecodedEvent[] }) {
   );
 }
 
+// ── Portfolio Timeline — activity breakdown across contracts (#916) ──────────
+
+function ProtocolUsageRow({ label, count, total }: { label: string; count: number; total: number }) {
+  const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+      <span style={{ minWidth: 120, color: "var(--muted)", fontSize: 12 }}>{label}</span>
+      <div
+        style={{
+          flex: 1,
+          height: 8,
+          background: "var(--surface)",
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: "var(--accent)",
+            borderRadius: 4,
+          }}
+        />
+      </div>
+      <span style={{ minWidth: 40, textAlign: "right", fontSize: 12 }}>{count}</span>
+    </div>
+  );
+}
+
+function PortfolioTimeline({ address, events }: { address: string; events: DecodedEvent[] }) {
+  if (!address || events.length === 0) return null;
+
+  // Protocol usage breakdown: count events per contract
+  const contractCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const e of events) {
+      if (e.contract_id) {
+        counts[e.contract_id] = (counts[e.contract_id] ?? 0) + 1;
+      }
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  }, [events]);
+
+  // Function type breakdown
+  const fnCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const e of events) {
+      const fn = e.function ?? "unknown";
+      counts[fn] = (counts[fn] ?? 0) + 1;
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  }, [events]);
+
+  const total = events.length;
+  // Large addresses notice
+  const sampled = total > 1_000_000;
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 16 }}>
+        <h3 style={{ fontSize: 14 }}>Portfolio Activity</h3>
+        {sampled && (
+          <span style={{ fontSize: 11, color: "#fbbf24" }}>
+            ⚠ Sampled — &gt;1M events, showing recent activity only
+          </span>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+        {/* Top contracts */}
+        <div>
+          <h4 style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+            TOP CONTRACTS
+          </h4>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {contractCounts.map(([contractId, count]) => (
+              <ProtocolUsageRow
+                key={contractId}
+                label={truncateAddress(contractId)}
+                count={count}
+                total={total}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Top functions */}
+        <div>
+          <h4 style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+            TOP FUNCTIONS
+          </h4>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {fnCounts.map(([fn, count]) => (
+              <ProtocolUsageRow key={fn} label={fn} count={count} total={total} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ────────────────────────────────────────────────────────────────
 
 export default function WalletPage() {
@@ -510,6 +613,9 @@ export default function WalletPage() {
         <WalletBalances address={address} />
         <SmartWalletPanel address={address} />
       </div>
+
+      {/* Portfolio activity timeline (#916) */}
+      <PortfolioTimeline address={address} events={allEvents} />
 
       {/* Events section */}
       <div className="card">

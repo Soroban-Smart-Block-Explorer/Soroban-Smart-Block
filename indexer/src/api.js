@@ -2117,6 +2117,47 @@ export function createApi({ logDestination, dbOverride } = {}) {
     },
   );
 
+  // POST /api/contracts/:id/simulate — Read/Write tab simulation (#913)
+  // Wraps the general /api/simulate endpoint with a contract-scoped URL.
+  app.post("/api/contracts/:id/simulate", writeLimiter, async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      const { function: fn, args = {} } = req.body;
+      if (!fn) return res.status(400).json({ error: "Missing function name" });
+
+      const { rpc: SorobanRpc, Contract, nativeToScVal, TransactionBuilder, Networks, BASE_FEE, Account } = await import("@stellar/stellar-sdk");
+      const rpcUrl = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
+      const networkPassphrase = process.env.NETWORK_PASSPHRASE || Networks.TESTNET;
+      const server = new SorobanRpc.Server(rpcUrl, { allowHttp: true });
+
+      const contract = new Contract(contractId);
+      // Convert named-args object to positional ScVal array
+      const scArgs = Object.values(args).map((a) => nativeToScVal(a));
+      const op = contract.call(fn, ...scArgs);
+
+      const dummySource = process.env.SIMULATE_SOURCE || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+      const account = new Account(dummySource, "0");
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      const sim = await server.simulateTransaction(tx);
+      if (SorobanRpc.Api.isSimulationError(sim)) {
+        return res.json({ error: sim.error });
+      }
+
+      const { scValToNative } = await import("@stellar/stellar-sdk");
+      const retval = sim.result?.retval;
+      res.json({
+        result: retval ? scValToNative(retval) : null,
+        fee_stroops: sim.minResourceFee ?? null,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // POST /api/contracts/:id/reports — "Report this contract" (#934)
   app.post("/api/contracts/:id/reports", writeLimiter, async (req, res) => {
     try {
@@ -2695,6 +2736,18 @@ export function createApi({ logDestination, dbOverride } = {}) {
       res.json(serializeAsset(asset));
     } catch (e) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:id/metadata — SEP-41 token metadata (#915)
+  // Returns name, symbol, decimals fetched via on-chain simulation.
+  app.get("/api/tokens/:id/metadata", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      const meta = await fetchTokenMetadata(contractId);
+      res.json({ contract_id: contractId, ...meta });
+    } catch (e) {
+      res.status(502).json({ error: e.message });
     }
   });
 
