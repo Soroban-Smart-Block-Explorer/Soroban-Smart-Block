@@ -297,3 +297,5 @@ PR checklist. Please open an issue first for large changes.
 ## License
 
 [MIT](LICENSE)
+
+<!-- Updated documentation references -->
