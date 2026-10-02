@@ -35,6 +35,7 @@ const Status = lazy(() => import("./pages/Status"));
 const AdminJobsPage = lazy(() => import("./pages/AdminJobsPage"));
 const AdminModerationPage = lazy(() => import("./pages/AdminModerationPage"));
 const NetworkDashboard = lazy(() => import("./pages/NetworkDashboard"));
+const TokenPage = lazy(() => import("./pages/TokenPage"));
 
 function Fallback() {
   const { t } = useTranslation();
@@ -82,6 +83,7 @@ export default function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/status" element={<Status />} />
             <Route path="/network" element={<NetworkDashboard />} />
+            <Route path="/token/:id" element={<TokenPage />} />
             <Route path="/filter-builder" element={<FilterBuilder />} />
           </Routes>
         </Suspense>

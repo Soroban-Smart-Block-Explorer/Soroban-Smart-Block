@@ -34,8 +34,9 @@ import InvocationFrequencyChart, { type StatsRange } from "../components/Invocat
 import StorageTierStackedBar from "../components/StorageTierStackedBar";
 import OfflineContractActions from "../components/OfflineContractActions";
 import { CodeVerificationBadge, CodeVerificationPanel } from "../components/CodeVerification";
+import ContractReadWrite from "../components/contract/ContractReadWrite";
 
-type Tab = "overview" | "source" | "simulate" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "storage" | "abi-history";
+type Tab = "overview" | "source" | "simulate" | "read-write" | "flow" | "roles" | "networks" | "graph" | "call-graph" | "state-diff" | "storage" | "abi-history";
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
@@ -241,6 +242,7 @@ export default function ContractPage() {
     { key: "overview", label: "Overview" },
     { key: "source", label: "Source Code" },
     { key: "simulate", label: "Simulate" },
+    { key: "read-write", label: "Read / Write" },
     { key: "flow", label: "Invocation Flow" },
     { key: "roles", label: "Privileged Roles" },
     { key: "networks", label: "Networks" },
@@ -735,6 +737,20 @@ export default function ContractPage() {
             </p>
           )}
           {selectedFn && <SimulateButton contractId={id} fnName={selectedFn} />}
+        </div>
+      )}
+
+      {/* Tab: Read / Write — spec-driven typed forms for every ABI function (#913) */}
+      {tab === "read-write" && (
+        <div className="card">
+          {functions.length === 0 ? (
+            <p style={{ color: "var(--muted)", fontSize: 13 }}>
+              No ABI functions are registered for this contract. Register the ABI
+              to enable the Read / Write interface.
+            </p>
+          ) : (
+            <ContractReadWrite contractId={id} functions={functions} />
+          )}
         </div>
       )}
 
