@@ -102,8 +102,11 @@ describe('Network Query Building', () => {
 
   it('should escape single quotes in network names', () => {
     // Edge case: network name with quotes (though unlikely in practice)
+    // networkScope doubles single quotes per SQL escaping rules, so the
+    // malicious substring remains visible but is safely escaped.
     const malicious = "testnet'; DROP TABLE events; --";
     const scope = networkScope(malicious);
-    expect(scope).not.toContain("'; DROP TABLE events; --");
+    expect(scope).toBe("network = 'testnet''; DROP TABLE events; --'");
+    expect(scope).toContain("''; DROP TABLE events; --");
   });
 });
